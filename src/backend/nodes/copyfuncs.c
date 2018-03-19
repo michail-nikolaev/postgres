@@ -489,6 +489,7 @@ _copyIndexScan(const IndexScan *from)
 	COPY_NODE_FIELD(indexorderbyorig);
 	COPY_NODE_FIELD(indexorderbyops);
 	COPY_SCALAR_FIELD(indexorderdir);
+	COPY_SCALAR_FIELD(indexonlyoffset);
 
 	return newnode;
 }

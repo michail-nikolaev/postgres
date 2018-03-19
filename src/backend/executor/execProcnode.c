@@ -898,7 +898,7 @@ ExecSetTupleBound(int64 tuples_needed, int64 tuples_to_skip, PlanState *child_no
 		IndexScanState* isState = (IndexScanState *) child_node;
 		
 		/* Simple case of IndexScan could use index-only optimisation while skipping offset. */
-		if (!isState->ss.ps.qual && !isState->ss.ps.ps_ProjInfo && isState->iss_NumOrderByKeys == 0)
+		if (isState->iss_SkipIndexOnly)
 			isState->iss_SkipTuples = isState->iss_SkipTuplesRemaining = tuples_to_skip;
 	}
 

@@ -130,7 +130,7 @@ static PathClauseUsage *classify_index_clause_usage(Path *path,
 static Relids get_bitmap_tree_required_outer(Path *bitmapqual);
 static void find_indexpath_quals(Path *bitmapqual, List **quals, List **preds);
 static int	find_list_position(Node *node, List **nodelist);
-static bool check_index_only(RelOptInfo *rel, IndexOptInfo *index);
+static bool check_index_only(RelOptInfo *rel, IndexOptInfo *index, bool offset);
 static double get_loop_count(PlannerInfo *root, Index cur_relid, Relids outer_relids);
 static double adjust_rowcount_for_semijoins(PlannerInfo *root,
 							  Index cur_relid,
@@ -877,6 +877,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	bool		pathkeys_possibly_useful;
 	bool		index_is_ordered;
 	bool		index_only_scan;
+	bool		index_only_offset;
 	int			indexcol;
 
 	/*
@@ -1024,7 +1025,10 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	 * index data retrieval anyway.
 	 */
 	index_only_scan = (scantype != ST_BITMAPSCAN &&
-					   check_index_only(rel, index));
+					   check_index_only(rel, index, false));
+	index_only_offset = (scantype != ST_BITMAPSCAN &&
+					     !index_only_scan &&
+					     check_index_only(rel, index, true));
 
 	/*
 	 * 4. Generate an indexscan path if there are relevant restriction clauses
@@ -1045,6 +1049,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  ForwardScanDirection :
 								  NoMovementScanDirection,
 								  index_only_scan,
+								  index_only_offset,
 								  outer_relids,
 								  loop_count,
 								  false);
@@ -1068,6 +1073,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  ForwardScanDirection :
 									  NoMovementScanDirection,
 									  index_only_scan,
+									  false,
 									  outer_relids,
 									  loop_count,
 									  true);
@@ -1102,6 +1108,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  useful_pathkeys,
 									  BackwardScanDirection,
 									  index_only_scan,
+									  index_only_offset,
 									  outer_relids,
 									  loop_count,
 									  false);
@@ -1120,6 +1127,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 										  useful_pathkeys,
 										  BackwardScanDirection,
 										  index_only_scan,
+										  false,
 										  outer_relids,
 										  loop_count,
 										  true);
@@ -1861,7 +1869,7 @@ find_list_position(Node *node, List **nodelist)
  *		Determine whether an index-only scan is possible for this index.
  */
 static bool
-check_index_only(RelOptInfo *rel, IndexOptInfo *index)
+check_index_only(RelOptInfo *rel, IndexOptInfo *index, bool offset)
 {
 	bool		result;
 	Bitmapset  *attrs_used = NULL;
@@ -1884,7 +1892,8 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 	 * Note: we must look at rel's targetlist, not the attr_needed data,
 	 * because attr_needed isn't computed for inheritance child rels.
 	 */
-	pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &attrs_used);
+	if (!offset)
+		pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &attrs_used);
 
 	/*
 	 * Add all the attributes used by restriction clauses; but consider only

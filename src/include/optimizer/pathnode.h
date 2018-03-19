@@ -47,6 +47,7 @@ extern IndexPath *create_index_path(PlannerInfo *root,
 				  List *pathkeys,
 				  ScanDirection indexscandir,
 				  bool indexonly,
+				  bool indexonlyoffset,
 				  Relids required_outer,
 				  double loop_count,
 				  bool partial_path);

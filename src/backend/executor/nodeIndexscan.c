@@ -62,6 +62,7 @@ static TupleTableSlot *IndexNext(IndexScanState *node);
 static TupleTableSlot *IndexNextWithReorder(IndexScanState *node);
 static void EvalOrderByExpressions(IndexScanState *node, ExprContext *econtext);
 static bool IndexRecheck(IndexScanState *node, TupleTableSlot *slot);
+static bool IndexProjPreprocess(IndexScanState *node, TupleTableSlot *slot);
 static int cmp_orderbyvals(const Datum *adist, const bool *anulls,
 				const Datum *bdist, const bool *bnulls,
 				IndexScanState *node);
@@ -70,6 +71,37 @@ static int reorderqueue_cmp(const pairingheap_node *a,
 static void reorderqueue_push(IndexScanState *node, HeapTuple tuple,
 				  Datum *orderbyvals, bool *orderbynulls);
 static HeapTuple reorderqueue_pop(IndexScanState *node);
+
+/*
+* StoreIndexTuple
+*		Fill the slot with data from the index tuple.
+*
+* At some point this might be generally-useful functionality, but
+* right now we don't need it elsewhere.
+*/
+static void
+StoreIndexTuple(TupleTableSlot *slot, IndexTuple itup, TupleDesc itupdesc)
+{
+	int			nindexatts = itupdesc->natts;
+	Datum	   *values = slot->tts_values;
+	bool	   *isnull = slot->tts_isnull;
+	int			i;
+
+	/*
+	* Note: we must use the tupdesc supplied by the AM in index_getattr, not
+	* the slot's tupdesc, in case the latter has different datatypes (this
+	* happens for btree name_ops in particular).  They'd better have the same
+	* number of columns though, as well as being datatype-compatible which is
+	* something we can't so easily check.
+	*/
+	Assert(slot->tts_tupleDescriptor->natts == nindexatts);
+
+	ExecClearTuple(slot);
+	for (i = 0; i < nindexatts; i++)
+		values[i] = index_getattr(itup, i + 1, itupdesc, &isnull[i]);
+	ExecStoreVirtualTuple(slot);
+}
+
 
 
 /* ----------------------------------------------------------------
@@ -121,13 +153,12 @@ IndexNext(IndexScanState *node)
 
 		node->iss_ScanDesc = scandesc;
 
-		if (node->iss_SkipTuples != 0)
+		if (node->iss_SkipIndexOnly && node->iss_SkipTuples != 0)
 		{
-			/* NodeLimit optimisation is allowed only for simple scans. See ExecSetTupleBound for details. */
-			Assert((!node->ss.ps.qual && !node->ss.ps.ps_ProjInfo && node->iss_NumOrderByKeys == 0));
 
 			/* Set it up for index-only scan if we are going to use it for skipped tupples. */
 			node->iss_VMBuffer = InvalidBuffer;
+			node->iss_ScanDesc->xs_want_itup = (node->ss.ps.qual != NULL);
 		}
 
 		/*
@@ -145,13 +176,13 @@ IndexNext(IndexScanState *node)
 	* in case of simple scan. Refer to nodeIndexonlyscan.h for comments
 	* about memory ordering and concurrency.
 	*/
-	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
+	while (index_getnext_fetch(&tid, scandesc, direction))
 	{
 		CHECK_FOR_INTERRUPTS();
 
 		/*
 		* Fetch the next tuple. Use visibility map if possible.
-		* xs_want_itup is set to false because we do not need any index data.
+		* xs_want_itup is set to false if we do not need any index data.
 		*/
 		if (node->iss_SkipTuplesRemaining == 0 || /* tuples are not skipped by parent node */
 			scandesc->xs_recheck || /* or heap data is required */
@@ -209,29 +240,23 @@ IndexNext(IndexScanState *node)
 				ItemPointerGetBlockNumber(tid),
 				estate->es_snapshot);
 			/*
-			* We know there is a tuple in index passing all checks.
-			* Parent nodeLimit will skip it anyway - so just prepare fake non-empty slot.
+			* Fill the scan tuple slot with data from the index.  This might be
+			* provided in either HeapTuple or IndexTuple format.  Conceivably an
+			* index AM might fill both fields, in which case we prefer the heap
+			* format, since it's probably a bit cheaper to fill a slot from.
 			*/
-			ExecClearTuple(slot);
-			slot->tts_isempty = false;
-			slot->tts_nvalid = 0;
-		}
-
-		/*
-		* Decrement counter for remaining skipped tuples.
-		* If last tuple skipped - release the buffer.
-		*/
-		if (node->iss_SkipTuplesRemaining > 0)
-			node->iss_SkipTuplesRemaining--;
-
-		if (node->iss_SkipTuplesRemaining == 0 && node->iss_VMBuffer != InvalidBuffer)
-		{
-			/*
-			* If we had to return one more tuple then regular index scan will used.
-			* So, we can unpin VM buffer.
-			*/
-			ReleaseBuffer(node->iss_VMBuffer);
-			node->iss_VMBuffer = InvalidBuffer;
+			if (scandesc->xs_hitup)
+				ExecStoreTuple(scandesc->xs_hitup, slot, InvalidBuffer, false);
+			else if (scandesc->xs_itup)
+				StoreIndexTuple(slot, scandesc->xs_itup, scandesc->xs_itupdesc);
+			else
+			{
+				/*
+				* We know there is a tuple in index passing all checks.
+				* Parent nodeLimit will skip it anyway - so just prepare non-empty slot.
+				*/
+				ExecStoreAllNullTuple(slot);
+			}
 		}
 		return slot;
 	}
@@ -494,6 +519,29 @@ IndexRecheck(IndexScanState *node, TupleTableSlot *slot)
 	return ExecQualAndReset(node->indexqualorig, econtext);
 }
 
+static bool
+IndexProjPreprocess(IndexScanState *node, TupleTableSlot *slot)
+{
+	bool result = (node->iss_SkipTuplesRemaining == 0);
+	Assert(node->iss_SkipTuples);
+	/*
+	* Decrement counter for remaining skipped tuples.
+	* If last tuple skipped - release the buffer.
+	*/
+	if (node->iss_SkipTuplesRemaining > 0)
+		node->iss_SkipTuplesRemaining--;
+
+	if (node->iss_SkipTuplesRemaining == 0 && node->iss_VMBuffer != InvalidBuffer)
+	{
+		/*
+		* If we had to return one more tuple then regular index scan will used.
+		* So, we can unpin VM buffer.
+		*/
+		ReleaseBuffer(node->iss_VMBuffer);
+		node->iss_VMBuffer = InvalidBuffer;
+	}
+	return result;
+}
 
 /*
  * Compare ORDER BY expression values.
@@ -626,10 +674,14 @@ ExecIndexScan(PlanState *pstate)
 		return ExecScan(&node->ss,
 						(ExecScanAccessMtd) IndexNextWithReorder,
 						(ExecScanRecheckMtd) IndexRecheck);
-	else
+	else if (node->iss_SkipTuples == 0)
 		return ExecScan(&node->ss,
 						(ExecScanAccessMtd) IndexNext,
 						(ExecScanRecheckMtd) IndexRecheck);
+	else return ExecScanWithProjPreprocess(&node->ss,
+		(ExecScanAccessMtd) IndexNext,
+		(ExecScanRecheckMtd) IndexRecheck,
+		(ExecScanProjPreprocessMtd) IndexProjPreprocess);
 }
 
 /* ----------------------------------------------------------------
@@ -1013,6 +1065,7 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
 	indexstate->ss.ps.ExecProcNode = ExecIndexScan;
+	indexstate->iss_SkipTuples = indexstate->iss_SkipTuplesRemaining = 0;
 
 	/*
 	 * Miscellaneous initialization
@@ -1167,6 +1220,11 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 		/* and initialize the reorder queue */
 		indexstate->iss_ReorderQueue = pairingheap_allocate(reorderqueue_cmp,
 															indexstate);
+		indexstate->iss_SkipIndexOnly = false;
+	}
+	else
+	{
+		indexstate->iss_SkipIndexOnly = node->indexonlyoffset;
 	}
 
 	/*

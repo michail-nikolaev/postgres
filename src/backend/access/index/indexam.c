@@ -641,6 +641,27 @@ index_fetch_heap(IndexScanDesc scan)
 	return NULL;
 }
 
+bool index_getnext_fetch(ItemPointer *tid, IndexScanDesc scan, ScanDirection direction)
+{
+	if (scan->xs_continue_hot)
+	{
+		/*
+		* We are resuming scan of a HOT chain after having returned an
+		* earlier member.  Must still hold pin on current heap page.
+		*/
+		Assert(BufferIsValid(scan->xs_cbuf));
+		Assert(ItemPointerGetBlockNumber(&scan->xs_ctup.t_self) ==
+				BufferGetBlockNumber(scan->xs_cbuf));
+		return true;
+	}
+	else
+	{
+		/* Time to fetch the next TID from the index */
+		*tid = index_getnext_tid(scan, direction);
+		return *tid != NULL;
+	}
+}
+
 /* ----------------
  *		index_getnext - get the next heap tuple from a scan
  *
@@ -660,29 +681,13 @@ HeapTuple
 index_getnext(IndexScanDesc scan, ScanDirection direction)
 {
 	HeapTuple	heapTuple;
-	ItemPointer tid;
+	ItemPointer tid = NULL;
 
 	for (;;)
 	{
-		if (scan->xs_continue_hot)
-		{
-			/*
-			 * We are resuming scan of a HOT chain after having returned an
-			 * earlier member.  Must still hold pin on current heap page.
-			 */
-			Assert(BufferIsValid(scan->xs_cbuf));
-			Assert(ItemPointerGetBlockNumber(&scan->xs_ctup.t_self) ==
-				   BufferGetBlockNumber(scan->xs_cbuf));
-		}
-		else
-		{
-			/* Time to fetch the next TID from the index */
-			tid = index_getnext_tid(scan, direction);
-
-			/* If we're out of index entries, we're done */
-			if (tid == NULL)
-				break;
-		}
+		/* If we're out of index entries, we're done */
+		if (!index_getnext_fetch(&tid, scan, direction))
+			break;
 
 		/*
 		 * Fetch the next (or only) visible heap tuple for this index entry.

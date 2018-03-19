@@ -1131,6 +1131,8 @@ typedef struct IndexPath
 	ScanDirection indexscandir;
 	Cost		indextotalcost;
 	Selectivity indexselectivity;
+	bool		indexonlyoffset;
+	Cost		offsettotalcost;
 } IndexPath;
 
 /*

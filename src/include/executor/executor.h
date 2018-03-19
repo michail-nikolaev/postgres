@@ -421,9 +421,12 @@ extern Datum ExecMakeFunctionResultSet(SetExprState *fcache,
  */
 typedef TupleTableSlot *(*ExecScanAccessMtd) (ScanState *node);
 typedef bool (*ExecScanRecheckMtd) (ScanState *node, TupleTableSlot *slot);
+typedef bool (*ExecScanProjPreprocessMtd) (ScanState *node, TupleTableSlot *slot);
 
 extern TupleTableSlot *ExecScan(ScanState *node, ExecScanAccessMtd accessMtd,
 		 ExecScanRecheckMtd recheckMtd);
+extern TupleTableSlot *ExecScanWithProjPreprocess(ScanState *node, ExecScanAccessMtd accessMtd,
+		 ExecScanRecheckMtd recheckMtd, ExecScanProjPreprocessMtd postprocessMtd);
 extern void ExecAssignScanProjectionInfo(ScanState *node);
 extern void ExecAssignScanProjectionInfoWithVarno(ScanState *node, Index varno);
 extern void ExecScanReScan(ScanState *node);
