@@ -95,32 +95,28 @@ ExecScanFetch(ScanState *node,
 	return (*accessMtd) (node);
 }
 
+static pg_attribute_always_inline bool
+ExecScanSkip(ExecScanSkipMtd skipMtd, ScanState *node)
+{
+	return !skipMtd || skipMtd(node);
+}
+
 /* ----------------------------------------------------------------
- *		ExecScan
- *
- *		Scans the relation using the 'access method' indicated and
- *		returns the next qualifying tuple in the direction specified
- *		in the global variable ExecDirection.
- *		The access method returns the next tuple and ExecScan() is
- *		responsible for checking the tuple returned against the qual-clause.
- *
- *		A 'recheck method' must also be provided that can check an
- *		arbitrary tuple of the relation against any qual conditions
- *		that are implemented internal to the access method.
- *
- *		Conditions:
- *		  -- the "cursor" maintained by the AMI is positioned at the tuple
- *			 returned previously.
- *
- *		Initial States:
- *		  -- the relation indicated is opened for scanning so that the
- *			 "cursor" is positioned before the first qualifying tuple.
- * ----------------------------------------------------------------
- */
+*		ExecScanWithSkipImpl
+*
+*		It is marked
+*		with an always - inline attribute so that ExecScan() and
+*		ExecScanWithSkip() can inline it. Compilers that respect the
+*		attribute should create versions specialized for skipMtd == NULL and
+*		skipMtd != NULL with unnecessary branches removed.
+* ----------------------------------------------------------------
+*/
+static pg_attribute_always_inline
 TupleTableSlot *
-ExecScan(ScanState *node,
-		 ExecScanAccessMtd accessMtd,	/* function returning a tuple */
-		 ExecScanRecheckMtd recheckMtd)
+ExecScanWithSkipImpl(ScanState *node,
+	ExecScanAccessMtd accessMtd,	/* function returning a tuple */
+	ExecScanRecheckMtd recheckMtd,
+	ExecScanSkipMtd skipMtd)
 {
 	ExprContext *econtext;
 	ExprState  *qual;
@@ -141,8 +137,11 @@ ExecScan(ScanState *node,
 	 */
 	if (!qual && !projInfo)
 	{
+		TupleTableSlot *result;
 		ResetExprContext(econtext);
-		return ExecScanFetch(node, accessMtd, recheckMtd);
+		result = ExecScanFetch(node, accessMtd, recheckMtd);
+		ExecScanSkip(skipMtd, node);
+		return result;
 	}
 
 	/*
@@ -198,13 +197,17 @@ ExecScan(ScanState *node,
 				 * Form a projection tuple, store it in the result tuple slot
 				 * and return it.
 				 */
-				return ExecProject(projInfo);
+				if (ExecScanSkip(skipMtd, node))
+					return ExecProject(projInfo);
+				else
+					return ExecStoreAllNullTuple(projInfo->pi_state.resultslot);
 			}
 			else
 			{
 				/*
 				 * Here, we aren't projecting, so just return scan tuple.
 				 */
+				ExecScanSkip(skipMtd, node);
 				return slot;
 			}
 		}
@@ -216,6 +219,45 @@ ExecScan(ScanState *node,
 		 */
 		ResetExprContext(econtext);
 	}
+}
+
+/* ----------------------------------------------------------------
+ *		ExecScan
+ *
+ *		Scans the relation using the 'access method' indicated and
+ *		returns the next qualifying tuple in the direction specified
+ *		in the global variable ExecDirection.
+ *		The access method returns the next tuple and ExecScan() is
+ *		responsible for checking the tuple returned against the qual-clause.
+ *
+ *		A 'recheck method' must also be provided that can check an
+ *		arbitrary tuple of the relation against any qual conditions
+ *		that are implemented internal to the access method.
+ *
+ *		Conditions:
+ *		  -- the "cursor" maintained by the AMI is positioned at the tuple
+ *			 returned previously.
+ *
+ *		Initial States:
+ *		  -- the relation indicated is opened for scanning so that the
+ *			 "cursor" is positioned before the first qualifying tuple.
+ * ----------------------------------------------------------------
+ */
+TupleTableSlot *
+ExecScan(ScanState *node,
+		 ExecScanAccessMtd accessMtd,	/* function returning a tuple */
+		 ExecScanRecheckMtd recheckMtd)
+{
+	return ExecScanWithSkipImpl(node, accessMtd, recheckMtd, NULL);
+}
+
+TupleTableSlot *
+ExecScanWithSkip(ScanState *node,
+	ExecScanAccessMtd accessMtd,	/* function returning a tuple */
+	ExecScanRecheckMtd recheckMtd,
+	ExecScanSkipMtd skipMtd)
+{
+	return ExecScanWithSkipImpl(node, accessMtd, recheckMtd, skipMtd);
 }
 
 /*

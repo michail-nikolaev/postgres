@@ -744,6 +744,14 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	path->path.startup_cost = startup_cost;
 	path->path.total_cost = startup_cost + run_cost;
+	if (!path->indexonlyoffset)
+		path->offsettotalcost = path->path.total_cost;
+	else
+	{
+		Cost max_IO_cost_offset = (1.0 - baserel->allvisfrac) * max_IO_cost;
+		Cost min_IO_cost_offset = (1.0 - baserel->allvisfrac) * min_IO_cost;
+		path->offsettotalcost = cpu_run_cost + startup_cost + (max_IO_cost_offset + csquared * (min_IO_cost_offset - max_IO_cost_offset));
+	}
 }
 
 /*

@@ -160,6 +160,7 @@ extern IndexScanDesc index_beginscan_parallel(Relation heaprel,
 extern ItemPointer index_getnext_tid(IndexScanDesc scan,
 				  ScanDirection direction);
 extern HeapTuple index_fetch_heap(IndexScanDesc scan);
+extern bool index_getnext_fetch(ItemPointer *tid, IndexScanDesc scan, ScanDirection direction);
 extern HeapTuple index_getnext(IndexScanDesc scan, ScanDirection direction);
 extern int64 index_getbitmap(IndexScanDesc scan, TIDBitmap *bitmap);
 

@@ -1024,6 +1024,7 @@ create_index_path(PlannerInfo *root,
 				  List *pathkeys,
 				  ScanDirection indexscandir,
 				  bool indexonly,
+				  bool indexonlyoffset,
 				  Relids required_outer,
 				  double loop_count,
 				  bool partial_path)
@@ -1055,6 +1056,7 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexorderbys = indexorderbys;
 	pathnode->indexorderbycols = indexorderbycols;
 	pathnode->indexscandir = indexscandir;
+	pathnode->indexonlyoffset = indexonlyoffset;
 
 	cost_index(pathnode, root, loop_count, partial_path);
 
@@ -3437,9 +3439,18 @@ create_limit_path(PlannerInfo *root, RelOptInfo *rel,
 		if (offset_rows > pathnode->path.rows)
 			offset_rows = pathnode->path.rows;
 		if (subpath->rows > 0)
+		{
+			Cost offsetCost = subpath->total_cost - subpath->startup_cost;
+			if (IsA(subpath, IndexPath))
+			{
+				IndexPath* isState = (IndexPath *)subpath;
+				if (isState->indexonlyoffset)
+					offsetCost = isState->offsettotalcost - subpath->startup_cost;
+			}
+
 			pathnode->path.startup_cost +=
-				(subpath->total_cost - subpath->startup_cost)
-				* offset_rows / subpath->rows;
+				offsetCost * offset_rows / subpath->rows;
+		}
 		pathnode->path.rows -= offset_rows;
 		if (pathnode->path.rows < 1)
 			pathnode->path.rows = 1;

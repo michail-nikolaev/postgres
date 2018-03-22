@@ -220,7 +220,7 @@ extern void ExecSetExecProcNode(PlanState *node, ExecProcNodeMtd function);
 extern Node *MultiExecProcNode(PlanState *node);
 extern void ExecEndNode(PlanState *node);
 extern bool ExecShutdownNode(PlanState *node);
-extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
+extern void ExecSetTupleBound(int64 tuples_needed, int64 tuples_to_skip, PlanState *child_node);
 
 
 /* ----------------------------------------------------------------
@@ -396,6 +396,8 @@ ExecQualAndReset(ExprState *state, ExprContext *econtext)
 }
 #endif
 
+
+
 extern bool ExecCheck(ExprState *state, ExprContext *context);
 
 /*
@@ -421,9 +423,12 @@ extern Datum ExecMakeFunctionResultSet(SetExprState *fcache,
  */
 typedef TupleTableSlot *(*ExecScanAccessMtd) (ScanState *node);
 typedef bool (*ExecScanRecheckMtd) (ScanState *node, TupleTableSlot *slot);
+typedef bool (*ExecScanSkipMtd) (ScanState *node);
 
 extern TupleTableSlot *ExecScan(ScanState *node, ExecScanAccessMtd accessMtd,
 		 ExecScanRecheckMtd recheckMtd);
+extern TupleTableSlot *ExecScanWithSkip(ScanState *node, ExecScanAccessMtd accessMtd,
+		 ExecScanRecheckMtd recheckMtd, ExecScanSkipMtd skipMtd);
 extern void ExecAssignScanProjectionInfo(ScanState *node);
 extern void ExecAssignScanProjectionInfoWithVarno(ScanState *node, Index varno);
 extern void ExecScanReScan(ScanState *node);
