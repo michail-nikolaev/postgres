@@ -478,6 +478,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	IndexOptInfo *index = path->indexinfo;
 	RelOptInfo *baserel = index->rel;
 	bool		indexonly = (path->path.pathtype == T_IndexOnlyScan);
+	bool		indexonlyqpqual = path->indexonly_qpqual;
 	amcostestimate_function amcostestimate;
 	Cost		startup_cost = 0;
 	Cost		run_cost = 0;
@@ -555,11 +556,14 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	/* estimate number of main-table tuples fetched */
 	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
 
-	qpqualsSelectity = clauselist_selectivity(root,
-											qpquals,
-											0,
-											JOIN_INNER,
-											NULL);
+	if (indexonlyqpqual)
+		qpqualsSelectity = clauselist_selectivity(root,
+			qpquals,
+			0,
+			JOIN_INNER,
+			NULL);
+	else
+		qpqualsSelectity = 0.0;
 
 	/* fetch estimated page costs for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
@@ -722,7 +726,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	startup_cost += qpqual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
-	if (indexonlyqpaul)
+	if (indexonlyqpqual)
 		cpu_per_tuple += cpu_index_tuple_cost;
 
 	cpu_run_cost += cpu_per_tuple * tuples_fetched;	
