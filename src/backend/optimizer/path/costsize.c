@@ -485,6 +485,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	Cost		indexStartupCost;
 	Cost		indexTotalCost;
 	Selectivity indexSelectivity;
+	Selectivity qpqualsSelectity;
 	double		indexCorrelation,
 				csquared;
 	double		spc_seq_page_cost,
@@ -554,6 +555,12 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	/* estimate number of main-table tuples fetched */
 	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
 
+	qpqualsSelectity = clauselist_selectivity(root,
+											qpquals,
+											0,
+											JOIN_INNER,
+											NULL);
+
 	/* fetch estimated page costs for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
 							  &spc_random_page_cost,
@@ -602,7 +609,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											root);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		rand_heap_pages = pages_fetched;
 
@@ -626,7 +633,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											root);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		min_IO_cost = (pages_fetched * spc_random_page_cost) / loop_count;
 	}
@@ -642,7 +649,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											root);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		rand_heap_pages = pages_fetched;
 
@@ -653,7 +660,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		pages_fetched = ceil(indexSelectivity * (double) baserel->pages);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		if (pages_fetched > 0)
 		{
@@ -715,8 +722,10 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	startup_cost += qpqual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	if (indexonlyqpaul)
+		cpu_per_tuple += cpu_index_tuple_cost;
 
-	cpu_run_cost += cpu_per_tuple * tuples_fetched;
+	cpu_run_cost += cpu_per_tuple * tuples_fetched;	
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->path.pathtarget->cost.startup;
@@ -740,7 +749,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 }
 
 /*
- * extract_nonindex_conditions
+ * extract_nonindex_conditionsê
  *
  * Given a list of quals to be enforced in an indexscan, extract the ones that
  * will have to be applied as qpquals (ie, the index machinery won't handle

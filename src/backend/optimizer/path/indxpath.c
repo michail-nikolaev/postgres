@@ -1073,7 +1073,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	index_only_scan = (scantype != ST_BITMAPSCAN &&
 					   check_index_only(rel, index, qpquals, false));
 	index_only_scan_qpqual = (!index_only_scan && 
-							 list_length(qpquals) > 0 &&
+							// list_length(qpquals) > 0 &&
 							 list_length(root->rowMarks) == 0 &&
 							 root->parse->commandType == CMD_SELECT &&
 							 scantype != ST_BITMAPSCAN &&
@@ -1098,7 +1098,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  ForwardScanDirection :
 								  NoMovementScanDirection,
 								  index_only_scan,
-								  index_only_scan_qpqual,
+								  false,
 								  outer_relids,
 								  loop_count,
 								  false,
@@ -1107,6 +1107,28 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  indexquals,
 								  indexqualcols);
 		result = lappend(result, ipath);
+		if (index_only_scan_qpqual)
+		{
+			ipath = create_index_path(root, index,
+				index_clauses,
+				clause_columns,
+				orderbyclauses,
+				orderbyclausecols,
+				useful_pathkeys,
+				index_is_ordered ?
+				ForwardScanDirection :
+				NoMovementScanDirection,
+				index_only_scan,
+				index_only_scan_qpqual,
+				outer_relids,
+				loop_count,
+				false,
+				param_info,
+				qpquals,
+				indexquals,
+				indexqualcols);
+			result = lappend(result, ipath);
+		}
 
 		/*
 		 * If appropriate, consider parallel index scan.  We don't allow
@@ -1165,7 +1187,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  useful_pathkeys,
 									  BackwardScanDirection,
 									  index_only_scan,
-									  index_only_scan_qpqual,
+									  false,
 									  outer_relids,
 									  loop_count,
 									  false,
@@ -1174,6 +1196,26 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  indexquals,
 									  indexqualcols);
 			result = lappend(result, ipath);
+			if (index_only_scan_qpqual)
+			{
+				ipath = create_index_path(root, index,
+						index_clauses,
+						clause_columns,
+						NIL,
+						NIL,
+						useful_pathkeys,
+						BackwardScanDirection,
+						index_only_scan,
+						false,
+						outer_relids,
+						loop_count,
+						false,
+						param_info,
+						qpquals,
+						indexquals,
+						indexqualcols);
+				result = lappend(result, ipath);
+			}
 
 			/* If appropriate, consider parallel index scan */
 			if (index->amcanparallel &&

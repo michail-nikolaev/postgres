@@ -1047,11 +1047,8 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexqualcols = indexqualcols;
 	pathnode->indexorderbys = indexorderbys;
 	pathnode->indexorderbycols = indexorderbycols;
-	
-	if (indexonly_qpqual && list_length(qpquals))
-		pathnode->indexonly_qpqual = true;
-	else
-		pathnode->indexonly_qpqual = false;
+		
+	pathnode->indexonly_qpqual = indexonly_qpqual;
 	pathnode->path.pathtype = (indexonly | pathnode->indexonly_qpqual) ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = rel->reltarget;
