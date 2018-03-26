@@ -130,7 +130,7 @@ static PathClauseUsage *classify_index_clause_usage(Path *path,
 static Relids get_bitmap_tree_required_outer(Path *bitmapqual);
 static void find_indexpath_quals(Path *bitmapqual, List **quals, List **preds);
 static int	find_list_position(Node *node, List **nodelist);
-static bool check_index_only(RelOptInfo *rel, IndexOptInfo *index);
+static bool check_index_only(RelOptInfo *rel, IndexOptInfo *index, List *qpquals, bool qpqual_index_only);
 static double get_loop_count(PlannerInfo *root, Index cur_relid, Relids outer_relids);
 static double adjust_rowcount_for_semijoins(PlannerInfo *root,
 							  Index cur_relid,
@@ -814,6 +814,29 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	}
 }
 
+static List *
+extract_nonindex_conditions(List *qual_clauses, List *indexquals)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, qual_clauses)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		if (rinfo->pseudoconstant)
+			continue;			/* we may drop pseudoconstants here */
+		if (list_member_ptr(indexquals, rinfo))
+			continue;			/* simple duplicate */
+		if (is_redundant_derived_clause(rinfo, indexquals))
+			continue;			/* derived from same EquivalenceClass */
+								/* ... skip the predicate proof attempt createplan.c will try ... */
+		result = lappend(result, rinfo);
+	}
+	return result;
+}
+
+
 /*
  * build_index_paths
  *	  Given an index and a set of index clauses for it, construct zero
@@ -877,6 +900,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	bool		pathkeys_possibly_useful;
 	bool		index_is_ordered;
 	bool		index_only_scan;
+	bool		index_only_scan_qpqual;
 	int			indexcol;
 
 	/*
@@ -1017,6 +1041,29 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 		orderbyclauses = NIL;
 		orderbyclausecols = NIL;
 	}
+	
+	List	   *qpquals;
+	List	   *indexquals,
+			   *indexqualcols;
+
+	/* Convert clauses to indexquals the executor can handle */
+	expand_indexqual_conditions(index, index_clauses, clause_columns,
+		&indexquals, &indexqualcols);
+
+	ParamPathInfo *param_info = get_baserel_parampathinfo(root, index->rel, outer_relids);
+	if (param_info)
+	{
+		qpquals = list_concat(
+			extract_nonindex_conditions(index->indrestrictinfo,
+				indexquals),
+			extract_nonindex_conditions(param_info->ppi_clauses,
+				indexquals));
+	}
+	else
+	{
+		qpquals = extract_nonindex_conditions(index->indrestrictinfo,
+			indexquals);
+	}
 
 	/*
 	 * 3. Check if an index-only scan is possible.  If we're not building
@@ -1024,7 +1071,13 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	 * index data retrieval anyway.
 	 */
 	index_only_scan = (scantype != ST_BITMAPSCAN &&
-					   check_index_only(rel, index));
+					   check_index_only(rel, index, qpquals, false));
+	index_only_scan_qpqual = (!index_only_scan && 
+							 list_length(qpquals) > 0 &&
+							 list_length(root->rowMarks) == 0 &&
+							 root->parse->commandType == CMD_SELECT &&
+							 scantype != ST_BITMAPSCAN &&
+							 check_index_only(rel, index, qpquals, true));
 
 	/*
 	 * 4. Generate an indexscan path if there are relevant restriction clauses
@@ -1045,9 +1098,14 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  ForwardScanDirection :
 								  NoMovementScanDirection,
 								  index_only_scan,
+								  index_only_scan_qpqual,
 								  outer_relids,
 								  loop_count,
-								  false);
+								  false,
+								  param_info,
+								  qpquals,
+								  indexquals,
+								  indexqualcols);
 		result = lappend(result, ipath);
 
 		/*
@@ -1068,9 +1126,14 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  ForwardScanDirection :
 									  NoMovementScanDirection,
 									  index_only_scan,
+									  index_only_scan_qpqual,
 									  outer_relids,
 									  loop_count,
-									  true);
+									  true,
+									  param_info,
+									  qpquals,
+									  indexquals,
+									  indexqualcols);
 
 			/*
 			 * if, after costing the path, we find that it's not worth using
@@ -1102,9 +1165,14 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  useful_pathkeys,
 									  BackwardScanDirection,
 									  index_only_scan,
+									  index_only_scan_qpqual,
 									  outer_relids,
 									  loop_count,
-									  false);
+									  false,
+									  param_info,
+									  qpquals,
+									  indexquals,
+									  indexqualcols);
 			result = lappend(result, ipath);
 
 			/* If appropriate, consider parallel index scan */
@@ -1120,9 +1188,14 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 										  useful_pathkeys,
 										  BackwardScanDirection,
 										  index_only_scan,
+										  index_only_scan_qpqual,
 										  outer_relids,
 										  loop_count,
-										  true);
+										  true,
+										  param_info,
+										  qpquals,
+										  indexquals,
+										  indexqualcols);
 
 				/*
 				 * if, after costing the path, we find that it's not worth
@@ -1861,7 +1934,7 @@ find_list_position(Node *node, List **nodelist)
  *		Determine whether an index-only scan is possible for this index.
  */
 static bool
-check_index_only(RelOptInfo *rel, IndexOptInfo *index)
+check_index_only(RelOptInfo *rel, IndexOptInfo *index, List *qpquals, bool qpqual_index_only)
 {
 	bool		result;
 	Bitmapset  *attrs_used = NULL;
@@ -1884,7 +1957,17 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 	 * Note: we must look at rel's targetlist, not the attr_needed data,
 	 * because attr_needed isn't computed for inheritance child rels.
 	 */
-	pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &attrs_used);
+	if (!qpqual_index_only)
+		pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &attrs_used);
+	else
+	{
+		foreach(lc, qpquals)
+		{
+			RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
+
+			pull_varattnos((Node *)rinfo->clause, rel->relid, &attrs_used);
+		}
+	}
 
 	/*
 	 * Add all the attributes used by restriction clauses; but consider only

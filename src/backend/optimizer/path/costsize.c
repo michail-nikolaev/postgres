@@ -473,13 +473,12 @@ cost_gather_merge(GatherMergePath *path, PlannerInfo *root,
  */
 void
 cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
-		   bool partial_path)
+		   bool partial_path, List *qpquals)
 {
 	IndexOptInfo *index = path->indexinfo;
 	RelOptInfo *baserel = index->rel;
 	bool		indexonly = (path->path.pathtype == T_IndexOnlyScan);
 	amcostestimate_function amcostestimate;
-	List	   *qpquals;
 	Cost		startup_cost = 0;
 	Cost		run_cost = 0;
 	Cost		cpu_run_cost = 0;
@@ -516,18 +515,11 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	{
 		path->path.rows = path->path.param_info->ppi_rows;
 		/* qpquals come from the rel's restriction clauses and ppi_clauses */
-		qpquals = list_concat(
-							  extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
-														  path->indexquals),
-							  extract_nonindex_conditions(path->path.param_info->ppi_clauses,
-														  path->indexquals));
 	}
 	else
 	{
 		path->path.rows = baserel->rows;
 		/* qpquals come from just the rel's restriction clauses */
-		qpquals = extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
-											  path->indexquals);
 	}
 
 	if (!enable_indexscan)

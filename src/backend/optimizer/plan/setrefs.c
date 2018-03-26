@@ -1027,19 +1027,25 @@ set_indexonlyscan_references(PlannerInfo *root,
 	index_itlist = build_tlist_index(plan->indextlist);
 
 	plan->scan.scanrelid += rtoffset;
-	plan->scan.plan.targetlist = (List *)
-		fix_upper_expr(root,
-					   (Node *) plan->scan.plan.targetlist,
-					   index_itlist,
-					   INDEX_VAR,
-					   rtoffset);
+	if (plan->indexonly_qpqual)
+	{
+		plan->scan.plan.targetlist = fix_scan_list(root, plan->scan.plan.targetlist, rtoffset);
+	}
+	else
+	{
+		plan->scan.plan.targetlist = (List *)
+			fix_upper_expr(root,
+			(Node *)plan->scan.plan.targetlist,
+				index_itlist,
+				INDEX_VAR,
+				rtoffset);
+	}
 	plan->scan.plan.qual = (List *)
 		fix_upper_expr(root,
 					   (Node *) plan->scan.plan.qual,
 					   index_itlist,
 					   INDEX_VAR,
 					   rtoffset);
-	/* indexqual is already transformed to reference index columns */
 	plan->indexqual = fix_scan_list(root, plan->indexqual, rtoffset);
 	/* indexorderby is already transformed to reference index columns */
 	plan->indexorderby = fix_scan_list(root, plan->indexorderby, rtoffset);

@@ -1275,6 +1275,9 @@ typedef struct IndexOnlyScanState
 	Buffer		ioss_VMBuffer;
 	long		ioss_HeapFetches;
 	Size		ioss_PscanLen;
+	bool		ioss_IndexOnlyQpqual;
+	TupleTableSlot *ioss_HeapFetchScanTupleSlot;
+	HeapTuple	ioss_HeapTuple;
 } IndexOnlyScanState;
 
 /* ----------------

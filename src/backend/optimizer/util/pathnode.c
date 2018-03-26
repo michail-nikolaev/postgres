@@ -989,6 +989,8 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
 	return pathnode;
 }
 
+
+
 /*
  * create_index_path
  *	  Creates a path node for an index scan.
@@ -1024,28 +1026,19 @@ create_index_path(PlannerInfo *root,
 				  List *pathkeys,
 				  ScanDirection indexscandir,
 				  bool indexonly,
+				  bool indexonly_qpqual,
 				  Relids required_outer,
 				  double loop_count,
-				  bool partial_path)
+				  bool partial_path,
+				  ParamPathInfo *param_info,
+				  List	*qpquals,
+				  List* indexquals,
+				  List* indexqualcols)
 {
 	IndexPath  *pathnode = makeNode(IndexPath);
 	RelOptInfo *rel = index->rel;
-	List	   *indexquals,
-			   *indexqualcols;
 
-	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
-	pathnode->path.parent = rel;
-	pathnode->path.pathtarget = rel->reltarget;
-	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
-														  required_outer);
-	pathnode->path.parallel_aware = false;
-	pathnode->path.parallel_safe = rel->consider_parallel;
-	pathnode->path.parallel_workers = 0;
-	pathnode->path.pathkeys = pathkeys;
-
-	/* Convert clauses to indexquals the executor can handle */
-	expand_indexqual_conditions(index, indexclauses, indexclausecols,
-								&indexquals, &indexqualcols);
+	pathnode->path.param_info = param_info;	
 
 	/* Fill in the pathnode */
 	pathnode->indexinfo = index;
@@ -1054,9 +1047,24 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexqualcols = indexqualcols;
 	pathnode->indexorderbys = indexorderbys;
 	pathnode->indexorderbycols = indexorderbycols;
+	
+	if (indexonly_qpqual && list_length(qpquals))
+		pathnode->indexonly_qpqual = true;
+	else
+		pathnode->indexonly_qpqual = false;
+	pathnode->path.pathtype = (indexonly | pathnode->indexonly_qpqual) ? T_IndexOnlyScan : T_IndexScan;
+	pathnode->path.parent = rel;
+	pathnode->path.pathtarget = rel->reltarget;
+	
+	pathnode->path.parallel_aware = false;
+	pathnode->path.parallel_safe = rel->consider_parallel;
+	pathnode->path.parallel_workers = 0;
+	pathnode->path.pathkeys = pathkeys;
+
+
 	pathnode->indexscandir = indexscandir;
 
-	cost_index(pathnode, root, loop_count, partial_path);
+	cost_index(pathnode, root, loop_count, partial_path, qpquals);
 
 	return pathnode;
 }
@@ -3517,7 +3525,8 @@ reparameterize_path(PlannerInfo *root, Path *path,
 				memcpy(newpath, ipath, sizeof(IndexPath));
 				newpath->path.param_info =
 					get_baserel_parampathinfo(root, rel, required_outer);
-				cost_index(newpath, root, loop_count, false);
+				// TODO:
+				cost_index(newpath, root, loop_count, false, NULL);
 				return (Path *) newpath;
 			}
 		case T_BitmapHeapScan:

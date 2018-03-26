@@ -934,7 +934,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			pname = sname = "Index Scan";
 			break;
 		case T_IndexOnlyScan:
-			pname = sname = "Index Only Scan";
+			if (((IndexOnlyScan *)plan)->indexonly_qpqual)
+				pname = sname = "Index Scan";
+			else
+				pname = sname = "Index Only Scan";
 			break;
 		case T_BitmapIndexScan:
 			pname = sname = "Bitmap Index Scan";
@@ -1400,8 +1403,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			{
 				long		heapFetches =
 					((IndexOnlyScanState *) planstate)->ioss_HeapFetches;
-
-				ExplainPropertyInteger("Heap Fetches", NULL, heapFetches, es);
+				//if (((IndexOnlyScan *)plan)->indexonly_qpqual)					
+					//ExplainPropertyInteger("Heap Fetches For Return", NULL, heapFetches, es);
+				//else
+					ExplainPropertyInteger("Heap Fetches", NULL, heapFetches, es);
 			}
 			break;
 		case T_BitmapIndexScan:

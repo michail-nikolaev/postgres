@@ -1761,6 +1761,7 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		}
 
 		/* Preprocess targetlist */
+
 		tlist = preprocess_targetlist(root);
 
 		/*
@@ -5962,8 +5963,8 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	/* Estimate the cost of index scan */
 	indexScanPath = create_index_path(root, indexInfo,
 									  NIL, NIL, NIL, NIL, NIL,
-									  ForwardScanDirection, false,
-									  NULL, 1.0, false);
+									  ForwardScanDirection, false, false,
+									  NULL, 1.0, false, NULL, NULL, NULL, NULL); // TODO:
 
 	return (seqScanAndSortPath.total_cost < indexScanPath->path.total_cost);
 }
