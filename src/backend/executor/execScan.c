@@ -95,32 +95,12 @@ ExecScanFetch(ScanState *node,
 	return (*accessMtd) (node);
 }
 
-/* ----------------------------------------------------------------
- *		ExecScan
- *
- *		Scans the relation using the 'access method' indicated and
- *		returns the next qualifying tuple in the direction specified
- *		in the global variable ExecDirection.
- *		The access method returns the next tuple and ExecScan() is
- *		responsible for checking the tuple returned against the qual-clause.
- *
- *		A 'recheck method' must also be provided that can check an
- *		arbitrary tuple of the relation against any qual conditions
- *		that are implemented internal to the access method.
- *
- *		Conditions:
- *		  -- the "cursor" maintained by the AMI is positioned at the tuple
- *			 returned previously.
- *
- *		Initial States:
- *		  -- the relation indicated is opened for scanning so that the
- *			 "cursor" is positioned before the first qualifying tuple.
- * ----------------------------------------------------------------
- */
+static pg_attribute_always_inline
 TupleTableSlot *
-ExecScan(ScanState *node,
-		 ExecScanAccessMtd accessMtd,	/* function returning a tuple */
-		 ExecScanRecheckMtd recheckMtd)
+ExecScanWithImpl(ScanState *node,
+	ExecScanAccessMtd accessMtd,			/* function returning a tuple */
+	ExecScanRecheckMtd recheckMtd,			/* function for EPQ recheck */
+	ExecScanPostprocessMtd postprocessMtd	/* function to postprocess tuple before project */)
 {
 	ExprContext *econtext;
 	ExprState  *qual;
@@ -142,7 +122,10 @@ ExecScan(ScanState *node,
 	if (!qual && !projInfo)
 	{
 		ResetExprContext(econtext);
-		return ExecScanFetch(node, accessMtd, recheckMtd);
+		if (postprocessMtd)
+			return postprocessMtd(node, ExecScanFetch(node, accessMtd, recheckMtd));
+		else
+			return ExecScanFetch(node, accessMtd, recheckMtd);
 	}
 
 	/*
@@ -194,6 +177,10 @@ ExecScan(ScanState *node,
 			 */
 			if (projInfo)
 			{
+				if (postprocessMtd) 
+				{
+					econtext->ecxt_scantuple = postprocessMtd(node, slot);
+				}
 				/*
 				 * Form a projection tuple, store it in the result tuple slot
 				 * and return it.
@@ -205,7 +192,10 @@ ExecScan(ScanState *node,
 				/*
 				 * Here, we aren't projecting, so just return scan tuple.
 				 */
-				return slot;
+				if (postprocessMtd)
+					return postprocessMtd(node, slot);
+				else
+					return slot;
 			}
 		}
 		else
@@ -216,6 +206,46 @@ ExecScan(ScanState *node,
 		 */
 		ResetExprContext(econtext);
 	}
+}
+
+
+/* ----------------------------------------------------------------
+ *		ExecScan
+ *
+ *		Scans the relation using the 'access method' indicated and
+ *		returns the next qualifying tuple in the direction specified
+ *		in the global variable ExecDirection.
+ *		The access method returns the next tuple and ExecScan() is
+ *		responsible for checking the tuple returned against the qual-clause.
+ *
+ *		A 'recheck method' must also be provided that can check an
+ *		arbitrary tuple of the relation against any qual conditions
+ *		that are implemented internal to the access method.
+ *
+ *		Conditions:
+ *		  -- the "cursor" maintained by the AMI is positioned at the tuple
+ *			 returned previously.
+ *
+ *		Initial States:
+ *		  -- the relation indicated is opened for scanning so that the
+ *			 "cursor" is positioned before the first qualifying tuple.
+ * ----------------------------------------------------------------
+ */
+TupleTableSlot *
+ExecScan(ScanState *node,
+		 ExecScanAccessMtd accessMtd,	/* function returning a tuple */
+		 ExecScanRecheckMtd recheckMtd	/* function for EPQ recheck */)
+{
+	return ExecScanWithImpl(node, accessMtd, recheckMtd, NULL);
+}
+
+TupleTableSlot *
+ExecScanWithPostprocess(ScanState *node,
+	ExecScanAccessMtd accessMtd,	/* function returning a tuple */
+	ExecScanRecheckMtd recheckMtd,	/* function for EPQ recheck */
+	ExecScanPostprocessMtd postprocessMtd	/* function to postprocess tuple before project */)
+{
+	return ExecScanWithImpl(node, accessMtd, recheckMtd, postprocessMtd);
 }
 
 /*

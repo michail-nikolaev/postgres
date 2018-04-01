@@ -5998,6 +5998,10 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	Path		seqScanAndSortPath;
 	IndexPath  *indexScanPath;
 	ListCell   *lc;
+	List	   *qpquals,
+			   *indexquals,
+			   *indexqualcols;
+	ParamPathInfo *param_info;
 
 	/* We can short-circuit the cost comparison if indexscans are disabled */
 	if (!enable_indexscan)
@@ -6075,11 +6079,29 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 			  seqScanPath->total_cost, rel->tuples, rel->reltarget->width,
 			  comparisonCost, maintenance_work_mem, -1.0);
 
+	expand_indexqual_conditions(indexInfo, NIL, NIL,
+		&indexquals, &indexqualcols);
+
+	param_info = get_baserel_parampathinfo(root, indexInfo->rel, NULL);
+	if (param_info)
+	{
+		qpquals = list_concat(
+			extract_nonindex_conditions(indexInfo->indrestrictinfo,
+				indexquals),
+			extract_nonindex_conditions(param_info->ppi_clauses,
+				indexquals));
+	}
+	else
+	{
+		qpquals = extract_nonindex_conditions(indexInfo->indrestrictinfo,
+			indexquals);
+	}
+
 	/* Estimate the cost of index scan */
 	indexScanPath = create_index_path(root, indexInfo,
 									  NIL, NIL, NIL, NIL, NIL,
-									  ForwardScanDirection, false,
-									  NULL, 1.0, false);
+									  ForwardScanDirection, false, false,
+									  NULL, 1.0, false, param_info, qpquals, indexquals, indexqualcols);
 
 	return (seqScanAndSortPath.total_cost < indexScanPath->path.total_cost);
 }

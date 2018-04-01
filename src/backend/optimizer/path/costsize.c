@@ -143,7 +143,6 @@ typedef struct
 	QualCost	total;
 } cost_qual_eval_context;
 
-static List *extract_nonindex_conditions(List *qual_clauses, List *indexquals);
 static MergeScanSelCache *cached_scansel(PlannerInfo *root,
 			   RestrictInfo *rinfo,
 			   PathKey *pathkey);
@@ -477,14 +476,15 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	IndexOptInfo *index = path->indexinfo;
 	RelOptInfo *baserel = index->rel;
 	bool		indexonly = (path->path.pathtype == T_IndexOnlyScan);
+	bool		fetchscan = path->fetchscan;
 	amcostestimate_function amcostestimate;
-	List	   *qpquals;
 	Cost		startup_cost = 0;
 	Cost		run_cost = 0;
 	Cost		cpu_run_cost = 0;
 	Cost		indexStartupCost;
 	Cost		indexTotalCost;
 	Selectivity indexSelectivity;
+	Selectivity qpqualsSelectity;
 	double		indexCorrelation,
 				csquared;
 	double		spc_seq_page_cost,
@@ -515,18 +515,11 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	{
 		path->path.rows = path->path.param_info->ppi_rows;
 		/* qpquals come from the rel's restriction clauses and ppi_clauses */
-		qpquals = list_concat(
-							  extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
-														  path->indexquals),
-							  extract_nonindex_conditions(path->path.param_info->ppi_clauses,
-														  path->indexquals));
 	}
 	else
 	{
 		path->path.rows = baserel->rows;
 		/* qpquals come from just the rel's restriction clauses */
-		qpquals = extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
-											  path->indexquals);
 	}
 
 	if (!enable_indexscan)
@@ -560,6 +553,15 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	/* estimate number of main-table tuples fetched */
 	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
+
+	if (fetchscan)
+		qpqualsSelectity = clauselist_selectivity(root,
+			path->indexqpquals,
+			0,
+			JOIN_INNER,
+			NULL);
+	else
+		qpqualsSelectity = 0.0;
 
 	/* fetch estimated page costs for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
@@ -609,7 +611,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											root);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		rand_heap_pages = pages_fetched;
 
@@ -633,7 +635,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											root);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		min_IO_cost = (pages_fetched * spc_random_page_cost) / loop_count;
 	}
@@ -649,7 +651,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											root);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		rand_heap_pages = pages_fetched;
 
@@ -660,7 +662,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		pages_fetched = ceil(indexSelectivity * (double) baserel->pages);
 
 		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
 
 		if (pages_fetched > 0)
 		{
@@ -718,10 +720,12 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	 * What we want here is cpu_tuple_cost plus the evaluation costs of any
 	 * qual clauses that we have to evaluate as qpquals.
 	 */
-	cost_qual_eval(&qpqual_cost, qpquals, root);
+	cost_qual_eval(&qpqual_cost, path->indexqpquals, root);
 
 	startup_cost += qpqual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	if (fetchscan)
+		cpu_per_tuple += cpu_index_tuple_cost;
 
 	cpu_run_cost += cpu_per_tuple * tuples_fetched;
 
@@ -763,7 +767,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
  * remove such unnecessary clauses from the qpquals list if this path is
  * selected for use.
  */
-static List *
+List *
 extract_nonindex_conditions(List *qual_clauses, List *indexquals)
 {
 	List	   *result = NIL;

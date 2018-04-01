@@ -87,6 +87,7 @@ extern Expr *adjust_rowcompare_for_index(RowCompareExpr *clause,
 							int indexcol,
 							List **indexcolnos,
 							bool *var_on_left_p);
+extern List *extract_nonindex_conditions(List *qual_clauses, List *indexquals);
 
 /*
  * tidpath.h

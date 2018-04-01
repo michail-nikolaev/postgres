@@ -1023,12 +1023,19 @@ set_indexonlyscan_references(PlannerInfo *root,
 	index_itlist = build_tlist_index(plan->indextlist);
 
 	plan->scan.scanrelid += rtoffset;
-	plan->scan.plan.targetlist = (List *)
-		fix_upper_expr(root,
-					   (Node *) plan->scan.plan.targetlist,
-					   index_itlist,
-					   INDEX_VAR,
-					   rtoffset);
+	if (plan->fetchscan)
+	{
+		plan->scan.plan.targetlist = fix_scan_list(root, plan->scan.plan.targetlist, rtoffset);
+	}
+	else
+	{
+		plan->scan.plan.targetlist = (List *)
+			fix_upper_expr(root,
+			(Node *)plan->scan.plan.targetlist,
+				index_itlist,
+				INDEX_VAR,
+				rtoffset);
+	}
 	plan->scan.plan.qual = (List *)
 		fix_upper_expr(root,
 					   (Node *) plan->scan.plan.qual,

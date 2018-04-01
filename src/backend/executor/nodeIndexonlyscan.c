@@ -117,7 +117,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	 */
 	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
-		HeapTuple	tuple = NULL;
+		node->ioss_HeapTuple = NULL;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -163,8 +163,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			 * Rats, we have to visit the heap to check visibility.
 			 */
 			InstrCountTuples2(node, 1);
-			tuple = index_fetch_heap(scandesc);
-			if (tuple == NULL)
+			node->ioss_HeapTuple = index_fetch_heap(scandesc);
+			if (node->ioss_HeapTuple == NULL)
 				continue;		/* no visible tuple, try next index entry */
 
 			/*
@@ -242,7 +242,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 * anyway, then we already have the tuple-level lock and can skip the
 		 * page lock.
 		 */
-		if (tuple == NULL)
+		if (node->ioss_HeapTuple == NULL)
 			PredicateLockPage(scandesc->heapRelation,
 							  ItemPointerGetBlockNumber(tid),
 							  estate->es_snapshot);
@@ -302,6 +302,25 @@ IndexOnlyRecheck(IndexOnlyScanState *node, TupleTableSlot *slot)
 	return false;				/* keep compiler quiet */
 }
 
+static TupleTableSlot *
+IndexOnlyPostprocess(IndexOnlyScanState *node, TupleTableSlot *slot)
+{
+	IndexScanDesc scandesc = node->ioss_ScanDesc;
+
+	if (node->ioss_HeapTuple == NULL)
+	{
+		InstrCountTuples2(node, 1);
+		node->ioss_HeapTuple = index_fetch_heap(scandesc);
+	}
+
+	ExecStoreTuple(node->ioss_HeapTuple,	/* tuple to store */
+		node->ioss_FetchScanTupleSlot,		/* slot to store in */
+		scandesc->xs_cbuf,					/* buffer containing tuple */
+		false);								/* don't pfree */
+
+	return node->ioss_FetchScanTupleSlot;
+}
+
 /* ----------------------------------------------------------------
  *		ExecIndexOnlyScan(node)
  * ----------------------------------------------------------------
@@ -316,10 +335,15 @@ ExecIndexOnlyScan(PlanState *pstate)
 	 */
 	if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
 		ExecReScan((PlanState *) node);
-
-	return ExecScan(&node->ss,
+	if (!node->ioss_FetchScan)
+		return ExecScan(&node->ss,
 					(ExecScanAccessMtd) IndexOnlyNext,
 					(ExecScanRecheckMtd) IndexOnlyRecheck);
+	else
+		return ExecScanWithPostprocess(&node->ss,
+			(ExecScanAccessMtd)IndexOnlyNext,
+			(ExecScanRecheckMtd)IndexOnlyRecheck,
+			(ExecScanPostprocessMtd)IndexOnlyPostprocess);
 }
 
 /* ----------------------------------------------------------------
@@ -403,6 +427,8 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 	 */
 	ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
 	ExecClearTuple(node->ss.ss_ScanTupleSlot);
+	if (node->ioss_FetchScanTupleSlot != NULL)
+		ExecClearTuple(node->ioss_FetchScanTupleSlot);
 
 	/*
 	 * close the index relation (no-op if we didn't open it)
@@ -509,6 +535,9 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
 	indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScan;
+	indexstate->ioss_FetchScan = node->fetchscan;
+	indexstate->ioss_FetchScanTupleSlot = NULL;
+	indexstate->ioss_HeapTuple = NULL;
 
 	/*
 	 * Miscellaneous initialization
@@ -541,7 +570,17 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	 * scan tuple.
 	 */
 	ExecInitResultTupleSlotTL(estate, &indexstate->ss.ps);
-	ExecAssignScanProjectionInfoWithVarno(&indexstate->ss, INDEX_VAR);
+	if (indexstate->ioss_FetchScan)
+	{
+		indexstate->ioss_FetchScanTupleSlot = ExecAllocTableSlot(&estate->es_tupleTable, RelationGetDescr(currentRelation));
+
+		TupleDesc	tupdesc = indexstate->ioss_FetchScanTupleSlot->tts_tupleDescriptor;
+		ExecConditionalAssignProjectionInfo(&indexstate->ss.ps, tupdesc, node->scan.scanrelid);
+	}
+	else 
+	{
+		ExecAssignScanProjectionInfoWithVarno(&indexstate->ss, INDEX_VAR);
+	}
 
 	/*
 	 * initialize child expressions

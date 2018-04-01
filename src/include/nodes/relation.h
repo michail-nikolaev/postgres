@@ -1172,9 +1172,11 @@ typedef struct IndexPath
 	List	   *indexqualcols;
 	List	   *indexorderbys;
 	List	   *indexorderbycols;
+	List	   *indexqpquals;
 	ScanDirection indexscandir;
 	Cost		indextotalcost;
 	Selectivity indexselectivity;
+	bool		fetchscan;
 } IndexPath;
 
 /*

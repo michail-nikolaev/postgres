@@ -1853,6 +1853,7 @@ _outIndexPath(StringInfo str, const IndexPath *node)
 	WRITE_ENUM_FIELD(indexscandir, ScanDirection);
 	WRITE_FLOAT_FIELD(indextotalcost, "%.2f");
 	WRITE_FLOAT_FIELD(indexselectivity, "%.4f");
+	WRITE_BOOL_FIELD(fetchscan);
 }
 
 static void

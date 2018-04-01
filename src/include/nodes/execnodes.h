@@ -1342,6 +1342,9 @@ typedef struct IndexOnlyScanState
 	IndexScanDesc ioss_ScanDesc;
 	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;
+	bool		ioss_FetchScan;
+	TupleTableSlot *ioss_FetchScanTupleSlot;
+	HeapTuple	ioss_HeapTuple;
 } IndexOnlyScanState;
 
 /* ----------------

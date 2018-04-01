@@ -993,7 +993,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			pname = sname = "Index Scan";
 			break;
 		case T_IndexOnlyScan:
-			pname = sname = "Index Only Scan";
+			if (((IndexOnlyScan *)plan)->fetchscan)
+				pname = sname = "Index Only Fetch Scan";
+			else
+				pname = sname = "Index Only Scan";
 			break;
 		case T_BitmapIndexScan:
 			pname = sname = "Bitmap Index Scan";

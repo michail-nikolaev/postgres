@@ -1030,28 +1030,26 @@ create_index_path(PlannerInfo *root,
 				  List *pathkeys,
 				  ScanDirection indexscandir,
 				  bool indexonly,
+				  bool fetchscan,
 				  Relids required_outer,
 				  double loop_count,
-				  bool partial_path)
+				  bool partial_path,
+				  ParamPathInfo *param_info,
+				  List	*qpquals,
+				  List* indexquals,
+				  List* indexqualcols)
 {
 	IndexPath  *pathnode = makeNode(IndexPath);
 	RelOptInfo *rel = index->rel;
-	List	   *indexquals,
-			   *indexqualcols;
 
-	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
+	pathnode->path.pathtype = (indexonly | fetchscan) ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = rel->reltarget;
-	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
-														  required_outer);
+	pathnode->path.param_info = param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
 	pathnode->path.pathkeys = pathkeys;
-
-	/* Convert clauses to indexquals the executor can handle */
-	expand_indexqual_conditions(index, indexclauses, indexclausecols,
-								&indexquals, &indexqualcols);
 
 	/* Fill in the pathnode */
 	pathnode->indexinfo = index;
@@ -1061,10 +1059,137 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexorderbys = indexorderbys;
 	pathnode->indexorderbycols = indexorderbycols;
 	pathnode->indexscandir = indexscandir;
+	pathnode->indexqpquals = qpquals;
+	pathnode->fetchscan = fetchscan;
 
 	cost_index(pathnode, root, loop_count, partial_path);
 
 	return pathnode;
+}
+
+List *
+append_index_paths(List* result,
+				RelOptInfo *rel,
+				bool parallel,
+				PlannerInfo *root,
+				IndexOptInfo *index,
+				List *index_clauses,
+				List *clause_columns,
+				List *orderbyclauses,
+				List *orderbyclausecols,
+				List *useful_pathkeys,
+				ScanDirection direction,
+				bool indexonly,
+				bool fetchscan,
+				Relids required_outer,
+				double loop_count,
+				ParamPathInfo *param_info,
+				List	*qpquals,
+				List* indexquals,
+				List* indexqualcols)
+{
+	IndexPath *ipath = create_index_path(root, index,
+		index_clauses,
+		clause_columns,
+		orderbyclauses,
+		orderbyclausecols,
+		useful_pathkeys,
+		direction,
+		indexonly,
+		false,
+		required_outer,
+		loop_count,
+		false,
+		param_info,
+		qpquals,
+		indexquals,
+		indexqualcols);
+	result = lappend(result, ipath);
+	if (fetchscan)
+	{
+		ipath = create_index_path(root, index,
+			index_clauses,
+			clause_columns,
+			orderbyclauses,
+			orderbyclausecols,
+			useful_pathkeys,
+			direction,
+			indexonly,
+			true,
+			required_outer,
+			loop_count,
+			false,
+			param_info,
+			qpquals,
+			indexquals,
+			indexqualcols);
+		result = lappend(result, ipath);
+	}
+
+	/*
+	* If appropriate, consider parallel index scan.  We don't allow
+	* parallel index scan for bitmap index scans.
+	*/
+	if (index->amcanparallel &&
+		rel->consider_parallel && required_outer == NULL &&
+		parallel)
+	{
+		ipath = create_index_path(root, index,
+			index_clauses,
+			clause_columns,
+			orderbyclauses,
+			orderbyclausecols,
+			useful_pathkeys,
+			direction,
+			indexonly,
+			false,
+			required_outer,
+			loop_count,
+			true,
+			param_info,
+			qpquals,
+			indexquals,
+			indexqualcols);
+
+		/*
+		* if, after costing the path, we find that it's not worth using
+		* parallel workers, just free it.
+		*/
+		if (ipath->path.parallel_workers > 0)
+			add_partial_path(rel, (Path *)ipath);
+		else
+			pfree(ipath);
+
+		if (fetchscan)
+		{
+			ipath = create_index_path(root, index,
+				index_clauses,
+				clause_columns,
+				orderbyclauses,
+				orderbyclausecols,
+				useful_pathkeys,
+				direction,
+				indexonly,
+				true,
+				required_outer,
+				loop_count,
+				true,
+				param_info,
+				qpquals,
+				indexquals,
+				indexqualcols);
+
+			/*
+			* if, after costing the path, we find that it's not worth using
+			* parallel workers, just free it.
+			*/
+			if (ipath->path.parallel_workers > 0)
+				add_partial_path(rel, (Path *)ipath);
+			else
+				pfree(ipath);
+		}
+	}
+	return result;
 }
 
 /*
@@ -3679,6 +3804,7 @@ do { \
 				FLAT_COPY_PATH(ipath, path, IndexPath);
 				ADJUST_CHILD_ATTRS(ipath->indexclauses);
 				ADJUST_CHILD_ATTRS(ipath->indexquals);
+				ADJUST_CHILD_ATTRS(ipath->indexqpquals);
 				new_path = (Path *) ipath;
 			}
 			break;
