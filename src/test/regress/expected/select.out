@@ -964,3 +964,104 @@ explain (costs off) select * from list_parted_tbl;
 (2 rows)
 
 drop table list_parted_tbl;
+
+- Index Only Fetch
+create index tenk1_index on tenk1 using btree(two, four, ten, stringu2);
+set enable_seqscan=FALSE;
+set enable_bitmapscan=FALSE;
+set enable_indexonlyscan=TRUE;
+explain (verbose, costs off)
+select * from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four limit 5;
+                                                                      QUERY PLAN                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: unique1, unique2, two, four, ten, twenty, hundred, thousand, twothousand, fivethous, tenthous, odd, even, stringu1, stringu2, string4
+   ->  Index Only Fetch Scan using tenk1_index on public.tenk1
+         Output: unique1, unique2, two, four, ten, twenty, hundred, thousand, twothousand, fivethous, tenthous, odd, even, stringu1, stringu2, string4
+         Index Cond: ((tenk1.two = 1) AND (tenk1.four > 1) AND (tenk1.ten < 5))
+         Filter: ("left"((tenk1.stringu2)::text, 1) > 'N'::text)
+(6 rows)
+
+select * from tenk1 
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four limit 5;
+ unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
+    5471 |      14 |   1 |    3 |   1 |     11 |      71 |      471 |        1471 |       471 |     5471 | 142 |  143 | LCAAAA   | OAAAAA   | OOOOxx
+     871 |    1366 |   1 |    3 |   1 |     11 |      71 |      871 |         871 |       871 |      871 | 142 |  143 | NHAAAA   | OACAAA   | OOOOxx
+    7771 |    8854 |   1 |    3 |   1 |     11 |      71 |      771 |        1771 |      2771 |     7771 | 142 |  143 | XMAAAA   | OCNAAA   | OOOOxx
+    2251 |    9530 |   1 |    3 |   1 |     11 |      51 |      251 |         251 |      2251 |     2251 | 102 |  103 | PIAAAA   | OCOAAA   | OOOOxx
+      31 |    4200 |   1 |    3 |   1 |     11 |      31 |       31 |          31 |        31 |       31 |  62 |   63 | FBAAAA   | OFGAAA   | AAAAxx
+(5 rows)
+
+explain (verbose, costs off)
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Limit
+   Output: ((unique1 * 5)), two, four
+   ->  Index Only Fetch Scan Backward using tenk1_index on public.tenk1
+         Output: (unique1 * 5), two, four
+         Index Cond: ((tenk1.two = 1) AND (tenk1.four > 1) AND (tenk1.ten < 5))
+         Filter: ("left"((tenk1.stringu2)::text, 1) > 'N'::text)
+(6 rows)
+
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+ ?column? 
+----------
+    37015
+     1815
+    29715
+     1515
+    33015
+(5 rows)
+
+set enable_indexonlyscan=false;
+explain (verbose, costs off)
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Limit
+   Output: ((unique1 * 5)), two, four
+   ->  Index Scan Backward using tenk1_index on public.tenk1
+         Output: (unique1 * 5), two, four
+         Index Cond: ((tenk1.two = 1) AND (tenk1.four > 1) AND (tenk1.ten < 5))
+         Filter: ("left"((tenk1.stringu2)::text, 1) > 'N'::text)
+(6 rows)
+
+select * from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four limit 5;
+ unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
+---------+---------+-----+------+-----+--------+---------+----------+-------------+-----------+----------+-----+------+----------+----------+---------
+    5471 |      14 |   1 |    3 |   1 |     11 |      71 |      471 |        1471 |       471 |     5471 | 142 |  143 | LCAAAA   | OAAAAA   | OOOOxx
+     871 |    1366 |   1 |    3 |   1 |     11 |      71 |      871 |         871 |       871 |      871 | 142 |  143 | NHAAAA   | OACAAA   | OOOOxx
+    7771 |    8854 |   1 |    3 |   1 |     11 |      71 |      771 |        1771 |      2771 |     7771 | 142 |  143 | XMAAAA   | OCNAAA   | OOOOxx
+    2251 |    9530 |   1 |    3 |   1 |     11 |      51 |      251 |         251 |      2251 |     2251 | 102 |  103 | PIAAAA   | OCOAAA   | OOOOxx
+      31 |    4200 |   1 |    3 |   1 |     11 |      31 |       31 |          31 |        31 |       31 |  62 |   63 | FBAAAA   | OFGAAA   | AAAAxx
+(5 rows)
+
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+ ?column? 
+----------
+    37015
+     1815
+    29715
+     1515
+    33015
+(5 rows)
+
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+drop index tenk1_index;

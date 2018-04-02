@@ -254,11 +254,57 @@ drop function sillysrf(int);
 -- (see bug #5084)
 select * from (values (2),(null),(1)) v(k) where k = k order by k;
 select * from (values (2),(null),(1)) v(k) where k = k;
-
 -- Test partitioned tables with no partitions, which should be handled the
 -- same as the non-inheritance case when expanding its RTE.
 create table list_parted_tbl (a int,b int) partition by list (a);
 create table list_parted_tbl1 partition of list_parted_tbl
   for values in (1) partition by list(b);
 explain (costs off) select * from list_parted_tbl;
-drop table list_parted_tbl;
+drop table list_parted_tbl
+
+-- Index Only Fetch
+
+create index tenk1_index on tenk1 using btree(two, four, ten, stringu2);
+
+set enable_seqscan=FALSE;
+set enable_bitmapscan=FALSE;
+set enable_indexonlyscan=TRUE;
+
+explain (verbose, costs off)
+select * from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four limit 5;
+
+select * from tenk1 
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four limit 5;
+
+explain (verbose, costs off)
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+
+set enable_indexonlyscan=false;
+
+explain (verbose, costs off)
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+
+select * from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four limit 5;
+
+select unique1 * 5 from tenk1
+ where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
+ order by two, four desc offset 100 limit 5;
+
+reset enable_seqscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+
+drop index tenk1_index;
