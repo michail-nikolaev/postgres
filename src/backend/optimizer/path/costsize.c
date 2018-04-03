@@ -555,11 +555,14 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
 
 	if (fetchscan)
+	{
 		qpqualsSelectity = clauselist_selectivity(root,
 			path->indexqpquals,
 			0,
 			JOIN_INNER,
 			NULL);
+		qpqualsSelectity = qpqualsSelectity + fabs(indexCorrelation) * (1.0 - qpqualsSelectity);
+	}
 	else
 		qpqualsSelectity = 0.0;
 
