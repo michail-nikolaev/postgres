@@ -6097,11 +6097,13 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 			indexquals);
 	}
 
+	IndexCostEstimate estimate;
+	estimate.empty = true;
 	/* Estimate the cost of index scan */
 	indexScanPath = create_index_path(root, indexInfo,
 									  NIL, NIL, NIL, NIL, NIL,
 									  ForwardScanDirection, false, false,
-									  NULL, 1.0, false, param_info, qpquals, indexquals, indexqualcols);
+									  NULL, 1.0, false, param_info, qpquals, indexquals, indexqualcols, &estimate);
 
 	return (seqScanAndSortPath.total_cost < indexScanPath->path.total_cost);
 }

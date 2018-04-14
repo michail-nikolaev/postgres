@@ -1037,7 +1037,8 @@ create_index_path(PlannerInfo *root,
 				  ParamPathInfo *param_info,
 				  List	*qpquals,
 				  List* indexquals,
-				  List* indexqualcols)
+				  List* indexqualcols,
+				  IndexCostEstimate* indexcostestimate)
 {
 	IndexPath  *pathnode = makeNode(IndexPath);
 	RelOptInfo *rel = index->rel;
@@ -1062,7 +1063,7 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexqpquals = qpquals;
 	pathnode->fetchscan = fetchscan;
 
-	cost_index(pathnode, root, loop_count, partial_path);
+	cost_index(pathnode, root, loop_count, partial_path, indexcostestimate);
 
 	return pathnode;
 }
@@ -1088,6 +1089,9 @@ append_index_paths(List* result,
 				List* indexquals,
 				List* indexqualcols)
 {
+	IndexCostEstimate index_cost_estimate;
+	index_cost_estimate.empty = true;
+
 	IndexPath *ipath = create_index_path(root, index,
 		index_clauses,
 		clause_columns,
@@ -1103,7 +1107,8 @@ append_index_paths(List* result,
 		param_info,
 		qpquals,
 		indexquals,
-		indexqualcols);
+		indexqualcols,
+		&index_cost_estimate);
 	result = lappend(result, ipath);
 	if (fetchscan)
 	{
@@ -1122,7 +1127,8 @@ append_index_paths(List* result,
 			param_info,
 			qpquals,
 			indexquals,
-			indexqualcols);
+			indexqualcols,
+			&index_cost_estimate);
 		result = lappend(result, ipath);
 	}
 
@@ -1149,7 +1155,8 @@ append_index_paths(List* result,
 			param_info,
 			qpquals,
 			indexquals,
-			indexqualcols);
+			indexqualcols,
+			&index_cost_estimate);
 
 		/*
 		* if, after costing the path, we find that it's not worth using
@@ -1177,7 +1184,8 @@ append_index_paths(List* result,
 				param_info,
 				qpquals,
 				indexquals,
-				indexqualcols);
+				indexqualcols,
+				&index_cost_estimate);
 
 			/*
 			* if, after costing the path, we find that it's not worth using
@@ -3663,7 +3671,9 @@ reparameterize_path(PlannerInfo *root, Path *path,
 				memcpy(newpath, ipath, sizeof(IndexPath));
 				newpath->path.param_info =
 					get_baserel_parampathinfo(root, rel, required_outer);
-				cost_index(newpath, root, loop_count, false);
+				IndexCostEstimate indexcostestimate;
+				indexcostestimate.empty = true;
+				cost_index(newpath, root, loop_count, false, &indexcostestimate);
 				return (Path *) newpath;
 			}
 		case T_BitmapHeapScan:

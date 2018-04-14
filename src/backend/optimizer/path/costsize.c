@@ -471,7 +471,7 @@ cost_gather_merge(GatherMergePath *path, PlannerInfo *root,
  */
 void
 cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
-		   bool partial_path)
+		   bool partial_path, IndexCostEstimate* indexcostestimate)
 {
 	IndexOptInfo *index = path->indexinfo;
 	RelOptInfo *baserel = index->rel;
@@ -480,23 +480,18 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	amcostestimate_function amcostestimate;
 	Cost		startup_cost = 0;
 	Cost		run_cost = 0;
-	Cost		cpu_run_cost = 0;
-	Cost		indexStartupCost;
-	Cost		indexTotalCost;
-	Selectivity indexSelectivity;
-	Selectivity qpqualsSelectity;
-	double		indexCorrelation,
-				csquared;
+	Cost		cpu_run_cost = 0;	
 	double		spc_seq_page_cost,
-				spc_random_page_cost;
+				spc_random_page_cost,
+				csquared;
 	Cost		min_IO_cost,
 				max_IO_cost;
 	QualCost	qpqual_cost;
+	Selectivity qpqualsSelectity;
 	Cost		cpu_per_tuple;
 	double		tuples_fetched;
 	double		pages_fetched;
 	double		rand_heap_pages;
-	double		index_pages;
 
 	/* Should only be applied to base relations */
 	Assert(IsA(baserel, RelOptInfo) &&
@@ -526,45 +521,50 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		startup_cost += disable_cost;
 	/* we don't need to check enable_indexonlyscan; indxpath.c does that */
 
-	/*
-	 * Call index-access-method-specific code to estimate the processing cost
-	 * for scanning the index, as well as the selectivity of the index (ie,
-	 * the fraction of main-table tuples we will have to retrieve) and its
-	 * correlation to the main-table tuple order.  We need a cast here because
-	 * relation.h uses a weak function type to avoid including amapi.h.
-	 */
-	amcostestimate = (amcostestimate_function) index->amcostestimate;
-	amcostestimate(root, path, loop_count,
-				   &indexStartupCost, &indexTotalCost,
-				   &indexSelectivity, &indexCorrelation,
-				   &index_pages);
+	if (indexcostestimate->empty)
+	{
+		/*
+		 * Call index-access-method-specific code to estimate the processing cost
+		 * for scanning the index, as well as the selectivity of the index (ie,
+		 * the fraction of main-table tuples we will have to retrieve) and its
+		 * correlation to the main-table tuple order.  We need a cast here because
+		 * relation.h uses a weak function type to avoid including amapi.h.
+		 */
+		amcostestimate = (amcostestimate_function)index->amcostestimate;
+		amcostestimate(root, path, loop_count,
+			&indexcostestimate->indexStartupCost, &indexcostestimate->indexTotalCost,
+			&indexcostestimate->indexSelectivity, &indexcostestimate->indexCorrelation,
+			&indexcostestimate->index_pages);
+
+	
+		indexcostestimate->qpqualsSelectity = clauselist_selectivity(root,
+			path->indexqpquals,
+			0,
+			JOIN_INNER,
+			NULL);
+		indexcostestimate->qpqualsSelectity = indexcostestimate->qpqualsSelectity + fabs(indexcostestimate->indexCorrelation) * (1.0 - indexcostestimate->qpqualsSelectity);	
+		indexcostestimate->empty = false;
+	}
+
+	if (fetchscan)
+		qpqualsSelectity = indexcostestimate->qpqualsSelectity;
+	else
+		qpqualsSelectity = 0.0;
 
 	/*
 	 * Save amcostestimate's results for possible use in bitmap scan planning.
 	 * We don't bother to save indexStartupCost or indexCorrelation, because a
 	 * bitmap scan doesn't care about either.
 	 */
-	path->indextotalcost = indexTotalCost;
-	path->indexselectivity = indexSelectivity;
+	path->indextotalcost = indexcostestimate->indexTotalCost;
+	path->indexselectivity = indexcostestimate->indexSelectivity;
 
 	/* all costs for touching index itself included here */
-	startup_cost += indexStartupCost;
-	run_cost += indexTotalCost - indexStartupCost;
+	startup_cost += indexcostestimate->indexStartupCost;
+	run_cost += indexcostestimate->indexTotalCost - indexcostestimate->indexStartupCost;
 
 	/* estimate number of main-table tuples fetched */
-	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
-
-	if (fetchscan)
-	{
-		qpqualsSelectity = clauselist_selectivity(root,
-			path->indexqpquals,
-			0,
-			JOIN_INNER,
-			NULL);
-		qpqualsSelectity = qpqualsSelectity + fabs(indexCorrelation) * (1.0 - qpqualsSelectity);
-	}
-	else
-		qpqualsSelectity = 0.0;
+	tuples_fetched = clamp_row_est(indexcostestimate->indexSelectivity * baserel->tuples);
 
 	/* fetch estimated page costs for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
@@ -630,7 +630,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		 * where such a plan is actually interesting, only one page would get
 		 * fetched per scan anyway, so it shouldn't matter much.)
 		 */
-		pages_fetched = ceil(indexSelectivity * (double) baserel->pages);
+		pages_fetched = ceil(indexcostestimate->indexSelectivity * (double) baserel->pages);
 
 		pages_fetched = index_pages_fetched(pages_fetched * loop_count,
 											baserel->pages,
@@ -662,7 +662,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		max_IO_cost = pages_fetched * spc_random_page_cost;
 
 		/* min_IO_cost is for the perfectly correlated case (csquared=1) */
-		pages_fetched = ceil(indexSelectivity * (double) baserel->pages);
+		pages_fetched = ceil(indexcostestimate->indexSelectivity * (double) baserel->pages);
 
 		if (indexonly)
 			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac + baserel->allvisfrac * qpqualsSelectity));
@@ -695,7 +695,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		 */
 		path->path.parallel_workers = compute_parallel_worker(baserel,
 															  rand_heap_pages,
-															  index_pages,
+															  indexcostestimate->index_pages,
 															  max_parallel_workers_per_gather);
 
 		/*
@@ -713,7 +713,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	 * Now interpolate based on estimated index order correlation to get total
 	 * disk I/O cost for main table accesses.
 	 */
-	csquared = indexCorrelation * indexCorrelation;
+	csquared = indexcostestimate->indexCorrelation * indexcostestimate->indexCorrelation;
 
 	run_cost += max_IO_cost + csquared * (min_IO_cost - max_IO_cost);
 

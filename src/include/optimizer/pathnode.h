@@ -17,7 +17,7 @@
 #include "nodes/bitmapset.h"
 #include "nodes/relation.h"
 
-
+typedef struct IndexCostEstimate IndexCostEstimate;
 /*
  * prototypes for pathnode.c
  */
@@ -54,7 +54,8 @@ extern IndexPath *create_index_path(PlannerInfo *root,
 				  ParamPathInfo *param_info,
 				  List *qpquals,
 				  List *indexquals,
-				  List *indexqualcols);
+				  List *indexqualcols,
+				  IndexCostEstimate* indexcostestimate);
 extern List *append_index_paths(List* result,
 				  RelOptInfo *rel,
 				  bool parallel,
