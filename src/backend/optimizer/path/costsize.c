@@ -542,7 +542,6 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 			0,
 			JOIN_INNER,
 			NULL);
-		indexcostestimate->qpqualsSelectity = indexcostestimate->qpqualsSelectity + fabs(indexcostestimate->indexCorrelation) * (1.0 - indexcostestimate->qpqualsSelectity);	
 		indexcostestimate->empty = false;
 	}
 
@@ -727,7 +726,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	startup_cost += qpqual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
-	if (fetchscan)
+	if (indexonly)
 		cpu_per_tuple += cpu_index_tuple_cost;
 
 	cpu_run_cost += cpu_per_tuple * tuples_fetched;
