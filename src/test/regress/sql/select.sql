@@ -260,7 +260,7 @@ create table list_parted_tbl (a int,b int) partition by list (a);
 create table list_parted_tbl1 partition of list_parted_tbl
   for values in (1) partition by list(b);
 explain (costs off) select * from list_parted_tbl;
-drop table list_parted_tbl
+drop table list_parted_tbl;
 
 -- Index Only Fetch
 
@@ -275,7 +275,7 @@ select * from tenk1
  where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
  order by two, four limit 5;
 
-select * from tenk1 
+select * from tenk1
  where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
  order by two, four limit 5;
 

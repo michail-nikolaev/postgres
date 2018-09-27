@@ -964,8 +964,7 @@ explain (costs off) select * from list_parted_tbl;
 (2 rows)
 
 drop table list_parted_tbl;
-
-- Index Only Fetch
+-- Index Only Fetch
 create index tenk1_index on tenk1 using btree(two, four, ten, stringu2);
 set enable_seqscan=FALSE;
 set enable_bitmapscan=FALSE;
@@ -984,7 +983,7 @@ select * from tenk1
          Filter: ("left"((tenk1.stringu2)::text, 1) > 'N'::text)
 (6 rows)
 
-select * from tenk1 
+select * from tenk1
  where two = 1 and four > 1 and ten < 5 and left(stringu2, 1) > 'N'
  order by two, four limit 5;
  unique1 | unique2 | two | four | ten | twenty | hundred | thousand | twothousand | fivethous | tenthous | odd | even | stringu1 | stringu2 | string4 
