@@ -306,6 +306,10 @@ static TupleTableSlot *
 IndexOnlyPostprocess(IndexOnlyScanState *node, TupleTableSlot *slot)
 {
 	IndexScanDesc scandesc = node->ioss_ScanDesc;
+	if (TupIsNull(slot))
+	{
+		return slot;
+	}
 
 	if (node->ioss_HeapTuple == NULL)
 	{
