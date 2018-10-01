@@ -537,11 +537,12 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 			&indexcostestimate->index_pages);
 
 	
-		indexcostestimate->qpqualsSelectity = clauselist_selectivity(root,
-			path->indexqpquals,
-			0,
-			JOIN_INNER,
-			NULL);
+		// already calculated in set_baserel_size_estimates, not 100% accurate but enough
+		if (baserel->tuples > 0.0)
+			indexcostestimate->qpqualsSelectity = baserel->rows / baserel->tuples;
+		else 
+			indexcostestimate->qpqualsSelectity = clauselist_selectivity(root, path->indexqpquals, 0, JOIN_INNER, NULL);
+
 		indexcostestimate->empty = false;
 	}
 
