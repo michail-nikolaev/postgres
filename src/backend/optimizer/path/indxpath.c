@@ -874,7 +874,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	bool		pathkeys_possibly_useful;
 	bool		index_is_ordered;
 	bool		index_only_scan;
-	bool		indexonly_fetchscan;
+	bool		index_only_fetchscan;
 	int			indexcol;
 	List	   *qpquals;
 	List	   *indexquals,
@@ -1047,8 +1047,9 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	 */
 	index_only_scan = (scantype != ST_BITMAPSCAN &&
 					   check_index_only(rel, index, qpquals, false));
-	indexonly_fetchscan = (!index_only_scan && 
+	index_only_fetchscan = (!index_only_scan && 
 							list_length(root->rowMarks) == 0 &&
+							list_length(qpquals) != 0 &&
 							root->parse->commandType == CMD_SELECT &&
 							scantype != ST_BITMAPSCAN &&
 							check_index_only(rel, index, qpquals, true));
@@ -1075,7 +1076,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  ForwardScanDirection :
 								  NoMovementScanDirection,
 								  index_only_scan,
-								  indexonly_fetchscan,
+								  index_only_fetchscan,
 								  outer_relids,
 								  loop_count,
 								  param_info,
@@ -1106,7 +1107,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  useful_pathkeys,
 									  BackwardScanDirection,
 									  index_only_scan,
-									  indexonly_fetchscan,
+									  index_only_fetchscan,
 									  outer_relids,
 									  loop_count,
 									  param_info,
