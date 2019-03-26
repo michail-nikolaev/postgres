@@ -1037,7 +1037,8 @@ create_index_path(PlannerInfo *root,
 	IndexPath  *pathnode = makeNode(IndexPath);
 	RelOptInfo *rel = index->rel;
 	List	   *indexquals,
-			   *indexqualcols;
+			   *indexqualcols,
+			   *boolenized_indexclauses;
 
 	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
@@ -1051,12 +1052,13 @@ create_index_path(PlannerInfo *root,
 
 	/* Convert clauses to indexquals the executor can handle */
 	expand_indexqual_conditions(index, indexclauses, indexclausecols,
-								&indexquals, &indexqualcols);
+								&indexquals, &indexqualcols, &boolenized_indexclauses);
 
 	/* Fill in the pathnode */
 	pathnode->indexinfo = index;
 	pathnode->indexclauses = indexclauses;
 	pathnode->indexquals = indexquals;
+	pathnode->boolenized_indexquals = boolenized_indexclauses;
 	pathnode->indexqualcols = indexqualcols;
 	pathnode->indexorderbys = indexorderbys;
 	pathnode->indexorderbycols = indexorderbycols;

@@ -3551,10 +3551,12 @@ match_special_index_operator(Expr *clause, Oid opfamily, Oid idxcollation,
 void
 expand_indexqual_conditions(IndexOptInfo *index,
 							List *indexclauses, List *indexclausecols,
-							List **indexquals_p, List **indexqualcols_p)
+							List **indexquals_p, List **indexqualcols_p,
+							List **boolenized_indexclauses_p)
 {
 	List	   *indexquals = NIL;
 	List	   *indexqualcols = NIL;
+	List	   *boolenized_indexclauses = NIL;
 	ListCell   *lcc,
 			   *lci;
 
@@ -3584,6 +3586,8 @@ expand_indexqual_conditions(IndexOptInfo *index,
 				indexquals = lappend(indexquals,
 									 make_simple_restrictinfo(boolqual));
 				indexqualcols = lappend_int(indexqualcols, indexcol);
+
+				boolenized_indexclauses = lappend(boolenized_indexclauses, rinfo);
 				continue;
 			}
 		}
@@ -3629,6 +3633,7 @@ expand_indexqual_conditions(IndexOptInfo *index,
 
 	*indexquals_p = indexquals;
 	*indexqualcols_p = indexqualcols;
+	*boolenized_indexclauses_p = boolenized_indexclauses;
 }
 
 /*

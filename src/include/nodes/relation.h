@@ -1169,9 +1169,10 @@ typedef struct IndexPath
 	IndexOptInfo *indexinfo;
 	List	   *indexclauses;
 	List	   *indexquals;
-	List	   *indexqualcols;
+	List	   *indexqualcols;	
 	List	   *indexorderbys;
 	List	   *indexorderbycols;
+	List	   *boolenized_indexquals;
 	ScanDirection indexscandir;
 	Cost		indextotalcost;
 	Selectivity indexselectivity;

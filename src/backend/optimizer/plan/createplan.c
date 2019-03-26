@@ -2562,6 +2562,7 @@ create_indexscan_plan(PlannerInfo *root,
 {
 	Scan	   *scan_plan;
 	List	   *indexquals = best_path->indexquals;
+	List	   *boolenized_indexquals = best_path->boolenized_indexquals;
 	List	   *indexorderbys = best_path->indexorderbys;
 	Index		baserelid = best_path->path.parent->relid;
 	Oid			indexoid = best_path->indexinfo->indexoid;
@@ -2630,6 +2631,8 @@ create_indexscan_plan(PlannerInfo *root,
 			continue;			/* we may drop pseudoconstants here */
 		if (list_member_ptr(indexquals, rinfo))
 			continue;			/* simple duplicate */
+		if (list_member_ptr(boolenized_indexquals, rinfo))
+			continue;			/* boolean duplicate */
 		if (is_redundant_derived_clause(rinfo, indexquals))
 			continue;			/* derived from same EquivalenceClass */
 		if (!contain_mutable_functions((Node *) rinfo->clause) &&
