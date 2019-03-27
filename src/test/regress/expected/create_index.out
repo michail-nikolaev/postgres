@@ -3168,8 +3168,7 @@ explain (costs off)
  Limit
    ->  Index Scan using boolindex_b_i_key on boolindex
          Index Cond: (b = true)
-         Filter: b
-(4 rows)
+(3 rows)
 
 explain (costs off)
   select * from boolindex where b = true order by i desc limit 10;
@@ -3178,8 +3177,7 @@ explain (costs off)
  Limit
    ->  Index Scan Backward using boolindex_b_i_key on boolindex
          Index Cond: (b = true)
-         Filter: b
-(4 rows)
+(3 rows)
 
 explain (costs off)
   select * from boolindex where not b order by i limit 10;
@@ -3188,8 +3186,7 @@ explain (costs off)
  Limit
    ->  Index Scan using boolindex_b_i_key on boolindex
          Index Cond: (b = false)
-         Filter: (NOT b)
-(4 rows)
+(3 rows)
 
 --
 -- Test for multilevel page deletion
