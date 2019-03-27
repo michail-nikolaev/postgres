@@ -81,7 +81,7 @@ extern bool match_index_to_operand(Node *operand, int indexcol,
 extern void expand_indexqual_conditions(IndexOptInfo *index,
 							List *indexclauses, List *indexclausecols,
 							List **indexquals_p, List **indexqualcols_p, 
-							List **boolenized_indexclauses_p);
+							List **boolindexqualsorig_p);
 extern void check_index_predicates(PlannerInfo *root, RelOptInfo *rel);
 extern Expr *adjust_rowcompare_for_index(RowCompareExpr *clause,
 							IndexOptInfo *index,

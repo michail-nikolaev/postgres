@@ -3534,8 +3534,13 @@ match_special_index_operator(Expr *clause, Oid opfamily, Oid idxcollation,
  *	  index qual clauses.
  *
  * Standard qual clauses (those in the index's opfamily) are passed through
- * unchanged.  Boolean clauses and "special" index operators are expanded
- * into clauses that the indexscan machinery will know what to do with.
+ * unchanged.
+ * 
+ * Boolean clauses and "special" index operators are expanded into clauses
+ * that the indexscan machinery will know what to do with.
+ * Original boolean clauses are passed to bool_indexquals_orig_p to avoid
+ * redundant check in index scan filter later.
+ *
  * RowCompare clauses are simplified if necessary to create a clause that is
  * fully checkable by the index.
  *
@@ -3552,11 +3557,11 @@ void
 expand_indexqual_conditions(IndexOptInfo *index,
 							List *indexclauses, List *indexclausecols,
 							List **indexquals_p, List **indexqualcols_p,
-							List **boolenized_indexclauses_p)
+							List **boolindexqualsorig_p)
 {
 	List	   *indexquals = NIL;
 	List	   *indexqualcols = NIL;
-	List	   *boolenized_indexclauses = NIL;
+	List	   *boolindexqualsorig = NIL;
 	ListCell   *lcc,
 			   *lci;
 
@@ -3587,7 +3592,7 @@ expand_indexqual_conditions(IndexOptInfo *index,
 									 make_simple_restrictinfo(boolqual));
 				indexqualcols = lappend_int(indexqualcols, indexcol);
 
-				boolenized_indexclauses = lappend(boolenized_indexclauses, rinfo);
+				boolindexqualsorig = lappend(boolindexqualsorig, rinfo);
 				continue;
 			}
 		}
@@ -3633,7 +3638,7 @@ expand_indexqual_conditions(IndexOptInfo *index,
 
 	*indexquals_p = indexquals;
 	*indexqualcols_p = indexqualcols;
-	*boolenized_indexclauses_p = boolenized_indexclauses;
+	*boolindexqualsorig_p = boolindexqualsorig;
 }
 
 /*

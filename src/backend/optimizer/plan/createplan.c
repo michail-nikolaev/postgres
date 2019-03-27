@@ -2562,7 +2562,7 @@ create_indexscan_plan(PlannerInfo *root,
 {
 	Scan	   *scan_plan;
 	List	   *indexquals = best_path->indexquals;
-	List	   *boolenized_indexquals = best_path->boolenized_indexquals;
+	List	   *boolindexqualsorig = best_path->boolindexqualsorig;
 	List	   *indexorderbys = best_path->indexorderbys;
 	Index		baserelid = best_path->path.parent->relid;
 	Oid			indexoid = best_path->indexinfo->indexoid;
@@ -2605,6 +2605,10 @@ create_indexscan_plan(PlannerInfo *root,
 	 *
 	 * In normal cases simple pointer equality checks will be enough to spot
 	 * duplicate RestrictInfos, so we try that first.
+	 * 
+	 * Additionally boolean clauses are checked in boolindexqualsorig because they
+	 * are expanded into clauses that the indexscan machinery will know what to
+	 * do with in expand_indexqual_conditions.
 	 *
 	 * Another common case is that a scan_clauses entry is generated from the
 	 * same EquivalenceClass as some indexqual, and is therefore redundant
@@ -2631,7 +2635,7 @@ create_indexscan_plan(PlannerInfo *root,
 			continue;			/* we may drop pseudoconstants here */
 		if (list_member_ptr(indexquals, rinfo))
 			continue;			/* simple duplicate */
-		if (list_member_ptr(boolenized_indexquals, rinfo))
+		if (list_member_ptr(boolindexqualsorig, rinfo))
 			continue;			/* boolean duplicate */
 		if (is_redundant_derived_clause(rinfo, indexquals))
 			continue;			/* derived from same EquivalenceClass */

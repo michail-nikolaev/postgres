@@ -143,7 +143,7 @@ typedef struct
 	QualCost	total;
 } cost_qual_eval_context;
 
-static List *extract_nonindex_conditions(List *qual_clauses, List *indexquals);
+static List *extract_nonindex_conditions(List *qual_clauses, List *indexquals, List *boolindexqualsorig);
 static MergeScanSelCache *cached_scansel(PlannerInfo *root,
 			   RestrictInfo *rinfo,
 			   PathKey *pathkey);
@@ -517,16 +517,16 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		/* qpquals come from the rel's restriction clauses and ppi_clauses */
 		qpquals = list_concat(
 							  extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
-														  path->indexquals),
+														  path->indexquals, path->boolindexqualsorig),
 							  extract_nonindex_conditions(path->path.param_info->ppi_clauses,
-														  path->indexquals));
+														  path->indexquals, path->boolindexqualsorig));
 	}
 	else
 	{
 		path->path.rows = baserel->rows;
 		/* qpquals come from just the rel's restriction clauses */
 		qpquals = extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
-											  path->indexquals);
+											  path->indexquals, path->boolindexqualsorig);
 	}
 
 	if (!enable_indexscan)
@@ -764,7 +764,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
  * selected for use.
  */
 static List *
-extract_nonindex_conditions(List *qual_clauses, List *indexquals)
+extract_nonindex_conditions(List *qual_clauses, List *indexquals, List *boolindexqualsorig)
 {
 	List	   *result = NIL;
 	ListCell   *lc;
@@ -777,6 +777,8 @@ extract_nonindex_conditions(List *qual_clauses, List *indexquals)
 			continue;			/* we may drop pseudoconstants here */
 		if (list_member_ptr(indexquals, rinfo))
 			continue;			/* simple duplicate */
+		if (list_member_ptr(boolindexqualsorig, rinfo))
+			continue;			/* boolean duplicate */
 		if (is_redundant_derived_clause(rinfo, indexquals))
 			continue;			/* derived from same EquivalenceClass */
 		/* ... skip the predicate proof attempt createplan.c will try ... */
