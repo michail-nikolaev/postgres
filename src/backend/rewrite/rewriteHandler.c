@@ -1317,6 +1317,7 @@ rewriteTargetListUD(Query *parsetree, RangeTblEntry *target_rte,
 
 	if (target_relation->rd_rel->relkind == RELKIND_RELATION ||
 		target_relation->rd_rel->relkind == RELKIND_MATVIEW ||
+		target_relation->rd_rel->relkind == RELKIND_TOASTVALUE ||
 		target_relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
 		/*

@@ -1710,7 +1710,7 @@ ExecModifyTable(PlanState *pstate)
 				bool		isNull;
 
 				relkind = resultRelInfo->ri_RelationDesc->rd_rel->relkind;
-				if (relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW)
+				if (relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW || relkind == RELKIND_TOASTVALUE)
 				{
 					datum = ExecGetJunkAttribute(slot,
 												 junkfilter->jf_junkAttNo,
@@ -2290,6 +2290,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 					relkind = resultRelInfo->ri_RelationDesc->rd_rel->relkind;
 					if (relkind == RELKIND_RELATION ||
 						relkind == RELKIND_MATVIEW ||
+						relkind == RELKIND_TOASTVALUE ||
 						relkind == RELKIND_PARTITIONED_TABLE)
 					{
 						j->jf_junkAttNo = ExecFindJunkAttribute(j, "ctid");
