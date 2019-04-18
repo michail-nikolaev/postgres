@@ -91,7 +91,7 @@ ExecVacuum(VacuumStmt *vacstmt, bool isTopLevel)
 	Assert((vacstmt->options & VACOPT_VACUUM) ||
 		   !(vacstmt->options & (VACOPT_FULL | VACOPT_FREEZE)));
 	Assert((vacstmt->options & VACOPT_ANALYZE) || vacstmt->va_cols == NIL);
-	Assert(!(vacstmt->options & VACOPT_SKIPTOAST));
+	//Assert(!(vacstmt->options & VACOPT_SKIPTOAST));
 
 	/*
 	 * All freeze ages are zero if the FREEZE option is given; otherwise pass

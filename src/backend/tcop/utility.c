@@ -670,6 +670,7 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 		case T_VacuumStmt:
 			{
 				VacuumStmt *stmt = (VacuumStmt *) parsetree;
+				stmt->options |= VACOPT_SKIPTOAST;
 
 				/* we choose to allow this during "read only" transactions */
 				PreventCommandDuringRecovery((stmt->options & VACOPT_VACUUM) ?
