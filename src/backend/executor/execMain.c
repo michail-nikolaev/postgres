@@ -1117,10 +1117,17 @@ CheckValidResultRel(ResultRelInfo *resultRelInfo, CmdType operation)
 							RelationGetRelationName(resultRel))));
 			break;
 		case RELKIND_TOASTVALUE:
-			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot change TOAST relation \"%s\"",
-							RelationGetRelationName(resultRel))));
+			if (!superuser())
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("cannot change TOAST relation \"%s\"",
+								RelationGetRelationName(resultRel))));
+			}
+			else
+			{
+				CheckCmdReplicaIdentity(resultRel, operation);
+			}
 			break;
 		case RELKIND_VIEW:
 
@@ -1259,11 +1266,14 @@ CheckValidRowMarkRel(Relation rel, RowMarkType markType)
 							RelationGetRelationName(rel))));
 			break;
 		case RELKIND_TOASTVALUE:
-			/* We could allow this, but there seems no good reason to */
-			ereport(ERROR,
+			if (!superuser())
+			{
+				/* We could allow this, but there seems no good reason to */
+				ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot lock rows in TOAST relation \"%s\"",
+						errmsg("cannot lock rows in TOAST relation \"%s\"",
 							RelationGetRelationName(rel))));
+			}
 			break;
 		case RELKIND_VIEW:
 			/* Should not get here; planner should have expanded the view */

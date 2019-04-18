@@ -1977,10 +1977,19 @@ toast_fetch_datum(struct varlena *attr)
 		 * Some checks on the data we've found
 		 */
 		if (residx != nextidx)
-			elog(ERROR, "unexpected chunk number %d (expected %d) for toast value %u in %s",
-				 residx, nextidx,
-				 toast_pointer.va_valueid,
-				 RelationGetRelationName(toastrel));
+		{
+			// because of HeapTupleSatisfiesToast snapshpt we could see same chunk twice 
+			// (one from non-committed transaction). If so - just skip it.
+			if (residx != nextidx - 1)
+			{
+				elog(ERROR, "unexpected chunk number %d (expected %d) for toast value %u in %s",
+					 residx, nextidx,
+					toast_pointer.va_valueid,
+					RelationGetRelationName(toastrel));
+			}
+			
+			continue;
+		}
 		if (residx < numchunks - 1)
 		{
 			if (chunksize != TOAST_MAX_CHUNK_SIZE)
