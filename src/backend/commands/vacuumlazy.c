@@ -82,7 +82,8 @@
  */
 #define VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL		20	/* ms */
 #define VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL		50	/* ms */
-#define VACUUM_TRUNCATE_LOCK_TIMEOUT			5000	/* ms */
+#define VACUUM_TRUNCATE_LOCK_TIMEOUT			50000	/* ms */
+#define VACUUM_TRUNCATE_MAX_PAGES_PER_LOCK		64	/* pages */
 
 /*
  * Guesstimation of number of dead tuples per page.  This is used to
@@ -1851,6 +1852,7 @@ static BlockNumber
 count_nondeletable_pages(Relation onerel, LVRelStats *vacrelstats)
 {
 	BlockNumber blkno;
+	BlockNumber blkno_start;
 	BlockNumber prefetchedUntil;
 	instr_time	starttime;
 
@@ -1863,7 +1865,7 @@ count_nondeletable_pages(Relation onerel, LVRelStats *vacrelstats)
 	 * unsigned.)  To make the scan faster, we prefetch a few blocks at a time
 	 * in forward direction, so that OS-level readahead can kick in.
 	 */
-	blkno = vacrelstats->rel_pages;
+	blkno = blkno_start = vacrelstats->rel_pages;
 	StaticAssertStmt((PREFETCH_SIZE & (PREFETCH_SIZE - 1)) == 0,
 					 "prefetch size must be power of 2");
 	prefetchedUntil = InvalidBlockNumber;
@@ -1904,6 +1906,15 @@ count_nondeletable_pages(Relation onerel, LVRelStats *vacrelstats)
 					return blkno;
 				}
 				starttime = currenttime;
+			}
+			if (blkno_start - blkno > VACUUM_TRUNCATE_MAX_PAGES_PER_LOCK)
+			{
+				ereport(elevel,
+					(errmsg("\"%s\": suspending truncate due to truncate page limit",
+						RelationGetRelationName(onerel))));
+
+				vacrelstats->lock_waiter_detected = true;
+				return blkno;
 			}
 		}
 
