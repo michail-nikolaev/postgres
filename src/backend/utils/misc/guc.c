@@ -2031,6 +2031,49 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"vacuum_truncate_lock_check_interval", PGC_USERSET, RESOURCES_VACUUM_DELAY,
+			gettext_noop("Vacuum exclusive lock check internal on heap truncate."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&VacuumTruncateLockCheckInterval,
+		20, 0, 10000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_truncate_lock_wait_interval", PGC_USERSET, RESOURCES_VACUUM_DELAY,
+			gettext_noop("Vacuum exclusive lock wait interval on heap truncate."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&VacuumTruncateLockWaitInterval,
+		50, 0, 10000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_truncate_lock_timeout", PGC_USERSET, RESOURCES_VACUUM_DELAY,
+			gettext_noop("Vacuum exclusive lock timeout on heap truncate."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&VacuumTruncateLockTimeout,
+		50000, 1, 6000000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_truncate_max_pages_per_lock", PGC_USERSET, RESOURCES_VACUUM_DELAY,
+			gettext_noop("Vacuum limit on pages truncate per lock take."),
+			NULL
+		},
+		&VacuumTruncateMaxPagesPerLock,
+		64, 1, 5000000,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"autovacuum_vacuum_cost_delay", PGC_SIGHUP, AUTOVACUUM,
 			gettext_noop("Vacuum cost delay in milliseconds, for autovacuum."),
 			NULL,

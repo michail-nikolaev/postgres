@@ -73,17 +73,6 @@
 #define REL_TRUNCATE_MINIMUM	1000
 #define REL_TRUNCATE_FRACTION	16
 
-/*
- * Timing parameters for truncate locking heuristics.
- *
- * These were not exposed as user tunable GUC values because it didn't seem
- * that the potential for improvement was great enough to merit the cost of
- * supporting them.
- */
-#define VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL		20	/* ms */
-#define VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL		50	/* ms */
-#define VACUUM_TRUNCATE_LOCK_TIMEOUT			50000	/* ms */
-#define VACUUM_TRUNCATE_MAX_PAGES_PER_LOCK		64	/* pages */
 
 /*
  * Guesstimation of number of dead tuples per page.  This is used to
@@ -1759,8 +1748,8 @@ lazy_truncate_heap(Relation onerel, LVRelStats *vacrelstats)
 			 */
 			CHECK_FOR_INTERRUPTS();
 
-			if (++lock_retry > (VACUUM_TRUNCATE_LOCK_TIMEOUT /
-								VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL))
+			if (++lock_retry > (VacuumTruncateLockTimeout /
+								VacuumTruncateLockWaitInterval))
 			{
 				/*
 				 * We failed to establish the lock in the specified number of
@@ -1773,7 +1762,7 @@ lazy_truncate_heap(Relation onerel, LVRelStats *vacrelstats)
 				return;
 			}
 
-			pg_usleep(VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL * 1000L);
+			pg_usleep(VacuumTruncateLockWaitInterval * 1000L);
 		}
 
 		/*
@@ -1894,7 +1883,7 @@ count_nondeletable_pages(Relation onerel, LVRelStats *vacrelstats)
 			elapsed = currenttime;
 			INSTR_TIME_SUBTRACT(elapsed, starttime);
 			if ((INSTR_TIME_GET_MICROSEC(elapsed) / 1000)
-				>= VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL)
+				>= VacuumTruncateLockCheckInterval)
 			{
 				if (LockHasWaitersRelation(onerel, AccessExclusiveLock))
 				{
@@ -1907,15 +1896,15 @@ count_nondeletable_pages(Relation onerel, LVRelStats *vacrelstats)
 				}
 				starttime = currenttime;
 			}
-			if (blkno_start - blkno > VACUUM_TRUNCATE_MAX_PAGES_PER_LOCK)
-			{
-				ereport(elevel,
-					(errmsg("\"%s\": suspending truncate due to truncate page limit",
-						RelationGetRelationName(onerel))));
+		}
+		if (blkno_start - blkno >= VacuumTruncateMaxPagesPerLock)
+		{
+			ereport(elevel,
+				(errmsg("\"%s\": suspending truncate due to truncate page limit",
+					RelationGetRelationName(onerel))));
 
-				vacrelstats->lock_waiter_detected = true;
-				return blkno;
-			}
+			vacrelstats->lock_waiter_detected = true;
+			return blkno;
 		}
 
 		/*

@@ -249,6 +249,12 @@ extern int	VacuumCostPageDirty;
 extern int	VacuumCostLimit;
 extern int	VacuumCostDelay;
 
+extern int	VacuumTruncateLockCheckInterval;
+extern int	VacuumTruncateLockWaitInterval;
+extern int	VacuumTruncateLockTimeout;
+extern int	VacuumTruncateMaxPagesPerLock;
+
+
 extern int	VacuumPageHit;
 extern int	VacuumPageMiss;
 extern int	VacuumPageDirty;

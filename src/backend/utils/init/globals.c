@@ -132,6 +132,15 @@ int			VacuumCostPageDirty = 20;
 int			VacuumCostLimit = 200;
 int			VacuumCostDelay = 0;
 
+/*
+ * Timing parameters for truncate locking heuristics.
+ *
+ */
+int			VacuumTruncateLockCheckInterval = 20; /* ms */
+int			VacuumTruncateLockWaitInterval = 50; /* ms */
+int			VacuumTruncateLockTimeout = 50000; /* ms */
+int			VacuumTruncateMaxPagesPerLock = 64;/* pages */
+
 int			VacuumPageHit = 0;
 int			VacuumPageMiss = 0;
 int			VacuumPageDirty = 0;
