@@ -18,6 +18,7 @@
 
 #include "access/heapam.h"
 #include "access/sysattr.h"
+#include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_subscription_rel.h"
 #include "executor/executor.h"
@@ -255,6 +256,13 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 					 errmsg("logical replication target relation \"%s.%s\" does not exist",
 							remoterel->nspname, remoterel->relname)));
 		entry->localrel = heap_open(relid, NoLock);
+
+		/* Don't allow catalog access */
+		if (IsSystemClass(relid, entry->localrel->rd_rel))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("logical replication target relation \"%s.%s\" is a system class",
+							remoterel->nspname, remoterel->relname)));
 
 		/* Check for supported relkind. */
 		CheckSubscriptionRelkind(entry->localrel->rd_rel->relkind,

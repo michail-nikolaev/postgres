@@ -3,6 +3,9 @@ SET synchronous_commit = on;
 
 -- setup
 CREATE ROLE regress_lr_normal;
+CREATE ROLE mdb_replication;
+CREATE ROLE regress_lr_mdb_replication;
+GRANT mdb_replication TO regress_lr_mdb_replication;
 CREATE ROLE regress_lr_superuser SUPERUSER;
 CREATE ROLE regress_lr_replication REPLICATION;
 CREATE TABLE lr_test(data text);
@@ -13,6 +16,10 @@ SELECT 'init' FROM pg_create_logical_replication_slot('regression_slot', 'test_d
 INSERT INTO lr_test VALUES('lr_superuser_init');
 SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
 SELECT pg_drop_replication_slot('regression_slot');
+-- superuser can control slot starts from mdb
+SELECT 'init' FROM pg_create_logical_replication_slot('mdb_regression_slot', 'test_decoding');
+SELECT data FROM pg_logical_slot_get_changes('mdb_regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+SELECT pg_drop_replication_slot('mdb_regression_slot');
 RESET ROLE;
 
 -- replication user can control replication
@@ -21,6 +28,28 @@ SELECT 'init' FROM pg_create_logical_replication_slot('regression_slot', 'test_d
 INSERT INTO lr_test VALUES('lr_superuser_init');
 SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
 SELECT pg_drop_replication_slot('regression_slot');
+-- replication user can control slot starts from mdb
+SELECT 'init' FROM pg_create_logical_replication_slot('mdb_regression_slot', 'test_decoding');
+SELECT data FROM pg_logical_slot_get_changes('mdb_regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+SELECT pg_drop_replication_slot('mdb_regression_slot');
+SELECT 'init' FROM pg_create_logical_replication_slot('mdb_regression_slot', 'test_decoding');
+RESET ROLE;
+
+-- mdb_replication user can control replication
+SET ROLE regress_lr_mdb_replication;
+SELECT 'init' FROM pg_create_logical_replication_slot('regression_slot', 'test_decoding');
+INSERT INTO lr_test VALUES('lr_mdb_replication_init');
+SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+SELECT pg_drop_replication_slot('regression_slot');
+-- mdb_replication user can't control slot starts from mdb
+SELECT 'init' FROM pg_create_logical_replication_slot('mdb_regression_slot2', 'test_decoding');
+SELECT data FROM pg_logical_slot_get_changes('mdb_regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
+SELECT pg_drop_replication_slot('mdb_regression_slot');
+RESET ROLE;
+
+-- cleanup
+SET ROLE regress_lr_superuser;
+SELECT pg_drop_replication_slot('mdb_regression_slot');
 RESET ROLE;
 
 -- plain user *can't* can control replication

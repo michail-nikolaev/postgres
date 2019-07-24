@@ -587,6 +587,7 @@ apply_handle_insert(StringInfo s)
 	EState	   *estate;
 	TupleTableSlot *remoteslot;
 	MemoryContext oldctx;
+	AclResult	aclresult;
 
 	ensure_transaction();
 
@@ -601,6 +602,11 @@ apply_handle_insert(StringInfo s)
 		logicalrep_rel_close(rel, RowExclusiveLock);
 		return;
 	}
+
+	/* Check permission on table. */
+	aclresult = pg_class_aclcheck(RelationGetRelid(rel->localrel), GetUserId(), ACL_INSERT);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, ACL_KIND_CLASS, RelationGetRelationName(rel->localrel));
 
 	/* Initialize the executor state. */
 	estate = create_estate_for_relation(rel);
@@ -689,6 +695,7 @@ apply_handle_update(StringInfo s)
 	TupleTableSlot *remoteslot;
 	bool		found;
 	MemoryContext oldctx;
+	AclResult	aclresult;
 
 	ensure_transaction();
 
@@ -704,6 +711,11 @@ apply_handle_update(StringInfo s)
 		logicalrep_rel_close(rel, RowExclusiveLock);
 		return;
 	}
+
+	/* Check permission on table. */
+	aclresult = pg_class_aclcheck(RelationGetRelid(rel->localrel), GetUserId(), ACL_UPDATE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, ACL_KIND_CLASS, RelationGetRelationName(rel->localrel));
 
 	/* Check if we can do the update. */
 	check_relation_updatable(rel);
@@ -808,6 +820,7 @@ apply_handle_delete(StringInfo s)
 	TupleTableSlot *localslot;
 	bool		found;
 	MemoryContext oldctx;
+	AclResult	aclresult;
 
 	ensure_transaction();
 
@@ -822,6 +835,11 @@ apply_handle_delete(StringInfo s)
 		logicalrep_rel_close(rel, RowExclusiveLock);
 		return;
 	}
+
+	/* Check permission on table. */
+	aclresult = pg_class_aclcheck(RelationGetRelid(rel->localrel), GetUserId(), ACL_DELETE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, ACL_KIND_CLASS, RelationGetRelationName(rel->localrel));
 
 	/* Check if we can do the delete. */
 	check_relation_updatable(rel);

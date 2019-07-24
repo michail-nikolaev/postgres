@@ -564,6 +564,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	bool		am_superuser;
 	char	   *fullpath;
 	char		dbname[NAMEDATALEN];
+	Oid         role;
 
 	elog(DEBUG3, "InitPostgres");
 
@@ -789,11 +790,13 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	if (am_walsender)
 	{
 		Assert(!bootstrap);
-
-		if (!superuser() && !has_rolreplication(GetUserId()))
+		role = get_role_oid("mdb_replication", true);
+		is_mdb_repl_role = role;
+		is_repl_role = has_rolreplication(GetUserId());
+		if (!superuser() && !has_rolreplication(GetUserId()) && !is_member_of_role(GetUserId(), role))
 			ereport(FATAL,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be superuser or replication role to start walsender")));
+					 errmsg("must be superuser, replication role or mdb_replication to start walsender")));
 	}
 
 	/*
