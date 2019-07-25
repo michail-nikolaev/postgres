@@ -35,13 +35,13 @@ distprep: psqlscan.c
 
 # libpgfeutils could be useful to contrib, so install it
 install: all installdirs
-	$(INSTALL_STLIB) libpgfeutils.a '$(DESTDIR)$(libdir)/libpgfeutils.a'
+	$(INSTALL_STLIB) libpgfeutils.a '$(DESTDIR)$(pkglibdir)/libpgfeutils.a'
 
 installdirs:
-	$(MKDIR_P) '$(DESTDIR)$(libdir)'
+	$(MKDIR_P) '$(DESTDIR)$(pkglibdir)'
 
 uninstall:
-	rm -f '$(DESTDIR)$(libdir)/libpgfeutils.a'
+	rm -f '$(DESTDIR)$(pkglibdir)/libpgfeutils.a'
 
 clean distclean:
 	rm -f libpgfeutils.a $(OBJS) lex.backup

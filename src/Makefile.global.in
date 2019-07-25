@@ -120,7 +120,7 @@ libdir := @libdir@
 pkglibdir = $(libdir)
 ifeq "$(findstring pgsql, $(pkglibdir))" ""
 ifeq "$(findstring postgres, $(pkglibdir))" ""
-override pkglibdir := $(pkglibdir)/postgresql
+override pkglibdir := /usr/lib/postgresql/@PG_MAJORVERSION@/lib
 endif
 endif
 
@@ -168,7 +168,7 @@ endif # PGXS
 
 # These derived path variables aren't separately configurable.
 
-includedir_server = $(pkgincludedir)/server
+includedir_server = $(pkgincludedir)/@PG_MAJORVERSION@/server
 includedir_internal = $(pkgincludedir)/internal
 pgxsdir = $(pkglibdir)/pgxs
 
@@ -515,7 +515,7 @@ libpq = -L$(libpq_builddir) -lpq
 # pgport before libpq.  This does cause duplicate -lpgport's to appear
 # on client link lines.
 ifdef PGXS
-libpq_pgport = -L$(libdir) -lpgcommon -lpgport $(libpq)
+libpq_pgport = -L$(pkglibdir) -lpgcommon -lpgport $(libpq)
 else
 libpq_pgport = -L$(top_builddir)/src/common -lpgcommon -L$(top_builddir)/src/port -lpgport $(libpq)
 endif

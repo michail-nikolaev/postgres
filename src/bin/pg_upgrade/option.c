@@ -460,6 +460,11 @@ get_sock_dir(ClusterInfo *cluster, bool live_check)
 			cluster->sockdir = pg_malloc(MAXPGPATH);
 			if (!getcwd(cluster->sockdir, MAXPGPATH))
 				pg_fatal("could not determine current directory\n");
+#ifndef UNIX_PATH_MAX
+#define UNIX_PATH_MAX 108
+#endif
+			if (strlen(cluster->sockdir) >= UNIX_PATH_MAX - sizeof(".s.PGSQL.50432"))
+				strcpy(cluster->sockdir, "/tmp"); /* fall back to tmp */
 		}
 		else
 		{

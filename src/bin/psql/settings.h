@@ -19,8 +19,8 @@
 #define DEFAULT_EDITOR	"notepad.exe"
 /* no DEFAULT_EDITOR_LINENUMBER_ARG for Notepad */
 #else
-#define DEFAULT_EDITOR	"vi"
-#define DEFAULT_EDITOR_LINENUMBER_ARG "+"
+#define DEFAULT_EDITOR	"sensible-editor"
+/*#define DEFAULT_EDITOR_LINENUMBER_ARG "+"*/
 #endif
 
 #define DEFAULT_PROMPT1 "%/%R%# "

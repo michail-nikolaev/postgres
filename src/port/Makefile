@@ -46,13 +46,13 @@ all: libpgport.a libpgport_srv.a
 
 # libpgport is needed by some contrib
 install: all installdirs
-	$(INSTALL_STLIB) libpgport.a '$(DESTDIR)$(libdir)/libpgport.a'
+	$(INSTALL_STLIB) libpgport.a '$(DESTDIR)$(pkglibdir)/libpgport.a'
 
 installdirs:
-	$(MKDIR_P) '$(DESTDIR)$(libdir)'
+	$(MKDIR_P) '$(DESTDIR)$(pkglibdir)'
 
 uninstall:
-	rm -f '$(DESTDIR)$(libdir)/libpgport.a'
+	rm -f '$(DESTDIR)$(pkglibdir)/libpgport.a'
 
 libpgport.a: $(OBJS)
 	rm -f $@

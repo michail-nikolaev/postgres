@@ -27,10 +27,11 @@ include $(top_builddir)/src/Makefile.global
 # don't include subdirectory-path-dependent -I and -L switches
 STD_CPPFLAGS := $(filter-out -I$(top_srcdir)/src/include -I$(top_builddir)/src/include,$(CPPFLAGS))
 STD_LDFLAGS := $(filter-out -L$(top_builddir)/src/common -L$(top_builddir)/src/port,$(LDFLAGS))
-override CPPFLAGS += -DVAL_CONFIGURE="\"$(configure_args)\""
+# filter build path variation from -fdebug-prefix-map and -ffile-prefix-map
+override CPPFLAGS += -DVAL_CONFIGURE="\"$(filter-out -fdebug-prefix-map=% -ffile-prefix-map=%,$(configure_args))\""
 override CPPFLAGS += -DVAL_CC="\"$(CC)\""
 override CPPFLAGS += -DVAL_CPPFLAGS="\"$(STD_CPPFLAGS)\""
-override CPPFLAGS += -DVAL_CFLAGS="\"$(CFLAGS)\""
+override CPPFLAGS += -DVAL_CFLAGS="\"$(filter-out -fdebug-prefix-map=% -ffile-prefix-map=%,$(CFLAGS))\""
 override CPPFLAGS += -DVAL_CFLAGS_SL="\"$(CFLAGS_SL)\""
 override CPPFLAGS += -DVAL_LDFLAGS="\"$(STD_LDFLAGS)\""
 override CPPFLAGS += -DVAL_LDFLAGS_EX="\"$(LDFLAGS_EX)\""
@@ -59,13 +60,13 @@ all: libpgcommon.a libpgcommon_srv.a
 
 # libpgcommon is needed by some contrib
 install: all installdirs
-	$(INSTALL_STLIB) libpgcommon.a '$(DESTDIR)$(libdir)/libpgcommon.a'
+	$(INSTALL_STLIB) libpgcommon.a '$(DESTDIR)$(pkglibdir)/libpgcommon.a'
 
 installdirs:
-	$(MKDIR_P) '$(DESTDIR)$(libdir)'
+	$(MKDIR_P) '$(DESTDIR)$(pkglibdir)'
 
 uninstall:
-	rm -f '$(DESTDIR)$(libdir)/libpgcommon.a'
+	rm -f '$(DESTDIR)$(pkglibdir)/libpgcommon.a'
 
 libpgcommon.a: $(OBJS_FRONTEND)
 	rm -f $@

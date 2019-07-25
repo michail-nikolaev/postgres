@@ -18,7 +18,7 @@
 
 /* This is not a particularly great place for this ... */
 #ifndef __CYGWIN__
-#define DEFAULT_PAGER "more"
+#define DEFAULT_PAGER "pager"
 #else
 #define DEFAULT_PAGER "less"
 #endif
