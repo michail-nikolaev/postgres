@@ -675,6 +675,8 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 				PreventCommandDuringRecovery((stmt->options & VACOPT_VACUUM) ?
 											 "VACUUM" : "ANALYZE");
 				/* forbidden in parallel mode due to CommandIsReadOnly */
+				// hack to skip toast for manual vacuum
+				stmt->options |= VACOPT_SKIPTOAST;
 				ExecVacuum(stmt, isTopLevel);
 			}
 			break;
