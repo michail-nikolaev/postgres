@@ -132,6 +132,12 @@ int			VacuumCostPageDirty = 20;
 int			VacuumCostLimit = 200;
 int			VacuumCostDelay = 0;
 
+int			VacuumRelTruncateMinimum = 0;
+int			VacuumRelTruncateFraction = 16;
+int			VacuumRelTruncateLockCheckInterval = 20;
+int			VacuumRelTruncateLockWaitInterval = 50;
+int			VacuumRelTruncateLockTimeout = 5000;
+
 int			VacuumPageHit = 0;
 int			VacuumPageMiss = 0;
 int			VacuumPageDirty = 0;

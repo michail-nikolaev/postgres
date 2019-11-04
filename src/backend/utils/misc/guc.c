@@ -2031,6 +2031,60 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"vacuum_rel_truncate_minimum", PGC_USERSET, VACUUM_REL_TRUNCATE,
+			gettext_noop("One of the possible conditions to consider truncating the relation - minimum number of potentially - freeable pages avaible."),
+			gettext_noop("Another condition is set by vacuum_rel_truncate_fraction parameter"),
+			GUC_UNIT_BLOCKS
+		},
+		&VacuumRelTruncateMinimum,
+		1000, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_rel_truncate_fraction", PGC_USERSET, VACUUM_REL_TRUNCATE,
+			gettext_noop("One of the possible conditions to consider truncating the relation - at least (relsize / vacuum_rel_truncate_fraction) of potentially - freeable pages avaible."),
+			gettext_noop("Another condition is set by vacuum_rel_truncate_minimum parameter"),
+		},
+		&VacuumRelTruncateFraction,
+		16, 1, 1000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_rel_truncate_lock_check_interval", PGC_USERSET, VACUUM_REL_TRUNCATE,
+			gettext_noop("Interval for check if other transaction waiting for exclusive lock held by relation truncation process."),
+			gettext_noop("If other transaction waiting for exclusive lock vacuum suspend truncate due to conflicting lock request."),
+			GUC_UNIT_MS
+		},
+		&VacuumRelTruncateLockCheckInterval,
+		20, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_rel_truncate_lock_wait_interval", PGC_USERSET, VACUUM_REL_TRUNCATE,
+			gettext_noop("Interval to wait between each attempt to take exclusive lock for relation truncation."),
+			gettext_noop("Value should be less than vacuum_rel_truncate_lock_timeout."),
+			GUC_UNIT_MS
+		},
+		&VacuumRelTruncateLockWaitInterval,
+		50, 1, 100000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_rel_truncate_lock_timeout", PGC_USERSET, VACUUM_REL_TRUNCATE,
+			gettext_noop("Summary timeout for all atempts to take exclusive lock for relation truncation."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&VacuumRelTruncateLockTimeout,
+		5000, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"autovacuum_vacuum_cost_delay", PGC_SIGHUP, AUTOVACUUM,
 			gettext_noop("Vacuum cost delay in milliseconds, for autovacuum."),
 			NULL,

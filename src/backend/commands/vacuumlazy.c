@@ -64,27 +64,6 @@
 
 
 /*
- * Space/time tradeoff parameters: do these need to be user-tunable?
- *
- * To consider truncating the relation, we want there to be at least
- * REL_TRUNCATE_MINIMUM or (relsize / REL_TRUNCATE_FRACTION) (whichever
- * is less) potentially-freeable pages.
- */
-#define REL_TRUNCATE_MINIMUM	1000
-#define REL_TRUNCATE_FRACTION	16
-
-/*
- * Timing parameters for truncate locking heuristics.
- *
- * These were not exposed as user tunable GUC values because it didn't seem
- * that the potential for improvement was great enough to merit the cost of
- * supporting them.
- */
-#define VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL		20	/* ms */
-#define VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL		50	/* ms */
-#define VACUUM_TRUNCATE_LOCK_TIMEOUT			5000	/* ms */
-
-/*
  * Guesstimation of number of dead tuples per page.  This is used to
  * provide an upper limit to memory allocated when vacuuming small
  * tables.
@@ -1708,8 +1687,8 @@ should_attempt_truncation(LVRelStats *vacrelstats)
 
 	possibly_freeable = vacrelstats->rel_pages - vacrelstats->nonempty_pages;
 	if (possibly_freeable > 0 &&
-		(possibly_freeable >= REL_TRUNCATE_MINIMUM ||
-		 possibly_freeable >= vacrelstats->rel_pages / REL_TRUNCATE_FRACTION) &&
+		(possibly_freeable >= VacuumRelTruncateMinimum ||
+		 possibly_freeable >= vacrelstats->rel_pages / VacuumRelTruncateFraction) &&
 		old_snapshot_threshold < 0)
 		return true;
 	else
@@ -1758,8 +1737,8 @@ lazy_truncate_heap(Relation onerel, LVRelStats *vacrelstats)
 			 */
 			CHECK_FOR_INTERRUPTS();
 
-			if (++lock_retry > (VACUUM_TRUNCATE_LOCK_TIMEOUT /
-								VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL))
+			if (++lock_retry > (VacuumRelTruncateLockTimeout /
+								VacuumRelTruncateLockWaitInterval))
 			{
 				/*
 				 * We failed to establish the lock in the specified number of
@@ -1772,7 +1751,7 @@ lazy_truncate_heap(Relation onerel, LVRelStats *vacrelstats)
 				return;
 			}
 
-			pg_usleep(VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL * 1000L);
+			pg_usleep(VacuumRelTruncateLockWaitInterval * 1000L);
 		}
 
 		/*
@@ -1892,7 +1871,7 @@ count_nondeletable_pages(Relation onerel, LVRelStats *vacrelstats)
 			elapsed = currenttime;
 			INSTR_TIME_SUBTRACT(elapsed, starttime);
 			if ((INSTR_TIME_GET_MICROSEC(elapsed) / 1000)
-				>= VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL)
+				>= VacuumRelTruncateLockCheckInterval)
 			{
 				if (LockHasWaitersRelation(onerel, AccessExclusiveLock))
 				{
