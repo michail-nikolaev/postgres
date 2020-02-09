@@ -1063,7 +1063,7 @@ exec_simple_query(const char *query_string)
 	foreach(parsetree_item, parsetree_list)
 	{
 		RawStmt    *parsetree = lfirst_node(RawStmt, parsetree_item);
-		bool		snapshot_set = false;
+		Snapshot	snapshot = InvalidSnapshot;
 		const char *commandTag;
 		char		completionTag[COMPLETION_TAG_BUFSIZE];
 		MemoryContext per_parsetree_context = NULL;
@@ -1122,8 +1122,9 @@ exec_simple_query(const char *query_string)
 		 */
 		if (analyze_requires_snapshot(parsetree))
 		{
-			PushActiveSnapshot(GetTransactionSnapshot());
-			snapshot_set = true;
+			/* We could reuse this snapshot in PortalStart later */
+			snapshot = GetTransactionSnapshot();
+			PushActiveSnapshot(snapshot);
 		}
 
 		/*
@@ -1155,9 +1156,6 @@ exec_simple_query(const char *query_string)
 		plantree_list = pg_plan_queries(querytree_list,
 										CURSOR_OPT_PARALLEL_OK, NULL);
 
-		/* Done with the snapshot used for parsing/planning */
-		if (snapshot_set)
-			PopActiveSnapshot();
 
 		/* If we got a cancel signal in analysis or planning, quit */
 		CHECK_FOR_INTERRUPTS();
@@ -1183,9 +1181,13 @@ exec_simple_query(const char *query_string)
 						  NULL);
 
 		/*
-		 * Start the portal.  No parameters here.
+		 * Start the portal. Reuse snapshot taken for analysis/planning if exists.
 		 */
-		PortalStart(portal, NULL, 0, InvalidSnapshot);
+		PortalStart(portal, NULL, 0, snapshot);
+
+		/* Done with the snapshot used for parsing/planning */
+		if (snapshot != InvalidSnapshot)
+			PopActiveSnapshot();
 
 		/*
 		 * Select the appropriate output format: text unless we are doing a
@@ -1613,7 +1615,7 @@ exec_bind_message(StringInfo input_message)
 	ParamListInfo params;
 	MemoryContext oldContext;
 	bool		save_log_statement_stats = log_statement_stats;
-	bool		snapshot_set = false;
+	Snapshot	snapshot = InvalidSnapshot;
 	char		msec_str[32];
 	ParamsErrorCbData params_data;
 	ErrorContextCallback params_errcxt;
@@ -1747,8 +1749,9 @@ exec_bind_message(StringInfo input_message)
 		(psrc->raw_parse_tree &&
 		 analyze_requires_snapshot(psrc->raw_parse_tree)))
 	{
-		PushActiveSnapshot(GetTransactionSnapshot());
-		snapshot_set = true;
+		/* We could reuse this snapshot in PortalStart later */
+		snapshot = GetTransactionSnapshot();
+		PushActiveSnapshot(snapshot);
 	}
 
 	/*
@@ -1955,15 +1958,15 @@ exec_bind_message(StringInfo input_message)
 					  cplan->stmt_list,
 					  cplan);
 
-	/* Done with the snapshot used for parameter I/O and parsing/planning */
-	if (snapshot_set)
-		PopActiveSnapshot();
-
 	/*
-	 * And we're ready to start portal execution.
+	 * And we're ready to start portal execution. Try to reuse snapshot taken for analysis and planning if any.
 	 */
-	PortalStart(portal, params, 0, InvalidSnapshot);
+	PortalStart(portal, params, 0, snapshot);
 
+
+	/* Done with the snapshot used for parameter I/O and parsing/planning */
+	if (snapshot != InvalidSnapshot)
+		PopActiveSnapshot();
 	/*
 	 * Apply the result format requests to the portal.
 	 */
