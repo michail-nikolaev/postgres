@@ -307,6 +307,7 @@ index_rescan(IndexScanDesc scan,
 		table_index_fetch_reset(scan->xs_heapfetch);
 
 	scan->kill_prior_tuple = false; /* for safety */
+	scan->kill_prior_tuple_xmax = InvalidTransactionId;
 	scan->xs_heap_continue = false;
 
 	scan->indexRelation->rd_indam->amrescan(scan, keys, nkeys,
@@ -384,6 +385,7 @@ index_restrpos(IndexScanDesc scan)
 		table_index_fetch_reset(scan->xs_heapfetch);
 
 	scan->kill_prior_tuple = false; /* for safety */
+	scan->kill_prior_tuple_xmax = InvalidTransactionId;
 	scan->xs_heap_continue = false;
 
 	scan->indexRelation->rd_indam->amrestrpos(scan);
@@ -531,6 +533,7 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 
 	/* Reset kill flag immediately for safety */
 	scan->kill_prior_tuple = false;
+	scan->kill_prior_tuple_xmax = InvalidTransactionId;
 	scan->xs_heap_continue = false;
 
 	/* If we're out of index entries, we're done */
@@ -573,10 +576,11 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 {
 	bool		all_dead = false;
 	bool		found;
+	TransactionId kill_prior_tuple_xmax = InvalidTransactionId;
 
 	found = table_index_fetch_tuple(scan->xs_heapfetch, &scan->xs_heaptid,
 									scan->xs_snapshot, slot,
-									&scan->xs_heap_continue, &all_dead);
+									&scan->xs_heap_continue, &all_dead, &kill_prior_tuple_xmax);
 
 	if (found)
 		pgstat_count_heap_fetch(scan->indexRelation);
@@ -584,12 +588,13 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 	/*
 	 * If we scanned a whole HOT chain and found only dead tuples, tell index
 	 * AM to kill its entry for that TID (this will take effect in the next
-	 * amgettuple call, in index_getnext_tid).  We do not do this when in
-	 * recovery because it may violate MVCC to do so.  See comments in
-	 * RelationGetIndexScan().
+	 * amgettuple call, in index_getnext_tid).
 	 */
-	if (!scan->xactStartedInRecovery)
+	if (scan->ignore_killed_tuples)
+	{
 		scan->kill_prior_tuple = all_dead;
+		scan->kill_prior_tuple_xmax = kill_prior_tuple_xmax;
+	}
 
 	return found;
 }

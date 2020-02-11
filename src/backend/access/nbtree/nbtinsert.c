@@ -24,6 +24,7 @@
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/smgr.h"
+#include "storage/standby.h"
 
 /* Minimum tree height for application of fastpath optimization */
 #define BTREE_FASTPATH_MIN_LEVEL	2
@@ -488,7 +489,8 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 			if (inposting || !ItemIdIsDead(curitemid))
 			{
 				ItemPointerData htid;
-				bool		all_dead = false;
+				bool			all_dead = false;
+                TransactionId	allHeadHtupAmax = InvalidTransactionId;
 
 				if (!inposting)
 				{
@@ -542,7 +544,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 				 */
 				else if (table_index_fetch_tuple_check(heapRel, &htid,
 													   &SnapshotDirty,
-													   &all_dead))
+													   &all_dead, &allHeadHtupAmax))
 				{
 					TransactionId xwait;
 
@@ -598,7 +600,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 * entry.
 					 */
 					if (table_index_fetch_tuple_check(heapRel, &itup->t_tid,
-													  SnapshotSelf, NULL))
+													  SnapshotSelf, NULL, NULL))
 					{
 						/* Normal case --- it's still live */
 					}
@@ -671,6 +673,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 * Mark buffer with a dirty hint, since state is not
 					 * crucial. Be sure to mark the proper buffer dirty.
 					 */
+					LogIndexHintIfNeeded(rel, allHeadHtupAmax);
 					if (nbuf != InvalidBuffer)
 						MarkBufferDirtyHint(nbuf, true);
 					else

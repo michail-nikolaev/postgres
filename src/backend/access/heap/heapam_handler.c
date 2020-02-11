@@ -112,7 +112,8 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 						 ItemPointer tid,
 						 Snapshot snapshot,
 						 TupleTableSlot *slot,
-						 bool *call_again, bool *all_dead)
+						 bool *call_again, bool *all_dead,
+						 TransactionId *all_dead_xmax)
 {
 	IndexFetchHeapData *hscan = (IndexFetchHeapData *) scan;
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
@@ -145,7 +146,8 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 											snapshot,
 											&bslot->base.tupdata,
 											all_dead,
-											!*call_again);
+											!*call_again,
+											all_dead_xmax);
 	bslot->base.tupdata.t_self = *tid;
 	LockBuffer(hscan->xs_cbuf, BUFFER_LOCK_UNLOCK);
 
@@ -2125,7 +2127,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 
 			ItemPointerSet(&tid, page, offnum);
 			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,
-									   &heapTuple, NULL, true))
+									   &heapTuple, NULL, true, NULL))
 				hscan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
 		}
 	}

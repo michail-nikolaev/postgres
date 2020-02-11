@@ -330,6 +330,7 @@ DecodeStandbyOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			}
 			break;
 		case XLOG_STANDBY_LOCK:
+		case XLOG_INDEX_HINT:
 			break;
 		case XLOG_INVALIDATIONS:
 			{

@@ -1418,7 +1418,7 @@ HeapTupleSatisfiesNonVacuumable(HeapTuple htup, Snapshot snapshot,
  *	if the tuple is removable.
  */
 bool
-HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin)
+HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin, TransactionId *TupleXmax)
 {
 	HeapTupleHeader tuple = htup->t_data;
 
@@ -1459,7 +1459,12 @@ HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin)
 		return false;
 
 	/* Deleter committed, so tuple is dead if the XID is old enough. */
-	return TransactionIdPrecedes(HeapTupleHeaderGetRawXmax(tuple), OldestXmin);
+	if (TransactionIdPrecedes(HeapTupleHeaderGetRawXmax(tuple), OldestXmin))
+	{
+		if (TupleXmax) *TupleXmax = HeapTupleHeaderGetRawXmax(tuple);
+		return true;
+	} 
+	else return false;
 }
 
 /*

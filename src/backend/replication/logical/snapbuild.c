@@ -576,6 +576,7 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 #endif
 
 	MyPgXact->xmin = snap->xmin;
+	MyProc->indexIgnoreKilledTuples = true;
 
 	/* allocate in transaction context */
 	newxip = (TransactionId *)

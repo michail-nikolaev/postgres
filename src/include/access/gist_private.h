@@ -167,6 +167,7 @@ typedef struct GISTScanOpaqueData
 	/* info about killed items if any (killedItems is NULL if never used) */
 	OffsetNumber *killedItems;	/* offset numbers of killed items */
 	int			numKilled;		/* number of currently stored items */
+	TransactionId killedItemsXmax;
 	BlockNumber curBlkno;		/* current number of block */
 	GistNSN		curPageLSN;		/* pos in the WAL stream when page was read */
 

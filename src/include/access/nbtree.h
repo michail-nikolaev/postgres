@@ -919,6 +919,7 @@ typedef struct BTScanOpaqueData
 	/* info about killed items if any (killedItems is NULL if never used) */
 	int		   *killedItems;	/* currPos.items indexes of killed items */
 	int			numKilled;		/* number of currently stored items */
+	TransactionId killedItemsXmax;
 
 	/*
 	 * If we are doing an index-only scan, these are the tuple storage

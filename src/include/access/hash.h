@@ -179,6 +179,7 @@ typedef struct HashScanOpaqueData
 	/* info about killed items if any (killedItems is NULL if never used) */
 	int		   *killedItems;	/* currPos.items indexes of killed items */
 	int			numKilled;		/* number of currently stored items */
+	TransactionId killedItemsXmax;
 
 	/*
 	 * Identify all the matching items on a page and save them in

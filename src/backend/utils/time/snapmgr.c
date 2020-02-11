@@ -1016,6 +1016,7 @@ SnapshotResetXmin(void)
 
 	if (pairingheap_is_empty(&RegisteredSnapshots))
 	{
+		MyProc->indexIgnoreKilledTuples = true;
 		MyPgXact->xmin = InvalidTransactionId;
 		return;
 	}

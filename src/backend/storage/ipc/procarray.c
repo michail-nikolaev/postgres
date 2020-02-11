@@ -63,6 +63,7 @@
 #include "utils/builtins.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "replication/walreceiver.h"
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
 
@@ -434,6 +435,7 @@ ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
 
 		proc->lxid = InvalidLocalTransactionId;
 		pgxact->xmin = InvalidTransactionId;
+		proc->indexIgnoreKilledTuples = true;
 		/* must be cleared with xid/xmin: */
 		pgxact->vacuumFlags &= ~PROC_VACUUM_STATE_MASK;
 		proc->delayChkpt = false; /* be sure this is cleared in abort */
@@ -456,6 +458,7 @@ ProcArrayEndTransactionInternal(PGPROC *proc, PGXACT *pgxact,
 	pgxact->xid = InvalidTransactionId;
 	proc->lxid = InvalidLocalTransactionId;
 	pgxact->xmin = InvalidTransactionId;
+	proc->indexIgnoreKilledTuples = true;
 	/* must be cleared with xid/xmin: */
 	pgxact->vacuumFlags &= ~PROC_VACUUM_STATE_MASK;
 	proc->delayChkpt = false; /* be sure this is cleared in abort */
@@ -612,6 +615,7 @@ ProcArrayClearTransaction(PGPROC *proc)
 	pgxact->xid = InvalidTransactionId;
 	proc->lxid = InvalidLocalTransactionId;
 	pgxact->xmin = InvalidTransactionId;
+	proc->indexIgnoreKilledTuples = true;
 	proc->recoveryConflictPending = false;
 
 	/* redundant, but just in case */
@@ -1708,7 +1712,15 @@ GetSnapshotData(Snapshot snapshot)
 	replication_slot_catalog_xmin = procArray->replication_slot_catalog_xmin;
 
 	if (!TransactionIdIsValid(MyPgXact->xmin))
+	{
 		MyPgXact->xmin = TransactionXmin = xmin;
+		/*
+		 * Always use and set LP_DEAD bits on primary. In case of stand by 
+		 * only if hot_standby_feedback is enabled (to avoid unnecessary cancelations).
+		 */
+		Assert(!RecoveryInProgress() || WalRcv);
+		MyProc->indexIgnoreKilledTuples = !RecoveryInProgress() || (WalRcv->sender_reports_feedback_to_master && WalRcv->sender_has_standby_xmin);
+	}
 
 	LWLockRelease(ProcArrayLock);
 
@@ -2577,7 +2589,7 @@ GetCurrentVirtualXIDs(TransactionId limitXmin, bool excludeXmin0,
  * this array sufficiently often that we use malloc for the result.
  */
 VirtualTransactionId *
-GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)
+GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid, bool onlyIndexIgnoreKilledTuples)
 {
 	static VirtualTransactionId *vxids;
 	ProcArrayStruct *arrayP = procArray;
@@ -2616,6 +2628,7 @@ GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)
 		{
 			/* Fetch xmin just once - can't change on us, but good coding */
 			TransactionId pxmin = UINT32_ACCESS_ONCE(pgxact->xmin);
+			bool indexIgnoreKilledTuples = proc->indexIgnoreKilledTuples;
 
 			/*
 			 * We ignore an invalid pxmin because this means that backend has
@@ -2626,7 +2639,7 @@ GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)
 			 * test here.
 			 */
 			if (!TransactionIdIsValid(limitXmin) ||
-				(TransactionIdIsValid(pxmin) && !TransactionIdFollows(pxmin, limitXmin)))
+				(TransactionIdIsValid(pxmin) && !TransactionIdFollows(pxmin, limitXmin) && (!onlyIndexIgnoreKilledTuples || indexIgnoreKilledTuples)))
 			{
 				VirtualTransactionId vxid;
 

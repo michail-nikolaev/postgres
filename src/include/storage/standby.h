@@ -18,6 +18,7 @@
 #include "storage/procsignal.h"
 #include "storage/relfilenode.h"
 #include "storage/standbydefs.h"
+#include "utils/relcache.h"
 
 /* User-settable GUC parameters */
 extern int	vacuum_defer_cleanup_age;
@@ -81,8 +82,11 @@ typedef struct RunningTransactionsData
 
 typedef RunningTransactionsData *RunningTransactions;
 
+extern void StandByShmemInit(void);
 extern void LogAccessExclusiveLock(Oid dbOid, Oid relOid);
 extern void LogAccessExclusiveLockPrepare(void);
+
+extern void LogIndexHintIfNeeded(Relation rel, TransactionId oldestXmin);
 
 extern XLogRecPtr LogStandbySnapshot(void);
 extern void LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,

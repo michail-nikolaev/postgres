@@ -41,6 +41,7 @@ int			max_standby_archive_delay = 30 * 1000;
 int			max_standby_streaming_delay = 30 * 1000;
 
 static HTAB *RecoveryLockLists;
+static HTAB *IndexHintXMinDb;
 
 static void ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 												   ProcSignalReason reason,
@@ -58,6 +59,12 @@ typedef struct RecoveryLockListsEntry
 	TransactionId xid;
 	List	   *locks;
 } RecoveryLockListsEntry;
+
+typedef struct IndexHintXMinDbEntry
+{
+	Oid dbOid;
+	TransactionId oldestXMin;
+} IndexHintXMinDbEntry;
 
 /*
  * InitRecoveryTransactionEnvironment
@@ -300,6 +307,43 @@ ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 	}
 }
 
+static bool
+IsNewerIndexHintXid(Oid dbOid, TransactionId latestIndexHintXid)
+{
+	bool found, result;
+	IndexHintXMinDbEntry* entry;
+
+	LWLockAcquire(IndexHintXMinDbHashLock, LW_SHARED);
+	entry = (IndexHintXMinDbEntry*)hash_search(IndexHintXMinDb,
+											   &dbOid,
+											   HASH_FIND,
+										       &found);
+	result = !found || TransactionIdPrecedes(entry->oldestXMin, latestIndexHintXid);
+	LWLockRelease(IndexHintXMinDbHashLock);
+
+	return result;
+}
+
+static void
+UpsertLatestIndexHintXid(Oid dbOid, TransactionId latestIndexHintXid) 
+{
+
+	bool found;
+	IndexHintXMinDbEntry* entry;
+
+	LWLockAcquire(IndexHintXMinDbHashLock, LW_EXCLUSIVE);
+
+	entry = (IndexHintXMinDbEntry*)hash_search(IndexHintXMinDb,
+											   &dbOid,
+											   HASH_ENTER,
+											   &found);
+
+	if (!found || TransactionIdPrecedes(entry->oldestXMin, latestIndexHintXid))
+		entry->oldestXMin = latestIndexHintXid;
+
+	LWLockRelease(IndexHintXMinDbHashLock);
+}
+
 void
 ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid, RelFileNode node)
 {
@@ -318,12 +362,14 @@ ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid, RelFileNode 
 		return;
 
 	backends = GetConflictingVirtualXIDs(latestRemovedXid,
-										 node.dbNode);
+										 node.dbNode, false);
 
 	ResolveRecoveryConflictWithVirtualXIDs(backends,
 										   PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
 										   WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT,
 										   true);
+
+	UpsertLatestIndexHintXid(node.dbNode, latestRemovedXid);
 }
 
 void
@@ -349,7 +395,7 @@ ResolveRecoveryConflictWithTablespace(Oid tsid)
 	 * We don't wait for commit because drop tablespace is non-transactional.
 	 */
 	temp_file_users = GetConflictingVirtualXIDs(InvalidTransactionId,
-												InvalidOid);
+												InvalidOid, false);
 	ResolveRecoveryConflictWithVirtualXIDs(temp_file_users,
 										   PROCSIG_RECOVERY_CONFLICT_TABLESPACE,
 										   WAIT_EVENT_RECOVERY_CONFLICT_TABLESPACE,
@@ -849,6 +895,22 @@ standby_redo(XLogReaderState *record)
 											 xlrec->dbId,
 											 xlrec->tsId);
 	}
+	else if (info == XLOG_INDEX_HINT)
+	{
+		xl_index_hint* xlrec = (xl_index_hint*)XLogRecGetData(record);
+		if (InHotStandby)
+		{
+			if (IsNewerIndexHintXid(xlrec->dbId, xlrec->latestIndexHintXid))
+			{
+				VirtualTransactionId* backends = GetConflictingVirtualXIDs(xlrec->latestIndexHintXid,
+																		   xlrec->dbId,
+																		   true);
+				ResolveRecoveryConflictWithVirtualXIDs(backends, PROCSIG_RECOVERY_CONFLICT_INDEXHINT, ?, ?);
+
+				UpsertLatestIndexHintXid(xlrec->dbId, xlrec->latestIndexHintXid);
+			}
+		}
+	}
 	else
 		elog(PANIC, "standby_redo: unknown op code %u", info);
 }
@@ -1115,4 +1177,47 @@ LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,
 	XLogRegisterData((char *) msgs,
 					 nmsgs * sizeof(SharedInvalidationMessage));
 	XLogInsert(RM_STANDBY_ID, XLOG_INVALIDATIONS);
+}
+
+void
+LogIndexHint(Oid dbId, TransactionId latestIndexHintXid)
+{
+	xl_index_hint xlrec;
+
+	xlrec.dbId = dbId;
+	xlrec.latestIndexHintXid = latestIndexHintXid;
+
+	XLogBeginInsert();
+	XLogRegisterData((char*)&xlrec, sizeof(xl_index_hint));
+
+	XLogInsert(RM_STANDBY_ID, XLOG_INDEX_HINT);
+}
+
+extern void LogIndexHintIfNeeded(Relation rel, TransactionId oldestXmin)
+{
+	if (!RecoveryInProgress() && XLogStandbyInfoActive() && TransactionIdIsValid(oldestXmin)) {		
+		if (IsNewerIndexHintXid(rel->rd_node.dbNode, oldestXmin))
+		{
+			LogIndexHint(rel->rd_node.dbNode, oldestXmin);
+			UpsertLatestIndexHintXid(rel->rd_node.dbNode, oldestXmin);
+		}
+	}
+}
+
+void
+StandByShmemInit(void)
+{
+	HASHCTL		info;
+
+	MemSet(&info, 0, sizeof(info));
+	info.keysize = sizeof(Oid);
+	info.entrysize = sizeof(IndexHintXMinDbEntry);
+
+	LWLockAcquire(IndexHintXMinDbHashLock, LW_EXCLUSIVE);
+
+	IndexHintXMinDb = ShmemInitHash("IndexHintXMinDb",
+		64, 64,
+		&info, HASH_ELEM | HASH_BLOBS);
+
+	LWLockRelease(IndexHintXMinDbHashLock);
 }

@@ -302,7 +302,8 @@ typedef struct TableAmRoutine
 									  ItemPointer tid,
 									  Snapshot snapshot,
 									  TupleTableSlot *slot,
-									  bool *call_again, bool *all_dead);
+									  bool *call_again, bool *all_dead,
+									  TransactionId* all_dead_xmax);
 
 
 	/* ------------------------------------------------------------------------
@@ -1013,12 +1014,12 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
 						ItemPointer tid,
 						Snapshot snapshot,
 						TupleTableSlot *slot,
-						bool *call_again, bool *all_dead)
+						bool *call_again, bool *all_dead, TransactionId *all_dead_xmax)
 {
 
 	return scan->rel->rd_tableam->index_fetch_tuple(scan, tid, snapshot,
 													slot, call_again,
-													all_dead);
+													all_dead, all_dead_xmax);
 }
 
 /*
@@ -1030,7 +1031,8 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
 extern bool table_index_fetch_tuple_check(Relation rel,
 										  ItemPointer tid,
 										  Snapshot snapshot,
-										  bool *all_dead);
+										  bool *all_dead,
+										  TransactionId *all_dead_xmax);
 
 
 /* ------------------------------------------------------------------------

@@ -309,7 +309,12 @@ hashgettuple(IndexScanDesc scan, ScanDirection dir)
 					palloc(MaxIndexTuplesPerPage * sizeof(int));
 
 			if (so->numKilled < MaxIndexTuplesPerPage)
+			{
 				so->killedItems[so->numKilled++] = so->currPos.itemIndex;
+
+				if (!TransactionIdFollowsOrEquals(so->killedItemsXmax, scan->kill_prior_tuple_xmax))
+					so->killedItemsXmax = scan->kill_prior_tuple_xmax;
+			}
 		}
 
 		/*
@@ -378,6 +383,7 @@ hashbeginscan(Relation rel, int nkeys, int norderbys)
 
 	so->killedItems = NULL;
 	so->numKilled = 0;
+	so->killedItemsXmax = InvalidTransactionId;
 
 	scan->opaque = so;
 

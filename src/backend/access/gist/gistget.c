@@ -22,6 +22,7 @@
 #include "pgstat.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/standby.h"
 #include "utils/float.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -87,6 +88,7 @@ gistkillitems(IndexScanDesc scan)
 	if (killedsomething)
 	{
 		GistMarkPageHasGarbage(page);
+		LogIndexHintIfNeeded(scan->indexRelation, so->killedItemsXmax);
 		MarkBufferDirtyHint(buffer, true);
 	}
 
@@ -666,8 +668,13 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 						MemoryContextSwitchTo(oldCxt);
 					}
 					if (so->numKilled < MaxIndexTuplesPerPage)
+					{
 						so->killedItems[so->numKilled++] =
 							so->pageData[so->curPageData - 1].offnum;
+
+						if (!TransactionIdFollowsOrEquals(so->killedItemsXmax, scan->kill_prior_tuple_xmax))
+							so->killedItemsXmax = scan->kill_prior_tuple_xmax;
+					}
 				}
 				/* continuing to return tuples from a leaf page */
 				scan->xs_heaptid = so->pageData[so->curPageData].heapPtr;
@@ -703,8 +710,13 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 					MemoryContextSwitchTo(oldCxt);
 				}
 				if (so->numKilled < MaxIndexTuplesPerPage)
+				{
 					so->killedItems[so->numKilled++] =
 						so->pageData[so->curPageData - 1].offnum;
+
+					if (!TransactionIdFollowsOrEquals(so->killedItemsXmax, scan->kill_prior_tuple_xmax))
+						so->killedItemsXmax = scan->kill_prior_tuple_xmax;
+				}
 			}
 			/* find and process the next index page */
 			do

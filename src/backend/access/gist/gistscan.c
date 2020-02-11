@@ -107,6 +107,7 @@ gistbeginscan(Relation r, int nkeys, int norderbys)
 	}
 
 	so->killedItems = NULL;		/* until needed */
+	so->killedItemsXmax = InvalidTransactionId;
 	so->numKilled = 0;
 	so->curBlkno = InvalidBlockNumber;
 	so->curPageLSN = InvalidXLogRecPtr;
