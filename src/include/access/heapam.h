@@ -126,7 +126,7 @@ extern bool heap_fetch(Relation relation, Snapshot snapshot,
 					   HeapTuple tuple, Buffer *userbuf);
 extern bool heap_hot_search_buffer(ItemPointer tid, Relation relation,
 								   Buffer buffer, Snapshot snapshot, HeapTuple heapTuple,
-								   bool *all_dead, bool first_call);
+								   bool first_call, bool *all_dead, TransactionId* all_dead_xmax);
 
 extern void heap_get_latest_tid(TableScanDesc scan, ItemPointer tid);
 extern void setLastTid(const ItemPointer tid);
@@ -205,7 +205,7 @@ extern void HeapTupleSetHintBits(HeapTupleHeader tuple, Buffer buffer,
 								 uint16 infomask, TransactionId xid);
 extern bool HeapTupleHeaderIsOnlyLocked(HeapTupleHeader tuple);
 extern bool XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot);
-extern bool HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin);
+extern bool HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin, TransactionId *TupleXmax);
 
 /*
  * To avoid leaking too much knowledge about reorderbuffer implementation

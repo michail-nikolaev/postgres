@@ -2137,6 +2137,8 @@ ProcessStandbyHSFeedbackMessage(void)
 		else
 			MyPgXact->xmin = feedbackXmin;
 	}
+
+	WalSndKeepalive(false);
 }
 
 /*
@@ -3443,12 +3445,14 @@ static void
 WalSndKeepalive(bool requestReply)
 {
 	elog(DEBUG2, "sending replication keepalive");
+	bool am_report_feedback_to_master = !am_cascading_walsender || (WalRcv->sender_has_standby_xmin && WalRcv->sender_reports_feedback_to_master);
 
 	/* construct the message... */
 	resetStringInfo(&output_message);
 	pq_sendbyte(&output_message, 'k');
 	pq_sendint64(&output_message, sentPtr);
 	pq_sendint64(&output_message, GetCurrentTimestamp());
+	pq_sendbyte(&output_message, am_report_feedback_to_master ? 1 : 0);
 	pq_sendbyte(&output_message, requestReply ? 1 : 0);
 
 	/* ... and send it wrapped in CopyData */

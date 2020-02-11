@@ -1479,6 +1479,9 @@ heap_fetch(Relation relation,
  * If all_dead is not NULL, we check non-visible tuples to see if they are
  * globally dead; *all_dead is set true if all members of the HOT chain
  * are vacuumable, false if not.
+ * 
+ * If all_dead is not NULL all_dead_xmax should be valid pointer. It is filled
+ * with latest xmax of dead tuples in HOT chain.
  *
  * Unlike heap_fetch, the caller must already have pin and (at least) share
  * lock on the buffer; it is still pinned/locked at exit.  Also unlike
@@ -1487,7 +1490,7 @@ heap_fetch(Relation relation,
 bool
 heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 					   Snapshot snapshot, HeapTuple heapTuple,
-					   bool *all_dead, bool first_call)
+					   bool first_call, bool *all_dead, TransactionId *all_dead_xmax)
 {
 	Page		dp = (Page) BufferGetPage(buffer);
 	TransactionId prev_xmax = InvalidTransactionId;
@@ -1499,7 +1502,11 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 
 	/* If this is not the first call, previous call returned a (live!) tuple */
 	if (all_dead)
+	{
 		*all_dead = first_call;
+		Assert(all_dead_xmax);
+		*all_dead_xmax = InvalidTransactionId;
+	}
 
 	blkno = ItemPointerGetBlockNumber(tid);
 	offnum = ItemPointerGetOffsetNumber(tid);
@@ -1513,6 +1520,7 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 	for (;;)
 	{
 		ItemId		lp;
+		TransactionId xmax;
 
 		/* check for bogus TID */
 		if (offnum < FirstOffsetNumber || offnum > PageGetMaxOffsetNumber(dp))
@@ -1581,7 +1589,10 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 				PredicateLockTID(relation, &heapTuple->t_self, snapshot,
 								 HeapTupleHeaderGetXmin(heapTuple->t_data));
 				if (all_dead)
+				{
 					*all_dead = false;
+					*all_dead_xmax = InvalidTransactionId;
+				}
 				return true;
 			}
 		}
@@ -1595,9 +1606,16 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 		 * Note: if you change the criterion here for what is "dead", fix the
 		 * planner's get_actual_variable_range() function to match.
 		 */
-		if (all_dead && *all_dead &&
-			!HeapTupleIsSurelyDead(heapTuple, RecentGlobalXmin))
-			*all_dead = false;
+		if (all_dead && *all_dead)
+		{
+			if (!HeapTupleIsSurelyDead(heapTuple, RecentGlobalXmin, &xmax))
+			{
+				*all_dead = false;
+				*all_dead_xmax = InvalidTransactionId;
+			}
+			else /* tuple is dead - get it xmax for LP_DEAD record*/
+				*all_dead_xmax = TransactionIdLatestAndNormal(*all_dead_xmax, xmax);
+		}
 
 		/*
 		 * Check to see if HOT chain continues past this tuple; if so fetch

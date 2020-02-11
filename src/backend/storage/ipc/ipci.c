@@ -263,6 +263,7 @@ CreateSharedMemoryAndSemaphores(void)
 	BTreeShmemInit();
 	SyncScanShmemInit();
 	AsyncShmemInit();
+	StandByShmemInit();
 
 #ifdef EXEC_BACKEND
 

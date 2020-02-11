@@ -586,6 +586,8 @@ SetTransactionSnapshot(Snapshot sourcesnap, VirtualTransactionId *sourcevxid,
 	 * snapshot importers compute reasonably up-to-date values for them.)
 	 */
 	CurrentSnapshot = GetSnapshotData(&CurrentSnapshotData);
+	// in order to keep it safe we will use index only on primary for imported snapshots
+	MyProc->indexIgnoreKilledTuples = !RecoveryInProgress();
 
 	/*
 	 * Now copy appropriate fields from the source snapshot.
@@ -1017,6 +1019,7 @@ SnapshotResetXmin(void)
 	if (pairingheap_is_empty(&RegisteredSnapshots))
 	{
 		MyPgXact->xmin = InvalidTransactionId;
+		MyProc->indexIgnoreKilledTuples = false;
 		return;
 	}
 
@@ -1024,6 +1027,7 @@ SnapshotResetXmin(void)
 										pairingheap_first(&RegisteredSnapshots));
 
 	if (TransactionIdPrecedes(MyPgXact->xmin, minSnapshot->xmin))
+		// no need to change indexIgnoreKilledTuples here because xmin restriction is relaxed
 		MyPgXact->xmin = minSnapshot->xmin;
 }
 

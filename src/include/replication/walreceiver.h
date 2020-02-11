@@ -156,6 +156,10 @@ typedef struct
 	 * store semantics, so use sig_atomic_t.
 	 */
 	sig_atomic_t force_reply;	/* used as a bool */
+
+	sig_atomic_t sender_has_standby_xmin;	/* used as a bool */
+
+	sig_atomic_t sender_reports_feedback_to_master;	/* used as a bool */
 } WalRcvData;
 
 extern WalRcvData *WalRcv;

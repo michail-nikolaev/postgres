@@ -637,6 +637,7 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter n_conflict_tablespace;
 	PgStat_Counter n_conflict_lock;
 	PgStat_Counter n_conflict_snapshot;
+	PgStat_Counter n_conflict_indexhint;
 	PgStat_Counter n_conflict_bufferpin;
 	PgStat_Counter n_conflict_startup_deadlock;
 	PgStat_Counter n_temp_files;
@@ -883,6 +884,7 @@ typedef enum
 	WAIT_EVENT_PROMOTE,
 	WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT,
 	WAIT_EVENT_RECOVERY_CONFLICT_TABLESPACE,
+	WAIT_EVENT_RECOVERY_CONFLICT_INDEXHINT,
 	WAIT_EVENT_RECOVERY_PAUSE,
 	WAIT_EVENT_REPLICATION_ORIGIN_DROP,
 	WAIT_EVENT_REPLICATION_SLOT_DROP,

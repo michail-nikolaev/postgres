@@ -357,6 +357,16 @@ TransactionIdFollowsOrEquals(TransactionId id1, TransactionId id2)
 	return (diff >= 0);
 }
 
+TransactionId
+TransactionIdLatestAndNormal(TransactionId id1, TransactionId id2)
+{
+	if (!TransactionIdIsNormal(id2))
+		return id1;
+	else if (!TransactionIdIsNormal(id1))
+		return id2;
+
+	return TransactionIdLatest(id1, 1, &id2);
+}
 
 /*
  * TransactionIdLatest --- get latest XID among a main xact and its children
