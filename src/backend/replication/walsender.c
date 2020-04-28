@@ -1951,7 +1951,6 @@ PhysicalReplicationSlotNewXmin(TransactionId feedbackXmin, TransactionId feedbac
 
 	SpinLockAcquire(&slot->mutex);
 	MyPgXact->xmin = InvalidTransactionId;
-	MyProc->indexIgnoreKilledTuples = true;
 
 	/*
 	 * For physical replication we don't need the interlock provided by xmin

@@ -905,7 +905,8 @@ standby_redo(XLogReaderState *record)
 				VirtualTransactionId* backends = GetConflictingVirtualXIDs(xlrec->latestIndexHintXid,
 																		   xlrec->dbId,
 																		   true);
-				ResolveRecoveryConflictWithVirtualXIDs(backends, PROCSIG_RECOVERY_CONFLICT_INDEXHINT, ?, ?);
+				ResolveRecoveryConflictWithVirtualXIDs(backends, PROCSIG_RECOVERY_CONFLICT_INDEXHINT, 
+																 WAIT_EVENT_RECOVERY_CONFLICT_INDEXHINT, true);
 
 				UpsertLatestIndexHintXid(xlrec->dbId, xlrec->latestIndexHintXid);
 			}

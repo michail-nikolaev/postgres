@@ -1016,7 +1016,7 @@ SnapshotResetXmin(void)
 
 	if (pairingheap_is_empty(&RegisteredSnapshots))
 	{
-		MyProc->indexIgnoreKilledTuples = true;
+		MyProc->indexIgnoreKilledTuples = false;
 		MyPgXact->xmin = InvalidTransactionId;
 		return;
 	}
@@ -1025,6 +1025,7 @@ SnapshotResetXmin(void)
 										pairingheap_first(&RegisteredSnapshots));
 
 	if (TransactionIdPrecedes(MyPgXact->xmin, minSnapshot->xmin))
+		// no need to change indexIgnoreKilledTuples here because xmin restriction is relaxed
 		MyPgXact->xmin = minSnapshot->xmin;
 }
 
