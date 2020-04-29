@@ -1479,6 +1479,9 @@ heap_fetch(Relation relation,
  * If all_dead is not NULL, we check non-visible tuples to see if they are
  * globally dead; *all_dead is set true if all members of the HOT chain
  * are vacuumable, false if not.
+ * 
+ * If all_dead is not NULL all_dead_xmax should be valid pointer. It is filled
+ * with latest xmax of dead tuples in HOT chain.
  *
  * Unlike heap_fetch, the caller must already have pin and (at least) share
  * lock on the buffer; it is still pinned/locked at exit.  Also unlike
@@ -1487,7 +1490,7 @@ heap_fetch(Relation relation,
 bool
 heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 					   Snapshot snapshot, HeapTuple heapTuple,
-					   bool *all_dead, bool first_call, TransactionId *all_dead_xmax)
+					   bool first_call, bool *all_dead, TransactionId *all_dead_xmax)
 {
 	Page		dp = (Page) BufferGetPage(buffer);
 	TransactionId prev_xmax = InvalidTransactionId;
@@ -1501,7 +1504,8 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 	if (all_dead)
 	{
 		*all_dead = first_call;
-		if (all_dead_xmax) *all_dead_xmax = InvalidTransactionId;
+		Assert(all_dead_xmax);
+		*all_dead_xmax = InvalidTransactionId;
 	}
 
 	blkno = ItemPointerGetBlockNumber(tid);
@@ -1534,16 +1538,6 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 				offnum = ItemIdGetRedirect(lp);
 				at_chain_start = false;
 				continue;
-			}
-			else if (ItemIdIsDead(lp) && all_dead && all_dead_xmax)
-			{
-				if (ItemIdHasStorage(lp))
-				{
-					Assert((HeapTupleHeader)PageGetItem(dp, lp) != FrozenTransactionId);
-					*all_dead_xmax = HeapTupleHeaderGetXmin((HeapTupleHeader)PageGetItem(dp, lp));
-				}
-				else
-					*all_dead_xmax = InvalidTransactionId;
 			}
 			/* else must be end of chain */
 			break;
@@ -1595,7 +1589,10 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 				PredicateLockTID(relation, &heapTuple->t_self, snapshot,
 								 HeapTupleHeaderGetXmin(heapTuple->t_data));
 				if (all_dead)
+				{
 					*all_dead = false;
+					*all_dead_xmax = InvalidTransactionId;
+				}
 				return true;
 			}
 		}
@@ -1612,9 +1609,12 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 		if (all_dead && *all_dead)
 		{
 			if (!HeapTupleIsSurelyDead(heapTuple, RecentGlobalXmin, &xmax))
+			{
 				*all_dead = false;
-			else if (all_dead_xmax && !TransactionIdFollowsOrEquals(*all_dead_xmax, xmax))
-				*all_dead_xmax = xmax;
+				*all_dead_xmax = InvalidTransactionId;
+			}
+			else /* tuple is dead - get it xmax for LP_DEAD record*/
+				*all_dead_xmax = TransactionIdLatestAndNormal(*all_dead_xmax, xmax);
 		}
 
 		/*

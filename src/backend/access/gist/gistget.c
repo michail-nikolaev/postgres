@@ -671,9 +671,7 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 					{
 						so->killedItems[so->numKilled++] =
 							so->pageData[so->curPageData - 1].offnum;
-
-						if (!TransactionIdFollowsOrEquals(so->killedItemsXmax, scan->kill_prior_tuple_xmax))
-							so->killedItemsXmax = scan->kill_prior_tuple_xmax;
+						so->killedItemsXmax = TransactionIdLatestAndNormal(so->killedItemsXmax, scan->kill_prior_tuple_xmax);
 					}
 				}
 				/* continuing to return tuples from a leaf page */
@@ -713,9 +711,7 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 				{
 					so->killedItems[so->numKilled++] =
 						so->pageData[so->curPageData - 1].offnum;
-
-					if (!TransactionIdFollowsOrEquals(so->killedItemsXmax, scan->kill_prior_tuple_xmax))
-						so->killedItemsXmax = scan->kill_prior_tuple_xmax;
+					so->killedItemsXmax = TransactionIdLatestAndNormal(so->killedItemsXmax, scan->kill_prior_tuple_xmax);
 				}
 			}
 			/* find and process the next index page */

@@ -302,7 +302,8 @@ typedef struct TableAmRoutine
 									  ItemPointer tid,
 									  Snapshot snapshot,
 									  TupleTableSlot *slot,
-									  bool *call_again, bool *all_dead,
+									  bool *call_again,
+									  bool *all_dead,
 									  TransactionId* all_dead_xmax);
 
 

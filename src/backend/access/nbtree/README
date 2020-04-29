@@ -566,6 +566,9 @@ replay of page deletion records does not hold a write lock on the target
 leaf page throughout; only the primary needs to block out concurrent
 writers that insert on to the page being deleted.)
 
+
+TODO: documentation here is required
+
 During recovery all index scans start with ignore_killed_tuples = false
 and we never set kill_prior_tuple. We do this because the oldest xmin
 on the standby server can be older than the oldest xmin on the master

@@ -1461,7 +1461,7 @@ HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin, TransactionId *T
 	/* Deleter committed, so tuple is dead if the XID is old enough. */
 	if (TransactionIdPrecedes(HeapTupleHeaderGetRawXmax(tuple), OldestXmin))
 	{
-		if (TupleXmax) *TupleXmax = HeapTupleHeaderGetRawXmax(tuple);
+		*TupleXmax = HeapTupleHeaderGetRawXmax(tuple);
 		return true;
 	} 
 	else return false;

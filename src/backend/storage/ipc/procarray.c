@@ -1861,6 +1861,7 @@ ProcArrayInstallImportedXmin(TransactionId xmin,
 		 * we don't check that.)
 		 */
 		MyPgXact->xmin = TransactionXmin = xmin;
+		// no need to chanhe indexIgnoreKilledTuples because restriction is relaxed.
 
 		result = true;
 		break;
@@ -1907,6 +1908,8 @@ ProcArrayInstallRestoredXmin(TransactionId xmin, PGPROC *proc)
 		TransactionIdPrecedesOrEquals(xid, xmin))
 	{
 		MyPgXact->xmin = TransactionXmin = xmin;
+		// we could also copy indexIgnoreKilledTuples, could be usefull for parallel scans
+		MyProc->indexIgnoreKilledTuples = proc->indexIgnoreKilledTuples;
 		result = true;
 	}
 

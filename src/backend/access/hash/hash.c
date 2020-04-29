@@ -311,9 +311,7 @@ hashgettuple(IndexScanDesc scan, ScanDirection dir)
 			if (so->numKilled < MaxIndexTuplesPerPage)
 			{
 				so->killedItems[so->numKilled++] = so->currPos.itemIndex;
-
-				if (!TransactionIdFollowsOrEquals(so->killedItemsXmax, scan->kill_prior_tuple_xmax))
-					so->killedItemsXmax = scan->kill_prior_tuple_xmax;
+				so->killedItemsXmax = TransactionIdLatestAndNormal(so->killedItemsXmax, scan->kill_prior_tuple_xmax);
 			}
 		}
 

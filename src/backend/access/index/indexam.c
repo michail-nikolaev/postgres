@@ -580,7 +580,8 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 
 	found = table_index_fetch_tuple(scan->xs_heapfetch, &scan->xs_heaptid,
 									scan->xs_snapshot, slot,
-									&scan->xs_heap_continue, &all_dead, &kill_prior_tuple_xmax);
+									&scan->xs_heap_continue, &all_dead,
+									&kill_prior_tuple_xmax);
 
 	if (found)
 		pgstat_count_heap_fetch(scan->indexRelation);
@@ -592,6 +593,7 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 	 */
 	if (scan->ignore_killed_tuples)
 	{
+		Assert(!all_dead || TransactionIdIsNormal(kill_prior_tuple_xmax));
 		scan->kill_prior_tuple = all_dead;
 		scan->kill_prior_tuple_xmax = kill_prior_tuple_xmax;
 	}
@@ -669,6 +671,7 @@ index_getbitmap(IndexScanDesc scan, TIDBitmap *bitmap)
 
 	/* just make sure this is false... */
 	scan->kill_prior_tuple = false;
+	scan->kill_prior_tuple_xmax = InvalidTransactionId;
 
 	/*
 	 * have the am's getbitmap proc do all the work.
