@@ -593,7 +593,6 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 	 */
 	if (scan->ignore_killed_tuples)
 	{
-		Assert(!all_dead || TransactionIdIsNormal(kill_prior_tuple_xmax));
 		scan->kill_prior_tuple = all_dead;
 		scan->kill_prior_tuple_xmax = kill_prior_tuple_xmax;
 	}

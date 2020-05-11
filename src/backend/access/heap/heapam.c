@@ -1520,7 +1520,7 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 	for (;;)
 	{
 		ItemId		lp;
-		TransactionId xmax = InvalidTransactionId;
+		TransactionId xmax;
 
 		/* check for bogus TID */
 		if (offnum < FirstOffsetNumber || offnum > PageGetMaxOffsetNumber(dp))
