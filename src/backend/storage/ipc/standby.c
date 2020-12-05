@@ -849,6 +849,11 @@ standby_redo(XLogReaderState *record)
 											 xlrec->dbId,
 											 xlrec->tsId);
 	}
+	else if (info == XLOG_INDEX_HINT_HORIZON)
+	{
+		xl_index_hint_horizon *xlrec = (xl_index_hint_horizon *) XLogRecGetData(record);
+		// TODO
+	}
 	else
 		elog(PANIC, "standby_redo: unknown op code %u", info);
 }
