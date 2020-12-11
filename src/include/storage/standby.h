@@ -18,6 +18,7 @@
 #include "storage/procsignal.h"
 #include "storage/relfilenode.h"
 #include "storage/standbydefs.h"
+#include "utils/relcache.h"
 
 /* User-settable GUC parameters */
 extern int	vacuum_defer_cleanup_age;
@@ -87,5 +88,8 @@ extern void LogAccessExclusiveLockPrepare(void);
 extern XLogRecPtr LogStandbySnapshot(void);
 extern void LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,
 									bool relcacheInitFileInval);
+
+extern void StandByShmemInit(void);
+extern void LogIndexHintHorizonIfNeeded(Relation rel, TransactionId latestRemovedXid);
 
 #endif							/* STANDBY_H */

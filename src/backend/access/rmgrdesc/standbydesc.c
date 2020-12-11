@@ -39,8 +39,8 @@ standby_desc_running_xacts(StringInfo buf, xl_running_xacts *xlrec)
 static void
 standby_desc_index_hint_horizon(StringInfo buf, xl_index_hint_horizon *xlrec)
 {
-	appendStringInfo(buf, "indexHintHorizonXid %u db %u",
-		xlrec->indexHintHorizonXid,
+	appendStringInfo(buf, "latestRemovedXid %u db %u",
+		xlrec->latestRemovedXid,
 		xlrec->dbId);
 }
 

@@ -75,7 +75,7 @@ typedef struct xl_invalidations
 typedef struct xl_index_hint_horizon
 {
 	Oid				dbId;
-	TransactionId	indexHintHorizonXid;
+	TransactionId	latestRemovedXid;
 } xl_index_hint_horizon;
 
 #endif							/* STANDBYDEFS_H */
