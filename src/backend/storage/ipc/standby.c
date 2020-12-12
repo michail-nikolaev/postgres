@@ -1174,6 +1174,18 @@ LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,
 	XLogInsert(RM_STANDBY_ID, XLOG_INVALIDATIONS);
 }
 
+void AdvanceLatestRemovedXid(TransactionId *latestRemovedXid,
+							 TransactionId nextLatestRemovedXid)
+{
+	if (TransactionIdIsNormal(nextLatestRemovedXid))
+	{
+		if (!TransactionIdIsNormal(*latestRemovedXid))
+			*latestRemovedXid = nextLatestRemovedXid;
+		else
+			*latestRemovedXid = TransactionIdLatest(nextLatestRemovedXid, 1, latestRemovedXid);
+	}
+}
+
 static void
 LogIndexHintHorizon(Oid dbId, TransactionId latestRemovedXid)
 {

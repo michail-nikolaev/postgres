@@ -31,6 +31,7 @@
 #include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
 #include "utils/rel.h"
+#include "storage/standby.h"
 
 /* Working state for hashbuild and its callback */
 typedef struct
@@ -310,7 +311,11 @@ hashgettuple(IndexScanDesc scan, ScanDirection dir)
 					palloc(MaxIndexTuplesPerPage * sizeof(int));
 
 			if (so->numKilled < MaxIndexTuplesPerPage)
+			{
 				so->killedItems[so->numKilled++] = so->currPos.itemIndex;
+				AdvanceLatestRemovedXid(&so->killedLatestRemovedXid,
+										scan->prior_tuple_removed_xid);
+			}
 		}
 
 		/*
@@ -378,6 +383,7 @@ hashbeginscan(Relation rel, int nkeys, int norderbys)
 	so->hashso_buc_split = false;
 
 	so->killedItems = NULL;
+	so->killedLatestRemovedXid = InvalidTransactionId;
 	so->numKilled = 0;
 
 	scan->opaque = so;

@@ -19,6 +19,7 @@
 #include "access/relscan.h"
 #include "port/pg_bitutils.h"
 #include "storage/buf_internals.h"
+#include "storage/standby.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
@@ -610,6 +611,7 @@ _hash_kill_items(IndexScanDesc scan)
 	 */
 	if (killedsomething)
 	{
+		LogIndexHintHorizonIfNeeded(scan->indexRelation, so->killedLatestRemovedXid);
 		opaque->hasho_flag |= LH_PAGE_HAS_DEAD_TUPLES;
 		MarkBufferDirtyHint(buf, true);
 	}

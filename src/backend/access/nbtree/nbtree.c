@@ -33,6 +33,7 @@
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/smgr.h"
+#include "storage/standby.h"
 #include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
 #include "utils/memutils.h"
@@ -271,7 +272,11 @@ btgettuple(IndexScanDesc scan, ScanDirection dir)
 					so->killedItems = (int *)
 						palloc(MaxTIDsPerBTreePage * sizeof(int));
 				if (so->numKilled < MaxTIDsPerBTreePage)
+				{
 					so->killedItems[so->numKilled++] = so->currPos.itemIndex;
+					AdvanceLatestRemovedXid(&so->killedLatestRemovedXid,
+											scan->prior_tuple_removed_xid);
+				}
 			}
 
 			/*
@@ -377,6 +382,7 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	so->arrayContext = NULL;
 
 	so->killedItems = NULL;		/* until needed */
+	so->killedLatestRemovedXid = InvalidTransactionId;
 	so->numKilled = 0;
 
 	/*

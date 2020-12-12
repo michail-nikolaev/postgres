@@ -91,5 +91,7 @@ extern void LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,
 
 extern void StandByShmemInit(void);
 extern void LogIndexHintHorizonIfNeeded(Relation rel, TransactionId latestRemovedXid);
+extern void AdvanceLatestRemovedXid(TransactionId *latestRemovedXid,
+									TransactionId nextLatestRemovedXid);
 
 #endif							/* STANDBY_H */

@@ -22,6 +22,7 @@
 #include "pgstat.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/standby.h"
 #include "utils/float.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -86,6 +87,7 @@ gistkillitems(IndexScanDesc scan)
 
 	if (killedsomething)
 	{
+		LogIndexHintHorizonIfNeeded(scan->indexRelation, so->killedLatestRemovedXid);
 		GistMarkPageHasGarbage(page);
 		MarkBufferDirtyHint(buffer, true);
 	}
@@ -666,8 +668,12 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 						MemoryContextSwitchTo(oldCxt);
 					}
 					if (so->numKilled < MaxIndexTuplesPerPage)
+					{
 						so->killedItems[so->numKilled++] =
 							so->pageData[so->curPageData - 1].offnum;
+						AdvanceLatestRemovedXid(&so->killedLatestRemovedXid, 
+												scan->prior_tuple_removed_xid);
+					}
 				}
 				/* continuing to return tuples from a leaf page */
 				scan->xs_heaptid = so->pageData[so->curPageData].heapPtr;
@@ -703,8 +709,12 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 					MemoryContextSwitchTo(oldCxt);
 				}
 				if (so->numKilled < MaxIndexTuplesPerPage)
+				{
 					so->killedItems[so->numKilled++] =
 						so->pageData[so->curPageData - 1].offnum;
+					AdvanceLatestRemovedXid(&so->killedLatestRemovedXid,
+											scan->prior_tuple_removed_xid);
+				}
 			}
 			/* find and process the next index page */
 			do

@@ -24,6 +24,7 @@
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/smgr.h"
+#include "storage/standby.h"
 
 /* Minimum tree height for application of fastpath optimization */
 #define BTREE_FASTPATH_MIN_LEVEL	2
@@ -676,6 +677,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 * Mark buffer with a dirty hint, since state is not
 					 * crucial. Be sure to mark the proper buffer dirty.
 					 */
+					LogIndexHintHorizonIfNeeded(rel, latest_removed_xid);
 					if (nbuf != InvalidBuffer)
 						MarkBufferDirtyHint(nbuf, true);
 					else
