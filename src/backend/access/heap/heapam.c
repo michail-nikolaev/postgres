@@ -1499,7 +1499,8 @@ heap_fetch(Relation relation,
  *
  * If all_dead is not NULL, we check non-visible tuples to see if they are
  * globally dead; *all_dead is set true if all members of the HOT chain
- * are vacuumable, false if not.
+ * are vacuumable, false if not. Also, latest_removed_xid is set to the 
+ * latest removed xid of a HOT chain.
  *
  * Unlike heap_fetch, the caller must already have pin and (at least) share
  * lock on the buffer; it is still pinned/locked at exit.  Also unlike
@@ -1508,7 +1509,7 @@ heap_fetch(Relation relation,
 bool
 heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 					   Snapshot snapshot, HeapTuple heapTuple,
-					   bool *all_dead, bool first_call)
+					   bool *all_dead, TransactionId *latest_removed_xid, bool first_call)
 {
 	Page		dp = (Page) BufferGetPage(buffer);
 	TransactionId prev_xmax = InvalidTransactionId;
@@ -1519,9 +1520,12 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 	bool		skip;
 	GlobalVisState *vistest = NULL;
 
+	Assert((!all_dead) || (all_dead && latest_removed_xid));
 	/* If this is not the first call, previous call returned a (live!) tuple */
 	if (all_dead)
 		*all_dead = first_call;
+	if (latest_removed_xid)
+		*latest_removed_xid = InvalidTransactionId;	
 
 	blkno = ItemPointerGetBlockNumber(tid);
 	offnum = ItemPointerGetOffsetNumber(tid);
@@ -1604,7 +1608,10 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 				PredicateLockTID(relation, &heapTuple->t_self, snapshot,
 								 HeapTupleHeaderGetXmin(heapTuple->t_data));
 				if (all_dead)
+				{
 					*all_dead = false;
+					*latest_removed_xid = InvalidTransactionId;
+				}
 				return true;
 			}
 		}
@@ -1624,7 +1631,12 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 				vistest = GlobalVisTestFor(relation);
 
 			if (!HeapTupleIsSurelyDead(heapTuple, vistest))
+			{
 				*all_dead = false;
+				*latest_removed_xid = InvalidTransactionId;
+			}
+			else
+				HeapTupleHeaderAdvanceLatestRemovedXid(heapTuple->t_data, latest_removed_xid);
 		}
 
 		/*

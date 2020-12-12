@@ -491,7 +491,8 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 			if (inposting || !ItemIdIsDead(curitemid))
 			{
 				ItemPointerData htid;
-				bool		all_dead = false;
+				bool			all_dead = false;
+				TransactionId	latest_removed_xid = InvalidTransactionId;
 
 				if (!inposting)
 				{
@@ -545,7 +546,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 				 */
 				else if (table_index_fetch_tuple_check(heapRel, &htid,
 													   &SnapshotDirty,
-													   &all_dead))
+													   &all_dead, &latest_removed_xid))
 				{
 					TransactionId xwait;
 
@@ -602,7 +603,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 */
 					htid = itup->t_tid;
 					if (table_index_fetch_tuple_check(heapRel, &htid,
-													  SnapshotSelf, NULL))
+													  SnapshotSelf, NULL, NULL))
 					{
 						/* Normal case --- it's still live */
 					}

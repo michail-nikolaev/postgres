@@ -298,12 +298,17 @@ typedef struct TableAmRoutine
 	 * index_fetch_tuple iff it is guaranteed that no backend needs to see
 	 * that tuple. Index AMs can use that to avoid returning that tid in
 	 * future searches.
+	 * 
+	 * *latest_removed_xid, if all_dead is not NULL, will be set to
+	 * the latest removed xid of a HOT chain by table_index_fetch_tuple()
+	 * iff it is guaranteed that no backend needs to see that tuple.
 	 */
 	bool		(*index_fetch_tuple) (struct IndexFetchTableData *scan,
 									  ItemPointer tid,
 									  Snapshot snapshot,
 									  TupleTableSlot *slot,
-									  bool *call_again, bool *all_dead);
+									  bool *call_again, bool *all_dead,
+									  TransactionId *latest_removed_xid);
 
 
 	/* ------------------------------------------------------------------------
@@ -1012,6 +1017,10 @@ table_index_fetch_end(struct IndexFetchTableData *scan)
  * table_index_fetch_tuple() iff it is guaranteed that no backend needs to see
  * that tuple. Index AMs can use that to avoid returning that tid in future
  * searches.
+ * 
+ * *latest_removed_xid, if all_dead is not NULL, will be set to the latest removed
+ * xid of a HOT chain by table_index_fetch_tuple() iff it is guaranteed that no
+ * backend needs to see that tuple.
  *
  * The difference between this function and table_tuple_fetch_row_version()
  * is that this function returns the currently visible version of a row if
@@ -1025,7 +1034,8 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
 						ItemPointer tid,
 						Snapshot snapshot,
 						TupleTableSlot *slot,
-						bool *call_again, bool *all_dead)
+						bool *call_again, bool *all_dead,
+						TransactionId *latest_removed_xid)
 {
 	/*
 	 * We don't expect direct calls to table_index_fetch_tuple with valid
@@ -1037,7 +1047,7 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
 
 	return scan->rel->rd_tableam->index_fetch_tuple(scan, tid, snapshot,
 													slot, call_again,
-													all_dead);
+													all_dead, latest_removed_xid);
 }
 
 /*
@@ -1049,7 +1059,8 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
 extern bool table_index_fetch_tuple_check(Relation rel,
 										  ItemPointer tid,
 										  Snapshot snapshot,
-										  bool *all_dead);
+										  bool *all_dead,
+										  TransactionId *latest_removed_xid);
 
 
 /* ------------------------------------------------------------------------

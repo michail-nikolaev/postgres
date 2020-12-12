@@ -572,12 +572,14 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 bool
 index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 {
-	bool		all_dead = false;
-	bool		found;
+	bool			all_dead = false;
+	TransactionId	latest_removed_xid = InvalidTransactionId;
+	bool			found;
 
 	found = table_index_fetch_tuple(scan->xs_heapfetch, &scan->xs_heaptid,
 									scan->xs_snapshot, slot,
-									&scan->xs_heap_continue, &all_dead);
+									&scan->xs_heap_continue,
+									&all_dead, &latest_removed_xid);
 
 	if (found)
 		pgstat_count_heap_fetch(scan->indexRelation);
