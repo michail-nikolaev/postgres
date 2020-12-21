@@ -325,7 +325,7 @@ ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid, RelFileNode 
 		return;
 
 	backends = GetConflictingVirtualXIDs(latestRemovedXid,
-										 node.dbNode);
+										 node.dbNode, false);
 
 	ResolveRecoveryConflictWithVirtualXIDs(backends,
 										   PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
@@ -356,7 +356,7 @@ ResolveRecoveryConflictWithTablespace(Oid tsid)
 	 * We don't wait for commit because drop tablespace is non-transactional.
 	 */
 	temp_file_users = GetConflictingVirtualXIDs(InvalidTransactionId,
-												InvalidOid);
+												InvalidOid, false);
 	ResolveRecoveryConflictWithVirtualXIDs(temp_file_users,
 										   PROCSIG_RECOVERY_CONFLICT_TABLESPACE,
 										   WAIT_EVENT_RECOVERY_CONFLICT_TABLESPACE,
@@ -898,7 +898,7 @@ standby_redo(XLogReaderState *record)
 		if (IsNewerIndexHintHorizonXid(xlrec->dbId, xlrec->latestRemovedXid))
 		{
 			VirtualTransactionId* backends = 
-				GetConflictingVirtualXIDs(xlrec->latestRemovedXid, xlrec->dbId);
+				GetConflictingVirtualXIDs(xlrec->latestRemovedXid, xlrec->dbId, true);
 
 			ResolveRecoveryConflictWithVirtualXIDs(backends, PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
 												   WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT, true);

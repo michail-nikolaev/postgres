@@ -528,6 +528,8 @@ SetTransactionSnapshot(Snapshot sourcesnap, VirtualTransactionId *sourcevxid,
 	 * the state for GlobalVis*.
 	 */
 	CurrentSnapshot = GetSnapshotData(&CurrentSnapshotData);
+	// to keep it simple, use index hints only on primary for imported snapshots
+	MyProc->indexIgnoreKilledTuples = !RecoveryInProgress();
 
 	/*
 	 * Now copy appropriate fields from the source snapshot.
@@ -932,6 +934,7 @@ SnapshotResetXmin(void)
 	if (pairingheap_is_empty(&RegisteredSnapshots))
 	{
 		MyProc->xmin = InvalidTransactionId;
+		MyProc->indexIgnoreKilledTuples = false;
 		return;
 	}
 
@@ -939,6 +942,7 @@ SnapshotResetXmin(void)
 										pairingheap_first(&RegisteredSnapshots));
 
 	if (TransactionIdPrecedes(MyProc->xmin, minSnapshot->xmin))
+		// no need to change indexIgnoreKilledTuples here because xmin restriction is relaxed
 		MyProc->xmin = minSnapshot->xmin;
 }
 
