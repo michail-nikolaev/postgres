@@ -28,6 +28,7 @@
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -107,7 +108,7 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 
 	scan->kill_prior_tuple = false;
 	scan->prior_tuple_removed_xid = InvalidTransactionId;
-	scan->ignore_killed_tuples = true;
+	scan->ignore_killed_tuples = MyProc->indexIgnoreKilledTuples;
 
 	scan->opaque = NULL;
 

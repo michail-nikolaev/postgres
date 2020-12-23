@@ -2023,9 +2023,11 @@ GetSnapshotIndexIgnoreKilledTuples(Snapshot snapshot)
 {
 	/*
 	 * Always use and set LP_DEAD bits on primary. In case of stand by
-	 * only if hot_standby_feedback is enabled (to avoid unnecessary cancelations).
+	 * only if hot_standby_feedback is enabled (to avoid unnecessary
+	 * cancellations).
 	 * 
-	 * It is always safe set to it to true but could cause unnecessary cancelations.
+	 * It is always safe to set it to true but could cause high
+	 * cancellations rate.
 	*/
 	return !snapshot->takenDuringRecovery || hot_standby_feedback;
 }

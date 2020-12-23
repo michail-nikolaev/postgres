@@ -5,7 +5,7 @@ use warnings;
 
 use PostgresNode;
 use TestLib;
-use Test::More tests => 4;
+use Test::More tests => 6;
 use Config;
 
 
@@ -14,15 +14,20 @@ my $node_primary = get_new_node('primary');
 $node_primary->init(allows_streaming => 1);
 $node_primary->append_conf('postgresql.conf', qq{
     autovacuum = off
+    enable_seqscan = off
+    enable_indexonlyscan = off
 });
 $node_primary->start;
 
 # Create test table with primary index
 $node_primary->safe_psql(
-    'postgres', 'CREATE TABLE test_index_hint (id int PRIMARY KEY)');
-# Fill some data to it
+    'postgres', 'CREATE TABLE test_index_hint (id int PRIMARY KEY, value int)');
+$node_primary->safe_psql(
+    'postgres', 'CREATE INDEX ON test_index_hint (value, id)');
+# Fill some data to it, note to not put a lot of records to avoid heap_prune call
+# which cause conflict on recovery hiding conflict cause by index hints
 $node_primary->safe_psql('postgres',
-    'INSERT INTO test_index_hint VALUES (generate_series(1, 10000))');
+    'INSERT INTO test_index_hint VALUES (generate_series(1, 50), 0)');
 # And vacuum to allow index hints to be set
 $node_primary->safe_psql('postgres', 'VACUUM test_index_hint');
 
@@ -30,11 +35,16 @@ $node_primary->safe_psql('postgres', 'VACUUM test_index_hint');
 my $backup_name = 'my_backup';
 $node_primary->backup($backup_name);
 
-# Restore secondary node from backup backup
+# Restore standby node from backup backup
 my $node_standby = get_new_node('standby');
 $node_standby->init_from_backup($node_primary, $backup_name,
     has_streaming => 1);
-$node_standby->append_conf('postgresql.conf', 'max_standby_streaming_delay=3s');
+$node_standby->append_conf('postgresql.conf', qq{
+    max_standby_streaming_delay=3s
+    hot_standby_feedback = on
+    enable_seqscan = off
+    enable_indexonlyscan = off
+});
 $node_standby->start;
 
 
@@ -54,7 +64,7 @@ $psql_standby_repeatable_read{run} =
         '2>', \$psql_standby_repeatable_read{stderr},
         $psql_timeout);
 
-# Another psql to run command in repeatable read isolation level
+# Another psql to run command in read committed isolation level
 my %psql_standby_read_committed = ('stdin' => '', 'stdout' => '', 'stderr' => '');
 $psql_standby_read_committed{run} =
     IPC::Run::start(
@@ -68,7 +78,7 @@ $psql_standby_read_committed{run} =
 ok(send_query_and_wait(\%psql_standby_repeatable_read,
     q[
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT id FROM test_index_hint ORDER BY id LIMIT 1;
+SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;
 ],
     qr/1\n\(1 row\)/m),
     'row is visible without errors in repeatable read');
@@ -77,34 +87,62 @@ SELECT id FROM test_index_hint ORDER BY id LIMIT 1;
 ok(send_query_and_wait(\%psql_standby_read_committed,
     q[
 BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
-SELECT id FROM test_index_hint ORDER BY id LIMIT 1;
+SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;
 ],
     qr/1\n\(1 row\)/m),
     'row is visible without errors in read committed');
 
 # Now delete first 1000 rows in index
 $node_primary->safe_psql('postgres',
-    'DELETE FROM test_index_hint WHERE id <= 1000');
+    'UPDATE test_index_hint SET value = 1 WHERE id <= 10');
 
-# Set index hint and replicate to standby
-$node_primary->safe_psql('postgres',
-    'SELECT * FROM test_index_hint ORDER BY id LIMIT 1000');
-
-# Wait for standbys to catch up index hints
+# Wait for standbys to catch up transaction
 $node_primary->wait_for_catchup($node_standby, 'replay',
     $node_primary->lsn('insert'));
 
-# Make sure repeatable read transaction is canceled because of index hint
-ok(not send_query_and_wait(\%psql_standby_repeatable_read,
-    q/SELECT id FROM test_index_hint ORDER BY id LIMIT 1;/,
-    qr/1001\n\(1 row\)/m) && not $psql_standby_repeatable_read{run}->pumpable(),
-    'session is canceled for repeatable read');
+# Disable hot_standby_feedback to trigger conflicts later
+$node_standby->safe_psql('postgres',
+    'ALTER SYSTEM SET hot_standby_feedback = off;');
+$node_standby->reload;
 
 # Make sure read committed transaction is able to see correct data
 ok(send_query_and_wait(\%psql_standby_read_committed,
-    q/SELECT id FROM test_index_hint ORDER BY id LIMIT 1;/,
-    qr/1001\n\(1 row\)/m),
-    'session is not canceled for read commited');
+    q/SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;/,
+    qr/11\n\(1 row\)/m),
+    'session is not canceled for read committed');
+
+# Try to set hint bits in index on standby
+foreach (0..3) {
+    $node_standby->safe_psql('postgres',
+        'SELECT * FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;');
+}
+
+# Make sure previous queries not set the hints on standby because
+# of parallel transaction running
+ok(send_query_and_wait(\%psql_standby_repeatable_read,
+    q/SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;/,
+    qr/1\n\(1 row\)/m),
+    'hints on standby are not set');
+
+# Set index hint and replicate to standby
+$node_primary->safe_psql('postgres',
+  'SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;');
+
+# Wait for standbys to catch up index hints
+$node_primary->wait_for_catchup($node_standby, 'replay',
+  $node_primary->lsn('insert'));
+
+# Make sure read committed transaction is able to see correct data
+ok(send_query_and_wait(\%psql_standby_read_committed,
+    q/SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;/,
+    qr/11\n\(1 row\)/m),
+    'session is not canceled for read committed');
+
+# Make sure repeatable read transaction is canceled because of hint from primary
+ok((send_query_and_wait(\%psql_standby_repeatable_read,
+    q/SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;/,
+    qr/1\n\(1 row\)/m) == 0) && (not $psql_standby_repeatable_read{run}->pumpable()),
+    'session is canceled for repeatable read');
 
 $node_primary->stop();
 $node_standby->stop();
@@ -123,6 +161,8 @@ sub send_query_and_wait {
         # See PostgresNode.pm's psql()
         $$psql{stdout} =~ s/\r\n/\n/g if $Config{osname} eq 'msys';
 
+        # diag("\n" . $$psql{stdout}); # for debugging
+
         last if $$psql{stdout} =~ /$untl/;
 
         if ($psql_timeout->is_expired) {
@@ -136,6 +176,8 @@ sub send_query_and_wait {
             return 0;
         }
         $$psql{run}->pump();
+        select(undef, undef, undef, 0.01); # sleep a little
+
     }
 
     $$psql{stdout} = '';
