@@ -156,6 +156,12 @@ typedef struct
 	 * store semantics, so use sig_atomic_t.
 	 */
 	sig_atomic_t force_reply;	/* used as a bool */
+
+	/* Initially true so we always send at least one feedback message */
+	sig_atomic_t sender_has_standby_xmin;
+
+	/* Is senders feedback propagated through cascading replication chain up to the primary */
+	sig_atomic_t sender_propagates_feedback_to_primary;
 } WalRcvData;
 
 extern WalRcvData *WalRcv;

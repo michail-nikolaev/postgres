@@ -2022,14 +2022,17 @@ static bool
 GetSnapshotIndexIgnoreKilledTuples(Snapshot snapshot)
 {
 	/*
-	 * Always use and set LP_DEAD bits on primary. In case of stand by
-	 * only if hot_standby_feedback is enabled (to avoid unnecessary
-	 * cancellations).
+	 * Always use and set LP_DEAD bits on primary. In case of standby
+	 * only if hot_standby_feedback enabled, walsender has our xmin
+	 * and walsender propagates feedback up to the primary (to avoid
+	 * unnecessary cancellations).
 	 * 
 	 * It is always safe to set it to true but could cause high
 	 * cancellations rate.
 	*/
-	return !snapshot->takenDuringRecovery || hot_standby_feedback;
+	Assert(!RecoveryInProgress() || WalRcv);
+	return !snapshot->takenDuringRecovery ||
+		(WalRcv->sender_propagates_feedback_to_primary && WalRcv->sender_has_standby_xmin);
 }
 
 /*

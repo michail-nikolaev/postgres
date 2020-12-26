@@ -225,6 +225,9 @@ WalReceiverMain(void)
 	/* Advertise our PID so that the startup process can kill us */
 	walrcv->pid = MyProcPid;
 	walrcv->walRcvState = WALRCV_STREAMING;
+	/* Initially true so we always send at least one feedback message */
+	walrcv->sender_has_standby_xmin = true;
+	walrcv->sender_propagates_feedback_to_primary = false;
 
 	/* Fetch information required to start streaming */
 	walrcv->ready_to_display = false;
@@ -806,6 +809,7 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
 	XLogRecPtr	walEnd;
 	TimestampTz sendTime;
 	bool		replyRequested;
+	bool		senderPropagatesFeedbackToPrimary;
 
 	resetStringInfo(&incoming_message);
 
@@ -835,7 +839,7 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
 		case 'k':				/* Keepalive */
 			{
 				/* copy message to StringInfo */
-				hdrlen = sizeof(int64) + sizeof(int64) + sizeof(char);
+				hdrlen = sizeof(int64) + sizeof(int64) + sizeof(char) + sizeof(char);
 				if (len != hdrlen)
 					ereport(ERROR,
 							(errcode(ERRCODE_PROTOCOL_VIOLATION),
@@ -846,8 +850,10 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
 				walEnd = pq_getmsgint64(&incoming_message);
 				sendTime = pq_getmsgint64(&incoming_message);
 				replyRequested = pq_getmsgbyte(&incoming_message);
+				senderPropagatesFeedbackToPrimary = pq_getmsgbyte(&incoming_message);
 
 				ProcessWalSndrMessage(walEnd, sendTime);
+				WalRcv->sender_propagates_feedback_to_primary = senderPropagatesFeedbackToPrimary;
 
 				/* If the primary requested a reply, send one immediately */
 				if (replyRequested)
@@ -1110,15 +1116,13 @@ XLogWalRcvSendHSFeedback(bool immed)
 				catalog_xmin;
 	static TimestampTz sendTime = 0;
 
-	/* initially true so we always send at least one feedback message */
-	static bool primary_has_standby_xmin = true;
 
 	/*
 	 * If the user doesn't want status to be reported to the primary, be sure
 	 * to exit before doing anything at all.
 	 */
 	if ((wal_receiver_status_interval <= 0 || !hot_standby_feedback) &&
-		!primary_has_standby_xmin)
+		!WalRcv->sender_has_standby_xmin)
 		return;
 
 	/* Get current timestamp. */
@@ -1188,9 +1192,9 @@ XLogWalRcvSendHSFeedback(bool immed)
 	pq_sendint32(&reply_message, catalog_xmin_epoch);
 	walrcv_send(wrconn, reply_message.data, reply_message.len);
 	if (TransactionIdIsValid(xmin) || TransactionIdIsValid(catalog_xmin))
-		primary_has_standby_xmin = true;
+		WalRcv->sender_has_standby_xmin = true;
 	else
-		primary_has_standby_xmin = false;
+		WalRcv->sender_has_standby_xmin = false;
 }
 
 /*

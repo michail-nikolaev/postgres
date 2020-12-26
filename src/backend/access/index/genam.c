@@ -106,6 +106,12 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 
 	scan->xs_want_itup = false; /* may be set later */
 
+	/*
+	 * For correct MVCC for queries during recovery, we could use
+	 * hint bits as on the primary. But to avoid frequent query
+	 * cancelation we do it only if hot_standy_feedback is active.
+	 * The decision is made in GetSnapshotIndexIgnoreKilledTuples.
+	*/
 	scan->kill_prior_tuple = false;
 	scan->prior_tuple_removed_xid = InvalidTransactionId;
 	scan->ignore_killed_tuples = MyProc->indexIgnoreKilledTuples;
