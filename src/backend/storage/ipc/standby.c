@@ -894,17 +894,11 @@ standby_redo(XLogReaderState *record)
 	else if (info == XLOG_INDEX_HINT_HORIZON)
 	{
 		xl_index_hint_horizon *xlrec = (xl_index_hint_horizon *) XLogRecGetData(record);
+		VirtualTransactionId* backends =
+			GetConflictingVirtualXIDs(xlrec->latestRemovedXid, xlrec->dbId, true);
 
-		if (IsNewerIndexHintHorizonXid(xlrec->dbId, xlrec->latestRemovedXid))
-		{
-			VirtualTransactionId* backends = 
-				GetConflictingVirtualXIDs(xlrec->latestRemovedXid, xlrec->dbId, true);
-
-			ResolveRecoveryConflictWithVirtualXIDs(backends, PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
-												   WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT, true);
-
-			UpsertLatestIndexHintHorizonXid(xlrec->dbId, xlrec->latestRemovedXid);
-		}
+		ResolveRecoveryConflictWithVirtualXIDs(backends, PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
+											   WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT, true);
 	}
 	else
 		elog(PANIC, "standby_redo: unknown op code %u", info);
