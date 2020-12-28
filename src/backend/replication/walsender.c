@@ -2179,7 +2179,7 @@ ProcessStandbyHSFeedbackMessage(void)
 	}
 
 	/*
-	 * Always send keep-alive after feedback to allow standby to mantain
+	 * Always send keep-alive after feedback to allow standby to maintain
 	 * WalRcv->sender_propagates_feedback_to_primary.
 	 */
 	WalSndKeepalive(false);
@@ -3462,8 +3462,9 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 static void
 WalSndKeepalive(bool requestReply)
 {
+	bool am_propagating_feedback_to_primary;
 	elog(DEBUG2, "sending replication keepalive");
-	bool am_propagating_feedback_to_primary = !am_cascading_walsender
+	am_propagating_feedback_to_primary = !am_cascading_walsender
 		|| (WalRcv->sender_has_standby_xmin && WalRcv->sender_propagates_feedback_to_primary);
 
 	/* construct the message... */

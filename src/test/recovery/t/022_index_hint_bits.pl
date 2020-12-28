@@ -63,7 +63,8 @@ $node_standby_2->append_conf('postgresql.conf', $standby_settings);
 $node_standby_2->start;
 
 # Make sure sender_propagates_feedback_to_primary is set on standbys
-sleep(3);
+wait_hfs($node_primary, 1);
+wait_hfs($node_standby_1, 1);
 
 # To avoid hanging while expecting some specific input from a psql
 # instance being driven by us, add a timeout high enough that it
@@ -128,7 +129,8 @@ $node_standby_1->safe_psql('postgres',
 $node_standby_1->reload;
 
 # Make sure sender_propagates_feedback_to_primary is not set on standby
-sleep(3);
+wait_hfs($node_primary, 0);
+wait_hfs($node_standby_1, 1);
 
 # Try to set hint bits in index on standby
 try_to_set_hint_bits();
@@ -187,7 +189,8 @@ $node_standby_1->safe_psql('postgres',
 $node_standby_1->reload;
 
 # Make sure sender_propagates_feedback_to_primary is now set on standbys
-sleep(3);
+wait_hfs($node_primary, 1);
+wait_hfs($node_standby_1, 1);
 
 # Try to set hint bits in index on standby
 try_to_set_hint_bits();
@@ -268,4 +271,13 @@ sub non_normal_num {
     my ($node) = @_;
     return $node->safe_psql('postgres',
         "SELECT COUNT(*) FROM heap_page_items(get_raw_page('test_index_hint', 0)) WHERE lp_flags != 1");
+}
+
+sub wait_hfs {
+    my ($node, $n) = @_;
+    $node->poll_query_until('postgres',
+        "SELECT (SELECT COUNT(*) FROM (SELECT * FROM pg_stat_replication WHERE backend_xmin IS NOT NULL) AS X) = $n")
+            or die 'backend_xmin is invalid';
+    # Make sure we have received reply to feedback message
+    sleep(2);
 }
