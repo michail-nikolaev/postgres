@@ -528,7 +528,9 @@ SetTransactionSnapshot(Snapshot sourcesnap, VirtualTransactionId *sourcevxid,
 	 * the state for GlobalVis*.
 	 */
 	CurrentSnapshot = GetSnapshotData(&CurrentSnapshotData);
-	// to keep it simple, use index hints only on primary for imported snapshots
+	/* To keep it simple, use index hint bits only on the primary for imported
+	 * snapshots.
+	 */
 	MyProc->indexIgnoreKilledTuples = !RecoveryInProgress();
 
 	/*

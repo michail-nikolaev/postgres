@@ -1883,7 +1883,8 @@ _bt_killitems(IndexScanDesc scan)
 	 */
 	if (killedsomething)
 	{
-		LogIndexHintHorizonIfNeeded(scan->indexRelation, so->killedLatestRemovedXid);
+		LogIndexHintBitsHorizonIfNeeded(scan->indexRelation,
+										so->killedLatestRemovedXid);
 		opaque->btpo_flags |= BTP_HAS_GARBAGE;
 		MarkBufferDirtyHint(so->currPos.buf, true);
 	}

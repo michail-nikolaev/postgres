@@ -37,7 +37,8 @@ standby_desc_running_xacts(StringInfo buf, xl_running_xacts *xlrec)
 }
 
 static void
-standby_desc_index_hint_horizon(StringInfo buf, xl_index_hint_horizon *xlrec)
+standby_desc_index_hint_bits_horizon(StringInfo buf,
+									 xl_index_hint_bits_horizon *xlrec)
 {
 	appendStringInfo(buf, "latestRemovedXid %u db %u",
 		xlrec->latestRemovedXid,
@@ -74,11 +75,11 @@ standby_desc(StringInfo buf, XLogReaderState *record)
 								   xlrec->dbId, xlrec->tsId,
 								   xlrec->relcacheInitFileInval);
 	}
-	else if (info == XLOG_INDEX_HINT_HORIZON)
+	else if (info == XLOG_INDEX_HINT_BITS_HORIZON)
 	{
-		xl_index_hint_horizon *xlrec = (xl_index_hint_horizon *) rec;
+		xl_index_hint_bits_horizon *xlrec = (xl_index_hint_bits_horizon *) rec;
 
-		standby_desc_index_hint_horizon(buf, xlrec);
+		standby_desc_index_hint_bits_horizon(buf, xlrec);
 	}
 }
 
@@ -98,8 +99,8 @@ standby_identify(uint8 info)
 		case XLOG_INVALIDATIONS:
 			id = "INVALIDATIONS";
 			break;
-		case XLOG_INDEX_HINT_HORIZON:
-			id = "INDEX_HINT_HORIZON";
+		case XLOG_INDEX_HINT_BITS_HORIZON:
+			id = "INDEX_HINT_BITS_HORIZON";
 			break;
 	}
 

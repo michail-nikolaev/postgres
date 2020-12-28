@@ -677,7 +677,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 * Mark buffer with a dirty hint, since state is not
 					 * crucial. Be sure to mark the proper buffer dirty.
 					 */
-					LogIndexHintHorizonIfNeeded(rel, latest_removed_xid);
+					LogIndexHintBitsHorizonIfNeeded(rel, latest_removed_xid);
 					if (nbuf != InvalidBuffer)
 						MarkBufferDirtyHint(nbuf, true);
 					else

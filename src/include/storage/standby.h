@@ -90,7 +90,8 @@ extern void LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,
 									bool relcacheInitFileInval);
 
 extern void StandByShmemInit(void);
-extern void LogIndexHintHorizonIfNeeded(Relation rel, TransactionId latestRemovedXid);
+extern void LogIndexHintBitsHorizonIfNeeded(Relation rel,
+											TransactionId latestRemovedXid);
 extern void AdvanceLatestRemovedXid(TransactionId *latestRemovedXid,
 									TransactionId nextLatestRemovedXid);
 

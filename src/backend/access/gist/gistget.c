@@ -87,7 +87,8 @@ gistkillitems(IndexScanDesc scan)
 
 	if (killedsomething)
 	{
-		LogIndexHintHorizonIfNeeded(scan->indexRelation, so->killedLatestRemovedXid);
+		LogIndexHintBitsHorizonIfNeeded(scan->indexRelation,
+										so->killedLatestRemovedXid);
 		GistMarkPageHasGarbage(page);
 		MarkBufferDirtyHint(buffer, true);
 	}

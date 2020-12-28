@@ -26,10 +26,10 @@ $node_primary->safe_psql(
     'postgres', 'CREATE INDEX test_index ON test_index_hint (value, id)');
 # Fill some data to it, note to not put a lot of records to avoid
 # heap_page_prune_opt call which cause conflict on recovery hiding conflict
-# caused due index hints
+# caused due index hint bits
 $node_primary->safe_psql('postgres',
     'INSERT INTO test_index_hint VALUES (generate_series(1, 30), 0)');
-# And vacuum to allow index hints to be set
+# And vacuum to allow index hint bits to be set
 $node_primary->safe_psql('postgres', 'VACUUM test_index_hint');
 # For fail-fast in case FPW from primary
 $node_primary->safe_psql('postgres', 'CHECKPOINT');
@@ -114,7 +114,7 @@ $node_primary->safe_psql('postgres',
     'UPDATE test_index_hint SET value = 1 WHERE id <= 10');
 
 # Make sure hint bits are not set on primary
-is(hints_num($node_primary), qq(0), 'no index hints are set on primary yet');
+is(hints_num($node_primary), qq(0), 'no index hint bits are set on primary yet');
 
 # Make sure page is not processed by heap_page_prune_opt
 is(non_normal_num($node_primary), qq(0), 'all items are normal in heap');
@@ -146,10 +146,10 @@ ok(send_query_and_wait(\%psql_standby_repeatable_read,
     qr/1\n\(1 row\)/m),
     'hints on standby are not set');
 
-is(hints_num($node_standby_1), qq(0), 'no index hints are set on standby yet');
+is(hints_num($node_standby_1), qq(0), 'no index hint bits are set on standby yet');
 
 
-# Set index hints and replicate to standby
+# Set index hint bits and replicate to standby
 $node_primary->safe_psql('postgres',
     'SELECT id FROM test_index_hint WHERE value = 0 ORDER BY id LIMIT 1;');
 

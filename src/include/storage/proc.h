@@ -166,7 +166,7 @@ struct PGPROC
 	bool		recoveryConflictPending;
 	/*
 	*  Flag allowing to read\set LP_DEAD bits in indexes. 
-	*  Used to raise recovery conflict caused by index hints.
+	*  Also used to raise recovery conflict caused by index hint bits.
 	*/
 	bool		indexIgnoreKilledTuples;
 

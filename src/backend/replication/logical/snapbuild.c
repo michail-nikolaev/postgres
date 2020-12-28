@@ -577,7 +577,7 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 #endif
 
 	MyProc->xmin = snap->xmin;
-	// to keep it simple use index hints on primary only
+	// to keep it simple use index hint bits on the primary only
 	MyProc->indexIgnoreKilledTuples = !RecoveryInProgress();
 
 	/* allocate in transaction context */

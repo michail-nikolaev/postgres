@@ -41,7 +41,7 @@ int			max_standby_archive_delay = 30 * 1000;
 int			max_standby_streaming_delay = 30 * 1000;
 
 static HTAB *RecoveryLockLists;
-static HTAB *IndexHintHorizons;
+static HTAB *IndexHintBitsHorizons;
 
 static void ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 												   ProcSignalReason reason,
@@ -60,11 +60,11 @@ typedef struct RecoveryLockListsEntry
 	List	   *locks;
 } RecoveryLockListsEntry;
 
-typedef struct IndexHintHorizonsEntry
+typedef struct IndexHintBitsHorizonsEntry
 {
 	Oid				dbOid;
 	TransactionId	hintHorizonXid;
-} IndexHintHorizonXMinsEntry;
+} IndexHintBitsHorizonsEntry;
 
 /*
  * InitRecoveryTransactionEnvironment
@@ -802,37 +802,37 @@ StandbyReleaseOldLocks(TransactionId oldxid)
 }
 
 static bool
-IsNewerIndexHintHorizonXid(Oid dbOid, TransactionId latestRemovedXid)
+IsNewerIndexHintBitsHorizonXid(Oid dbOid, TransactionId latestRemovedXid)
 {
 	bool found, result;
-	IndexHintHorizonXMinsEntry* entry;
+	IndexHintBitsHorizonsEntry* entry;
 
-	LWLockAcquire(IndexHintHorizonShmemLock, LW_SHARED);
-	entry = (IndexHintHorizonXMinsEntry *) hash_search(IndexHintHorizons, &dbOid,
+	LWLockAcquire(IndexHintBitsHorizonShmemLock, LW_SHARED);
+	entry = (IndexHintBitsHorizonsEntry *) hash_search(IndexHintBitsHorizons, &dbOid,
 													   HASH_FIND, &found);
 
 	result = !found || TransactionIdPrecedes(entry->hintHorizonXid, latestRemovedXid);
-	LWLockRelease(IndexHintHorizonShmemLock);
+	LWLockRelease(IndexHintBitsHorizonShmemLock);
 
 	return result;
 }
 
 static void
-UpsertLatestIndexHintHorizonXid(Oid dbOid, TransactionId latestRemovedXid)
+UpsertLatestIndexHintBitsHorizonXid(Oid dbOid, TransactionId latestRemovedXid)
 {
 
 	bool found;
-	IndexHintHorizonXMinsEntry* entry;
+	IndexHintBitsHorizonsEntry* entry;
 
-	LWLockAcquire(IndexHintHorizonShmemLock, LW_EXCLUSIVE);
+	LWLockAcquire(IndexHintBitsHorizonShmemLock, LW_EXCLUSIVE);
 
-	entry = (IndexHintHorizonXMinsEntry *) hash_search(IndexHintHorizons, &dbOid,
+	entry = (IndexHintBitsHorizonsEntry *) hash_search(IndexHintBitsHorizons, &dbOid,
 													   HASH_ENTER, &found);
 
 	if (!found || TransactionIdPrecedes(entry->hintHorizonXid, latestRemovedXid))
 		entry->hintHorizonXid = latestRemovedXid;
 
-	LWLockRelease(IndexHintHorizonShmemLock);
+	LWLockRelease(IndexHintBitsHorizonShmemLock);
 }
 
 
@@ -891,9 +891,10 @@ standby_redo(XLogReaderState *record)
 											 xlrec->dbId,
 											 xlrec->tsId);
 	}
-	else if (info == XLOG_INDEX_HINT_HORIZON)
+	else if (info == XLOG_INDEX_HINT_BITS_HORIZON)
 	{
-		xl_index_hint_horizon *xlrec = (xl_index_hint_horizon *) XLogRecGetData(record);
+		xl_index_hint_bits_horizon *xlrec =
+				(xl_index_hint_bits_horizon *) XLogRecGetData(record);
 		VirtualTransactionId* backends =
 			GetConflictingVirtualXIDs(xlrec->latestRemovedXid, xlrec->dbId, true);
 
@@ -1181,28 +1182,30 @@ void AdvanceLatestRemovedXid(TransactionId *latestRemovedXid,
 }
 
 static void
-LogIndexHintHorizon(Oid dbId, TransactionId latestRemovedXid)
+LogIndexHintBitsHorizon(Oid dbId, TransactionId latestRemovedXid)
 {
-	xl_index_hint_horizon xlrec;
+	xl_index_hint_bits_horizon xlrec;
 
 	xlrec.dbId = dbId;
 	xlrec.latestRemovedXid = latestRemovedXid;
 
 	XLogBeginInsert();
-	XLogRegisterData((char *) &xlrec, sizeof(xl_index_hint_horizon));
+	XLogRegisterData((char *) &xlrec, sizeof(xl_index_hint_bits_horizon));
 
-	XLogInsert(RM_STANDBY_ID, XLOG_INDEX_HINT_HORIZON);
+	XLogInsert(RM_STANDBY_ID, XLOG_INDEX_HINT_BITS_HORIZON);
 }
 
 void 
-LogIndexHintHorizonIfNeeded(Relation rel, TransactionId latestRemovedXid)
+LogIndexHintBitsHorizonIfNeeded(Relation rel, TransactionId latestRemovedXid)
 {
-	if (!RecoveryInProgress() && XLogStandbyInfoActive() && TransactionIdIsValid(latestRemovedXid)) {
+	if (!RecoveryInProgress() && XLogStandbyInfoActive()
+			&& TransactionIdIsValid(latestRemovedXid)) {
 		Assert(TransactionIdIsNormal(latestRemovedXid));
-		if (IsNewerIndexHintHorizonXid(rel->rd_node.dbNode, latestRemovedXid))
+		if (IsNewerIndexHintBitsHorizonXid(rel->rd_node.dbNode, latestRemovedXid))
 		{
-			LogIndexHintHorizon(rel->rd_node.dbNode, latestRemovedXid);
-			UpsertLatestIndexHintHorizonXid(rel->rd_node.dbNode, latestRemovedXid);
+			LogIndexHintBitsHorizon(rel->rd_node.dbNode, latestRemovedXid);
+			UpsertLatestIndexHintBitsHorizonXid(rel->rd_node.dbNode,
+												latestRemovedXid);
 		}
 	}
 }
@@ -1214,13 +1217,13 @@ StandByShmemInit(void)
 
 	MemSet(&info, 0, sizeof(info));
 	info.keysize = sizeof(Oid);
-	info.entrysize = sizeof(IndexHintHorizonXMinsEntry);
+	info.entrysize = sizeof(IndexHintBitsHorizonsEntry);
 
-	LWLockAcquire(IndexHintHorizonShmemLock, LW_EXCLUSIVE);
+	LWLockAcquire(IndexHintBitsHorizonShmemLock, LW_EXCLUSIVE);
 
-	IndexHintHorizons = ShmemInitHash("IndexHintHorizons",
-									  64, 64,
-									  &info, HASH_ELEM | HASH_BLOBS);
+	IndexHintBitsHorizons = ShmemInitHash("IndexHintBitsHorizons",
+										  64, 64,
+										  &info, HASH_ELEM | HASH_BLOBS);
 
-	LWLockRelease(IndexHintHorizonShmemLock);
+	LWLockRelease(IndexHintBitsHorizonShmemLock);
 }

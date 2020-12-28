@@ -31,10 +31,10 @@ extern void standby_desc_invalidations(StringInfo buf,
 /*
  * XLOG message types
  */
-#define XLOG_STANDBY_LOCK			0x00
-#define XLOG_RUNNING_XACTS			0x10
-#define XLOG_INVALIDATIONS			0x20
-#define XLOG_INDEX_HINT_HORIZON		0x30
+#define XLOG_STANDBY_LOCK				0x00
+#define XLOG_RUNNING_XACTS				0x10
+#define XLOG_INVALIDATIONS				0x20
+#define XLOG_INDEX_HINT_BITS_HORIZON	0x30
 
 typedef struct xl_standby_locks
 {
@@ -72,10 +72,10 @@ typedef struct xl_invalidations
 
 #define MinSizeOfInvalidations offsetof(xl_invalidations, msgs)
 
-typedef struct xl_index_hint_horizon
+typedef struct xl_index_hint_bits_horizon
 {
 	Oid				dbId;
 	TransactionId	latestRemovedXid;
-} xl_index_hint_horizon;
+} xl_index_hint_bits_horizon;
 
 #endif							/* STANDBYDEFS_H */

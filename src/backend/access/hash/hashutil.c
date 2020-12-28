@@ -611,7 +611,8 @@ _hash_kill_items(IndexScanDesc scan)
 	 */
 	if (killedsomething)
 	{
-		LogIndexHintHorizonIfNeeded(scan->indexRelation, so->killedLatestRemovedXid);
+		LogIndexHintBitsHorizonIfNeeded(scan->indexRelation,
+										so->killedLatestRemovedXid);
 		opaque->hasho_flag |= LH_PAGE_HAS_DEAD_TUPLES;
 		MarkBufferDirtyHint(buf, true);
 	}
