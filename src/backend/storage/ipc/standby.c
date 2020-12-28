@@ -1177,7 +1177,8 @@ void AdvanceLatestRemovedXid(TransactionId *latestRemovedXid,
 		if (!TransactionIdIsNormal(*latestRemovedXid))
 			*latestRemovedXid = nextLatestRemovedXid;
 		else
-			*latestRemovedXid = TransactionIdLatest(nextLatestRemovedXid, 1, latestRemovedXid);
+			*latestRemovedXid =
+				TransactionIdLatest(nextLatestRemovedXid, 1, latestRemovedXid);
 	}
 }
 
@@ -1201,7 +1202,8 @@ LogIndexHintBitsHorizonIfNeeded(Relation rel, TransactionId latestRemovedXid)
 	if (!RecoveryInProgress() && XLogStandbyInfoActive()
 			&& TransactionIdIsValid(latestRemovedXid)) {
 		Assert(TransactionIdIsNormal(latestRemovedXid));
-		if (IsNewerIndexHintBitsHorizonXid(rel->rd_node.dbNode, latestRemovedXid))
+		if (IsNewerIndexHintBitsHorizonXid(rel->rd_node.dbNode,
+										   latestRemovedXid))
 		{
 			LogIndexHintBitsHorizon(rel->rd_node.dbNode, latestRemovedXid);
 			UpsertLatestIndexHintBitsHorizonXid(rel->rd_node.dbNode,
