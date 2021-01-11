@@ -122,10 +122,9 @@ typedef struct IndexScanDescData
 	bool		xs_temp_snap;	/* unregister snapshot at scan end? */
 
 	/* signaling to index AM about killing index tuples */
-	bool		kill_prior_tuple;	/* last-returned tuple is dead */
-	bool		ignore_killed_tuples;	/* do not return killed entries */
-	bool		xactStartedInRecovery;	/* prevents killing/seeing killed
-										 * tuples */
+	bool			kill_prior_tuple;		 /* last-returned tuple is dead */
+	TransactionId	prior_tuple_removed_xid; /* removed fix for dead tuple */
+	bool			ignore_killed_tuples;	 /* do not return killed entries */
 
 	/* index access method's private state */
 	void	   *opaque;			/* access-method-specific info */

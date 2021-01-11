@@ -384,6 +384,8 @@ typedef struct xl_heap_rewrite_mapping
 
 extern void HeapTupleHeaderAdvanceLatestRemovedXid(HeapTupleHeader tuple,
 												   TransactionId *latestRemovedXid);
+extern void IndexHintBitAdvanceLatestRemovedXid(TransactionId killedTupleRemovedXid,
+												TransactionId *latestRemovedXid);
 
 extern void heap_redo(XLogReaderState *record);
 extern void heap_desc(StringInfo buf, XLogReaderState *record);

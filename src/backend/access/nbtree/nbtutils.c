@@ -1883,7 +1883,9 @@ _bt_killitems(IndexScanDesc scan)
 	if (killedsomething)
 	{
 		opaque->btpo_flags |= BTP_HAS_GARBAGE;
-		MarkBufferDirtyHint(so->currPos.buf, true);
+		MarkBufferDirtyIndexHint(so->currPos.buf, true,
+								 scan->indexRelation,
+								 so->killedLatestRemovedXid);
 	}
 
 	_bt_unlockbuf(scan->indexRelation, so->currPos.buf);

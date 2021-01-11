@@ -36,6 +36,16 @@ standby_desc_running_xacts(StringInfo buf, xl_running_xacts *xlrec)
 		appendStringInfoString(buf, "; subxid ovf");
 }
 
+static void
+standby_desc_index_hint_bits_horizon(StringInfo buf,
+									 xl_index_hint_bits_horizon *xlrec)
+{
+	char		*path = relpathperm(xlrec->rnode, MAIN_FORKNUM);
+
+	appendStringInfo(buf, "latestRemovedXid %u in %s",
+					 xlrec->latestRemovedXid, path);
+}
+
 void
 standby_desc(StringInfo buf, XLogReaderState *record)
 {
@@ -66,6 +76,12 @@ standby_desc(StringInfo buf, XLogReaderState *record)
 								   xlrec->dbId, xlrec->tsId,
 								   xlrec->relcacheInitFileInval);
 	}
+	else if (info == XLOG_INDEX_HINT_BITS_HORIZON)
+	{
+		xl_index_hint_bits_horizon *xlrec = (xl_index_hint_bits_horizon *) rec;
+
+		standby_desc_index_hint_bits_horizon(buf, xlrec);
+	}
 }
 
 const char *
@@ -83,6 +99,9 @@ standby_identify(uint8 info)
 			break;
 		case XLOG_INVALIDATIONS:
 			id = "INVALIDATIONS";
+			break;
+		case XLOG_INDEX_HINT_BITS_HORIZON:
+			id = "INDEX_HINT_BITS_HORIZON";
 			break;
 	}
 

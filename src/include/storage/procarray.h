@@ -70,7 +70,8 @@ extern bool IsBackendPid(int pid);
 extern VirtualTransactionId *GetCurrentVirtualXIDs(TransactionId limitXmin,
 												   bool excludeXmin0, bool allDbs, int excludeVacuum,
 												   int *nvxids);
-extern VirtualTransactionId *GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid);
+extern VirtualTransactionId *GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid,
+													   bool onlyIndexIgnoreKilledTuples);
 extern pid_t CancelVirtualTransaction(VirtualTransactionId vxid, ProcSignalReason sigmode);
 extern pid_t SignalVirtualTransaction(VirtualTransactionId vxid, ProcSignalReason sigmode,
 									  bool conflictPending);

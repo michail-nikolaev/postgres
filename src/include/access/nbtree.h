@@ -918,8 +918,9 @@ typedef struct BTScanOpaqueData
 	MemoryContext arrayContext; /* scan-lifespan context for array data */
 
 	/* info about killed items if any (killedItems is NULL if never used) */
-	int		   *killedItems;	/* currPos.items indexes of killed items */
-	int			numKilled;		/* number of currently stored items */
+	int				*killedItems;			/* currPos.items indexes of killed items */
+	TransactionId	 killedLatestRemovedXid;/* latest removed xid of all killed items */
+	int				 numKilled;				/* number of currently stored items */
 
 	/*
 	 * If we are doing an index-only scan, these are the tuple storage

@@ -222,6 +222,8 @@ extern void BufferGetTag(Buffer buffer, RelFileNode *rnode,
 						 ForkNumber *forknum, BlockNumber *blknum);
 
 extern void MarkBufferDirtyHint(Buffer buffer, bool buffer_std);
+extern void MarkBufferDirtyIndexHint(Buffer buffer, bool buffer_std,
+									 Relation rel, TransactionId latestRemovedXid);
 
 extern void UnlockBuffers(void);
 extern void LockBuffer(Buffer buffer, int mode);

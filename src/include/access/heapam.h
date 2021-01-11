@@ -126,7 +126,8 @@ extern bool heap_fetch(Relation relation, Snapshot snapshot,
 					   HeapTuple tuple, Buffer *userbuf);
 extern bool heap_hot_search_buffer(ItemPointer tid, Relation relation,
 								   Buffer buffer, Snapshot snapshot, HeapTuple heapTuple,
-								   bool *all_dead, bool first_call);
+								   bool *all_dead, TransactionId *latest_removed_xid,
+								   bool first_call);
 
 extern void heap_get_latest_tid(TableScanDesc scan, ItemPointer tid);
 

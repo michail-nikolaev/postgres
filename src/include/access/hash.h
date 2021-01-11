@@ -177,8 +177,9 @@ typedef struct HashScanOpaqueData
 	 */
 	bool		hashso_buc_split;
 	/* info about killed items if any (killedItems is NULL if never used) */
-	int		   *killedItems;	/* currPos.items indexes of killed items */
-	int			numKilled;		/* number of currently stored items */
+	int			 *killedItems;			  /* currPos.items indexes of killed items */
+	TransactionId killedLatestRemovedXid; /* latest removed xid of all killed items */
+	int			  numKilled;			  /* number of currently stored items */
 
 	/*
 	 * Identify all the matching items on a page and save them in

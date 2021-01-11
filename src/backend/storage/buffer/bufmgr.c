@@ -3711,6 +3711,22 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 }
 
 /*
+ * MarkBufferDirtyIndexHint
+ *
+ * This is essentially the same as MarkBufferDirtyHint, except it WAL log
+ * new value for index hint bits horizon if required.
+ *
+ * Should be used instead of MarkBufferDirtyHint for LP_DEAD hints in indexes.
+ */
+void
+MarkBufferDirtyIndexHint(Buffer buffer, bool buffer_std,
+						 Relation rel, TransactionId latestRemovedXid)
+{
+	LogIndexHintBitsHorizonIfNeeded(rel, latestRemovedXid);
+	MarkBufferDirtyHint(buffer, buffer_std);
+}
+
+/*
  * Release buffer content locks for shared buffers.
  *
  * Used to clean up after errors.

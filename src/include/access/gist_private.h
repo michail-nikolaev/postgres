@@ -165,8 +165,9 @@ typedef struct GISTScanOpaqueData
 	IndexOrderByDistance *distances;	/* output area for gistindex_keytest */
 
 	/* info about killed items if any (killedItems is NULL if never used) */
-	OffsetNumber *killedItems;	/* offset numbers of killed items */
-	int			numKilled;		/* number of currently stored items */
+	OffsetNumber *killedItems;			  /* offset numbers of killed items */
+	TransactionId killedLatestRemovedXid; /* latest removed xid of all killed items */
+	int			  numKilled;			  /* number of currently stored items */
 	BlockNumber curBlkno;		/* current number of block */
 	GistNSN		curPageLSN;		/* pos in the WAL stream when page was read */
 
