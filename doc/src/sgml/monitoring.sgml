@@ -1733,6 +1733,10 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       <entry>Waiting for recovery conflict resolution for dropping a
        tablespace.</entry>
      </row>
+      <row>
+       <entry><literal>RecoveryConflictSnapshotIndexHintBits</literal></entry>
+       <entry>Waiting for recovery conflict resolution for index hit bits.</entry>
+      </row>
      <row>
       <entry><literal>RecoveryPause</literal></entry>
       <entry>Waiting for recovery to be resumed.</entry>
@@ -1910,6 +1914,11 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       <entry><literal>DynamicSharedMemoryControl</literal></entry>
       <entry>Waiting to read or update dynamic shared memory allocation
        information.</entry>
+     </row>
+     <row>
+      <entry><literal>IndexHintHorizonShmem</literal></entry>
+      <entry>Waiting to read or update information about the latest index hint
+      bits horizon.</entry>
      </row>
      <row>
       <entry><literal>LockFastPath</literal></entry>
