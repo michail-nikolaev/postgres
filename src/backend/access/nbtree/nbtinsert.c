@@ -502,7 +502,11 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 			if (inposting || !ItemIdIsDead(curitemid))
 			{
 				ItemPointerData htid;
-				bool		all_dead = false;
+				IndexHintBitsData ihbd;
+
+				ihbd.all_dead = false;
+				ihbd.latest_removed_xid = InvalidTransactionId;
+				ihbd.page_lsn = InvalidXLogRecPtr;
 
 				if (!inposting)
 				{
@@ -556,7 +560,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 				 */
 				else if (table_index_fetch_tuple_check(heapRel, &htid,
 													   &SnapshotDirty,
-													   &all_dead))
+													   &ihbd))
 				{
 					TransactionId xwait;
 
@@ -670,7 +674,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 													RelationGetRelationName(rel))));
 					}
 				}
-				else if (all_dead && (!inposting ||
+				else if (ihbd.all_dead && (!inposting ||
 									  (prevalldead &&
 									   curposti == BTreeTupleGetNPosting(curitup) - 1)))
 				{
@@ -687,16 +691,18 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
 					 * crucial. Be sure to mark the proper buffer dirty.
 					 */
 					if (nbuf != InvalidBuffer)
-						MarkBufferDirtyHint(nbuf, true);
+						MarkBufferDirtyIndexHint(nbuf, true,
+												 rel, ihbd.latest_removed_xid);
 					else
-						MarkBufferDirtyHint(insertstate->buf, true);
+						MarkBufferDirtyIndexHint(insertstate->buf, true,
+												 rel, ihbd.latest_removed_xid);
 				}
 
 				/*
 				 * Remember if posting list tuple has even a single HOT chain
 				 * whose members are not all dead
 				 */
-				if (!all_dead && inposting)
+				if (!ihbd.all_dead && inposting)
 					prevalldead = false;
 			}
 		}

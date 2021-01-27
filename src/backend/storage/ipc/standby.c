@@ -42,6 +42,7 @@ int			max_standby_streaming_delay = 30 * 1000;
 bool		log_recovery_conflict_waits = false;
 
 static HTAB *RecoveryLockLists;
+static HTAB *IndexHintBitsHorizons;
 
 /* Flags set by timeout handlers */
 static volatile sig_atomic_t got_standby_deadlock_timeout = false;
@@ -64,6 +65,12 @@ typedef struct RecoveryLockListsEntry
 	TransactionId xid;
 	List	   *locks;
 } RecoveryLockListsEntry;
+
+typedef struct IndexHintBitsHorizonsEntry
+{
+	Oid				dbOid;
+	TransactionId	hintHorizonXid;
+} IndexHintBitsHorizonsEntry;
 
 /*
  * InitRecoveryTransactionEnvironment
@@ -425,7 +432,8 @@ ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 }
 
 void
-ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid, RelFileNode node)
+ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid,
+									RelFileNode node)
 {
 	VirtualTransactionId *backends;
 
@@ -444,12 +452,28 @@ ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid, RelFileNode 
 		return;
 
 	backends = GetConflictingVirtualXIDs(latestRemovedXid,
-										 node.dbNode);
+										 node.dbNode, false);
 
 	ResolveRecoveryConflictWithVirtualXIDs(backends,
 										   PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
 										   WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT,
 										   true);
+}
+
+void
+ResolveIndexHintBitsRecoveryConflictWithSnapshot(TransactionId latestRemovedXid,
+												 RelFileNode node)
+{
+	VirtualTransactionId *backends;
+
+	backends = GetConflictingVirtualXIDs(latestRemovedXid,
+										 node.dbNode, true);
+
+	ResolveRecoveryConflictWithVirtualXIDs(
+			backends,
+			PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
+			WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT_INDEX_HINT_BITS,
+			true);
 }
 
 void
@@ -475,7 +499,7 @@ ResolveRecoveryConflictWithTablespace(Oid tsid)
 	 * We don't wait for commit because drop tablespace is non-transactional.
 	 */
 	temp_file_users = GetConflictingVirtualXIDs(InvalidTransactionId,
-												InvalidOid);
+												InvalidOid, false);
 	ResolveRecoveryConflictWithVirtualXIDs(temp_file_users,
 										   PROCSIG_RECOVERY_CONFLICT_TABLESPACE,
 										   WAIT_EVENT_RECOVERY_CONFLICT_TABLESPACE,
@@ -1026,6 +1050,43 @@ StandbyReleaseOldLocks(TransactionId oldxid)
 	}
 }
 
+static bool
+IsNewerIndexHintBitsHorizonXid(Oid dbOid, TransactionId latestRemovedXid)
+{
+	bool found, result;
+	IndexHintBitsHorizonsEntry* entry;
+	Assert(TransactionIdIsNormal(latestRemovedXid));
+
+	LWLockAcquire(IndexHintBitsHorizonShmemLock, LW_SHARED);
+	entry = (IndexHintBitsHorizonsEntry *) hash_search(IndexHintBitsHorizons, &dbOid,
+													   HASH_FIND, &found);
+
+	result = !found || TransactionIdPrecedes(entry->hintHorizonXid, latestRemovedXid);
+	LWLockRelease(IndexHintBitsHorizonShmemLock);
+
+	return result;
+}
+
+static void
+UpsertLatestIndexHintBitsHorizonXid(Oid dbOid, TransactionId latestRemovedXid)
+{
+
+	bool found;
+	IndexHintBitsHorizonsEntry* entry;
+	Assert(TransactionIdIsNormal(latestRemovedXid));
+
+	LWLockAcquire(IndexHintBitsHorizonShmemLock, LW_EXCLUSIVE);
+
+	entry = (IndexHintBitsHorizonsEntry *) hash_search(IndexHintBitsHorizons, &dbOid,
+													   HASH_ENTER, &found);
+
+	if (!found || TransactionIdPrecedes(entry->hintHorizonXid, latestRemovedXid))
+		entry->hintHorizonXid = latestRemovedXid;
+
+	LWLockRelease(IndexHintBitsHorizonShmemLock);
+}
+
+
 /*
  * --------------------------------------------------------------------
  *		Recovery handling for Rmgr RM_STANDBY_ID
@@ -1080,6 +1141,16 @@ standby_redo(XLogReaderState *record)
 											 xlrec->relcacheInitFileInval,
 											 xlrec->dbId,
 											 xlrec->tsId);
+	}
+	else if (info == XLOG_INDEX_HINT_BITS_HORIZON) {
+		if (InHotStandby) {
+			xl_index_hint_bits_horizon *xlrec =
+					(xl_index_hint_bits_horizon *) XLogRecGetData(record);
+
+			ResolveIndexHintBitsRecoveryConflictWithSnapshot(
+												xlrec->latestRemovedXid,
+												xlrec->rnode);
+		}
 	}
 	else
 		elog(PANIC, "standby_redo: unknown op code %u", info);
@@ -1380,4 +1451,50 @@ get_recovery_conflict_desc(ProcSignalReason reason)
 	}
 
 	return reasonDesc;
+}
+
+static void
+LogIndexHintBitsHorizon(RelFileNode rnode, TransactionId latestRemovedXid)
+{
+	xl_index_hint_bits_horizon xlrec;
+
+	xlrec.rnode = rnode;
+	xlrec.latestRemovedXid = latestRemovedXid;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, sizeof(xl_index_hint_bits_horizon));
+
+	XLogInsert(RM_STANDBY_ID, XLOG_INDEX_HINT_BITS_HORIZON);
+}
+
+void
+LogIndexHintBitsHorizonIfNeeded(Relation rel, TransactionId latestRemovedXid)
+{
+	if (!RecoveryInProgress() && XLogStandbyInfoActive() &&
+			TransactionIdIsNormal(latestRemovedXid) && RelationNeedsWAL(rel)) {
+		if (IsNewerIndexHintBitsHorizonXid(rel->rd_node.dbNode, latestRemovedXid))
+		{
+			LogIndexHintBitsHorizon(rel->rd_node, latestRemovedXid);
+			UpsertLatestIndexHintBitsHorizonXid(rel->rd_node.dbNode,
+												latestRemovedXid);
+		}
+	}
+}
+
+void
+StandByShmemInit(void)
+{
+	HASHCTL		info;
+
+	MemSet(&info, 0, sizeof(info));
+	info.keysize = sizeof(Oid);
+	info.entrysize = sizeof(IndexHintBitsHorizonsEntry);
+
+	LWLockAcquire(IndexHintBitsHorizonShmemLock, LW_EXCLUSIVE);
+
+	IndexHintBitsHorizons = ShmemInitHash("IndexHintBitsHorizons",
+										  64, 64,
+										  &info, HASH_ELEM | HASH_BLOBS);
+
+	LWLockRelease(IndexHintBitsHorizonShmemLock);
 }

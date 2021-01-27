@@ -61,6 +61,8 @@ struct WritebackContext;
 /* forward declared, to avoid including smgr.h here */
 struct SMgrRelationData;
 
+struct IndexHintBitsData;
+
 /* in globals.c ... this duplicates miscadmin.h */
 extern PGDLLIMPORT int NBuffers;
 
@@ -222,6 +224,9 @@ extern void BufferGetTag(Buffer buffer, RelFileNode *rnode,
 						 ForkNumber *forknum, BlockNumber *blknum);
 
 extern void MarkBufferDirtyHint(Buffer buffer, bool buffer_std);
+extern void MarkBufferDirtyIndexHint(Buffer buffer, bool buffer_std,
+									 Relation rel, TransactionId latestRemovedXid);
+extern bool IsMarkBufferDirtyIndexHintAllowed(struct IndexHintBitsData	*indexHintBitsData);
 
 extern void UnlockBuffers(void);
 extern void LockBuffer(Buffer buffer, int mode);

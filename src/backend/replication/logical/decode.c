@@ -411,6 +411,8 @@ DecodeStandbyOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			 * XLOG_XACT_INVALIDATIONS.  So we don't need to do anything here.
 			 */
 			break;
+		case XLOG_INDEX_HINT_BITS_HORIZON:
+			break;
 		default:
 			elog(ERROR, "unexpected RM_STANDBY_ID record type: %u", info);
 	}

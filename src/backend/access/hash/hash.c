@@ -20,6 +20,7 @@
 
 #include "access/hash.h"
 #include "access/hash_xlog.h"
+#include "access/heapam_xlog.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "catalog/index.h"
@@ -311,7 +312,11 @@ hashgettuple(IndexScanDesc scan, ScanDirection dir)
 					palloc(MaxIndexTuplesPerPage * sizeof(int));
 
 			if (so->numKilled < MaxIndexTuplesPerPage)
+			{
 				so->killedItems[so->numKilled++] = so->currPos.itemIndex;
+				IndexHintBitAdvanceLatestRemovedXid(scan->prior_tuple_removed_xid,
+													&so->killedLatestRemovedXid);
+			}
 		}
 
 		/*
@@ -379,6 +384,7 @@ hashbeginscan(Relation rel, int nkeys, int norderbys)
 	so->hashso_buc_split = false;
 
 	so->killedItems = NULL;
+	so->killedLatestRemovedXid = InvalidTransactionId;
 	so->numKilled = 0;
 
 	scan->opaque = so;

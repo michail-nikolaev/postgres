@@ -3899,6 +3899,56 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 }
 
 /*
+ * MarkBufferDirtyIndexHint
+ *
+ * This is essentially the same as MarkBufferDirtyHint, except it WAL log
+ * new value for index hint bits horizon if required.
+ *
+ * Should be used instead of MarkBufferDirtyHint for LP_DEAD hints in indexes.
+ */
+void
+MarkBufferDirtyIndexHint(Buffer buffer, bool buffer_std,
+						 Relation rel, TransactionId latestRemovedXid)
+{
+	LogIndexHintBitsHorizonIfNeeded(rel, latestRemovedXid);
+	MarkBufferDirtyHint(buffer, buffer_std);
+}
+
+/*
+ * IsMarkBufferDirtyIndexHintAllowed
+ *
+ * Checks is it allowed to set index hint bit for the tuple.
+ */
+bool
+IsMarkBufferDirtyIndexHintAllowed(IndexHintBitsData *indexHintBitsData)
+{
+	if (!indexHintBitsData->all_dead)
+		return false;
+	// it all always allowed on primary if *all_dead
+	if (!RecoveryInProgress())
+		return true;
+
+	if (TransactionIdIsValid(indexHintBitsData->latest_removed_xid)) {
+		/*
+		 * If latest_removed_xid is known - make sure its commit record
+		 * less than minRecoveryPoint to avoid MVCC failure after crash recovery.
+		 */
+		XLogRecPtr commitLSN
+				= TransactionIdGetCommitLSN(indexHintBitsData->latest_removed_xid);
+
+		return !XLogNeedsFlush(commitLSN);
+	} else {
+		/*
+		 * Looks like it is tuple cleared by heap_page_prune_execute,
+		 * so conflict resolution already done. But we must be sure if
+		 * LSN of XLOG_HEAP2_CLEAN (or any subsequent updates) less than
+		 * minRecoveryPoint to avoid MVCC failure after crash recovery.
+		 */
+		return !XLogNeedsFlush(indexHintBitsData->page_lsn);
+	}
+}
+
+/*
  * Release buffer content locks for shared buffers.
  *
  * Used to clean up after errors.

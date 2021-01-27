@@ -21,7 +21,7 @@
 #include "access/nbtree.h"
 #include "access/nbtxlog.h"
 #include "access/relscan.h"
-#include "access/xlog.h"
+#include "access/heapam_xlog.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
@@ -272,7 +272,11 @@ btgettuple(IndexScanDesc scan, ScanDirection dir)
 					so->killedItems = (int *)
 						palloc(MaxTIDsPerBTreePage * sizeof(int));
 				if (so->numKilled < MaxTIDsPerBTreePage)
+				{
 					so->killedItems[so->numKilled++] = so->currPos.itemIndex;
+					IndexHintBitAdvanceLatestRemovedXid(scan->prior_tuple_removed_xid,
+														&so->killedLatestRemovedXid);
+				}
 			}
 
 			/*
@@ -378,6 +382,7 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	so->arrayContext = NULL;
 
 	so->killedItems = NULL;		/* until needed */
+	so->killedLatestRemovedXid = InvalidTransactionId;
 	so->numKilled = 0;
 
 	/*

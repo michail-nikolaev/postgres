@@ -17,6 +17,7 @@
 #include "access/genam.h"
 #include "access/gist_private.h"
 #include "access/relscan.h"
+#include "access/heapam_xlog.h"
 #include "lib/pairingheap.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -67,6 +68,7 @@ gistkillitems(IndexScanDesc scan)
 	{
 		UnlockReleaseBuffer(buffer);
 		so->numKilled = 0;		/* reset counter */
+		so->killedLatestRemovedXid = InvalidTransactionId;
 		return;
 	}
 
@@ -87,7 +89,9 @@ gistkillitems(IndexScanDesc scan)
 	if (killedsomething)
 	{
 		GistMarkPageHasGarbage(page);
-		MarkBufferDirtyHint(buffer, true);
+		MarkBufferDirtyIndexHint(buffer, true,
+								 scan->indexRelation,
+								 so->killedLatestRemovedXid);
 	}
 
 	UnlockReleaseBuffer(buffer);
@@ -97,6 +101,7 @@ gistkillitems(IndexScanDesc scan)
 	 * pages.
 	 */
 	so->numKilled = 0;
+	so->killedLatestRemovedXid = InvalidTransactionId;
 }
 
 /*
@@ -666,8 +671,12 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 						MemoryContextSwitchTo(oldCxt);
 					}
 					if (so->numKilled < MaxIndexTuplesPerPage)
+					{
 						so->killedItems[so->numKilled++] =
 							so->pageData[so->curPageData - 1].offnum;
+						IndexHintBitAdvanceLatestRemovedXid(scan->prior_tuple_removed_xid,
+															&so->killedLatestRemovedXid);
+					}
 				}
 				/* continuing to return tuples from a leaf page */
 				scan->xs_heaptid = so->pageData[so->curPageData].heapPtr;
@@ -703,8 +712,12 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 					MemoryContextSwitchTo(oldCxt);
 				}
 				if (so->numKilled < MaxIndexTuplesPerPage)
+				{
 					so->killedItems[so->numKilled++] =
 						so->pageData[so->curPageData - 1].offnum;
+					IndexHintBitAdvanceLatestRemovedXid(scan->prior_tuple_removed_xid,
+														&so->killedLatestRemovedXid);
+				}
 			}
 			/* find and process the next index page */
 			do

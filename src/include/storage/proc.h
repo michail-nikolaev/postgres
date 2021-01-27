@@ -165,6 +165,11 @@ struct PGPROC
 	 * though not required. Accessed without lock, if needed.
 	 */
 	bool		recoveryConflictPending;
+	/*
+	*  Flag allowing to read\set LP_DEAD bits in indexes.
+	*  Also used to raise recovery conflicts caused by index hint bits.
+	*/
+	bool		indexIgnoreKilledTuples;
 
 	/* Info about LWLock the process is currently waiting for, if any. */
 	bool		lwWaiting;		/* true if waiting for an LW lock */

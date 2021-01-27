@@ -1724,6 +1724,7 @@ _bt_killitems(IndexScanDesc scan)
 	OffsetNumber maxoff;
 	int			i;
 	int			numKilled = so->numKilled;
+	TransactionId killedLatestRemovedXid = so->killedLatestRemovedXid;
 	bool		killedsomething = false;
 	bool		droppedpin PG_USED_FOR_ASSERTS_ONLY;
 
@@ -1734,6 +1735,7 @@ _bt_killitems(IndexScanDesc scan)
 	 * pages.
 	 */
 	so->numKilled = 0;
+	so->killedLatestRemovedXid = InvalidTransactionId;
 
 	if (BTScanPosIsPinned(so->currPos))
 	{
@@ -1883,7 +1885,9 @@ _bt_killitems(IndexScanDesc scan)
 	if (killedsomething)
 	{
 		opaque->btpo_flags |= BTP_HAS_GARBAGE;
-		MarkBufferDirtyHint(so->currPos.buf, true);
+		MarkBufferDirtyIndexHint(so->currPos.buf, true,
+								 scan->indexRelation,
+								 killedLatestRemovedXid);
 	}
 
 	_bt_unlockbuf(scan->indexRelation, so->currPos.buf);

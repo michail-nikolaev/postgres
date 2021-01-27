@@ -20,7 +20,6 @@
 #include "postgres.h"
 
 #include "access/genam.h"
-#include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "access/transam.h"
@@ -28,6 +27,7 @@
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -106,18 +106,16 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan->xs_want_itup = false; /* may be set later */
 
 	/*
-	 * During recovery we ignore killed tuples and don't bother to kill them
-	 * either. We do this because the xmin on the primary node could easily be
-	 * later than the xmin on the standby node, so that what the primary
-	 * thinks is killed is supposed to be visible on standby. So for correct
-	 * MVCC for queries during recovery we must ignore these hints and check
-	 * all tuples. Do *not* set ignore_killed_tuples to true when running in a
-	 * transaction that was started during recovery. xactStartedInRecovery
-	 * should not be altered by index AMs.
-	 */
+	 * For correct MVCC for queries during recovery, we could use
+	 * index hint bits as on the primary. But to avoid frequent query
+	 * cancellation we do it only if hot_standby_feedback is active and
+	 * our xmin is honored on the primary.
+	 *
+	 * The decision is made in GetSnapshotIndexIgnoreKilledTuples.
+	*/
 	scan->kill_prior_tuple = false;
-	scan->xactStartedInRecovery = TransactionStartedDuringRecovery();
-	scan->ignore_killed_tuples = !scan->xactStartedInRecovery;
+	scan->prior_tuple_removed_xid = InvalidTransactionId;
+	scan->ignore_killed_tuples = MyProc->indexIgnoreKilledTuples;
 
 	scan->opaque = NULL;
 

@@ -122,10 +122,9 @@ typedef struct IndexScanDescData
 	bool		xs_temp_snap;	/* unregister snapshot at scan end? */
 
 	/* signaling to index AM about killing index tuples */
-	bool		kill_prior_tuple;	/* last-returned tuple is dead */
-	bool		ignore_killed_tuples;	/* do not return killed entries */
-	bool		xactStartedInRecovery;	/* prevents killing/seeing killed
-										 * tuples */
+	bool			kill_prior_tuple;		 /* last-returned tuple is dead */
+	TransactionId	prior_tuple_removed_xid; /* removed fix for dead tuple */
+	bool			ignore_killed_tuples;	 /* do not return killed entries */
 
 	/* index access method's private state */
 	void	   *opaque;			/* access-method-specific info */
@@ -184,5 +183,13 @@ typedef struct SysScanDescData
 	struct SnapshotData *snapshot;	/* snapshot to unregister at end of scan */
 	struct TupleTableSlot *slot;
 }			SysScanDescData;
+
+/* Struct for data about visibility of tuple */
+typedef struct IndexHintBitsData
+{
+	bool			all_dead;			/* guaranteed not visible for all backends */
+	TransactionId	latest_removed_xid;	/* latest removed xid if known */
+	XLogRecPtr		page_lsn;			/* lsn of page where dead tuple located */
+}			IndexHintBitsData;
 
 #endif							/* RELSCAN_H */

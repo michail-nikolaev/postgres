@@ -18,6 +18,7 @@
 #include "storage/procsignal.h"
 #include "storage/relfilenode.h"
 #include "storage/standbydefs.h"
+#include "utils/relcache.h"
 
 /* User-settable GUC parameters */
 extern int	vacuum_defer_cleanup_age;
@@ -29,6 +30,9 @@ extern void InitRecoveryTransactionEnvironment(void);
 extern void ShutdownRecoveryTransactionEnvironment(void);
 
 extern void ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid,
+												RelFileNode node);
+extern void ResolveIndexHintBitsRecoveryConflictWithSnapshot(
+												TransactionId latestRemovedXid,
 												RelFileNode node);
 extern void ResolveRecoveryConflictWithTablespace(Oid tsid);
 extern void ResolveRecoveryConflictWithDatabase(Oid dbid);
@@ -91,5 +95,9 @@ extern void LogAccessExclusiveLockPrepare(void);
 extern XLogRecPtr LogStandbySnapshot(void);
 extern void LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,
 									bool relcacheInitFileInval);
+
+extern void StandByShmemInit(void);
+extern void LogIndexHintBitsHorizonIfNeeded(Relation rel,
+											TransactionId latestRemovedXid);
 
 #endif							/* STANDBY_H */

@@ -545,6 +545,7 @@ _hash_kill_items(IndexScanDesc scan)
 	OffsetNumber offnum,
 				maxoff;
 	int			numKilled = so->numKilled;
+	TransactionId killedLatestRemovedXid = so->killedLatestRemovedXid;
 	int			i;
 	bool		killedsomething = false;
 	bool		havePin = false;
@@ -558,6 +559,7 @@ _hash_kill_items(IndexScanDesc scan)
 	 * pages.
 	 */
 	so->numKilled = 0;
+	so->killedLatestRemovedXid = InvalidTransactionId;
 
 	blkno = so->currPos.currPage;
 	if (HashScanPosIsPinned(so->currPos))
@@ -611,7 +613,9 @@ _hash_kill_items(IndexScanDesc scan)
 	if (killedsomething)
 	{
 		opaque->hasho_flag |= LH_PAGE_HAS_DEAD_TUPLES;
-		MarkBufferDirtyHint(buf, true);
+		MarkBufferDirtyIndexHint(buf, true,
+								 scan->indexRelation,
+								 killedLatestRemovedXid);
 	}
 
 	if (so->hashso_bucket_buf == so->currPos.buf ||
