@@ -267,6 +267,7 @@ static PGPROC *allProcs;
  */
 static TransactionId *KnownAssignedXids;
 static bool *KnownAssignedXidsValid;
+static pg_atomic_uint32 *KnownAssignedXidsNext;
 static TransactionId latestObservedXid = InvalidTransactionId;
 
 /*
@@ -405,6 +406,7 @@ void
 CreateSharedProcArray(void)
 {
 	bool		found;
+	int			i;
 
 	/* Create or attach to the ProcArray shared structure */
 	procArray = (ProcArrayStruct *)
@@ -446,6 +448,12 @@ CreateSharedProcArray(void)
 			ShmemInitStruct("KnownAssignedXidsValid",
 							mul_size(sizeof(bool), TOTAL_MAX_CACHED_SUBXIDS),
 							&found);
+		KnownAssignedXidsNext = (pg_atomic_uint32 *)
+				ShmemInitStruct("KnownAssignedXidsNext",
+								mul_size(sizeof(pg_atomic_uint32), TOTAL_MAX_CACHED_SUBXIDS),
+								&found);
+		for (i = 0; i < TOTAL_MAX_CACHED_SUBXIDS; i++)
+			pg_atomic_init_u32(&KnownAssignedXidsNext[i], 1);
 	}
 }
 
@@ -4517,7 +4525,13 @@ ExpireOldKnownAssignedTransactionIds(TransactionId xid)
  * XID entry itself.  This preserves the property that the XID entries are
  * sorted, so we can do binary searches easily.  Periodically we compress
  * out the unused entries; that's much cheaper than having to compress the
- * array immediately on every deletion.
+ * array immediately on every deletion. Also, we lazily maintain an offset
+ * in KnownAssignedXidsNext[] array to skip known to be invalid xids. It
+ * helps to skip the gaps; it could significantly increase performance in
+ * the case of long transactions on the primary. KnownAssignedXidsNext[] is
+ * updating while taking the snapshot. In general case KnownAssignedXidsNext
+ * contains not an offset to the next valid xid but a number which tends to
+ * the offset to next valid xid.
  *
  * The actually valid items in KnownAssignedXids[] and KnownAssignedXidsValid[]
  * are those with indexes tail <= i < head; items outside this subscript range
@@ -4544,7 +4558,10 @@ ExpireOldKnownAssignedTransactionIds(TransactionId xid)
  * head/tail pointers.  (We could dispense with the spinlock if we were to
  * create suitable memory access barrier primitives and use those instead.)
  * The spinlock must be taken to read or write the head/tail pointers unless
- * the caller holds ProcArrayLock exclusively.
+ * the caller holds ProcArrayLock exclusively. Access to KnownAssignedXidsNext
+ * is not especially protected by any lock because it just some kind of hint
+ * to reduce the scan cost, but at least shared ProcArrayLock is held anyway -
+ * it is required to access KnownAssignedXids.
  *
  * Algorithmic analysis:
  *
@@ -4555,7 +4572,7 @@ ExpireOldKnownAssignedTransactionIds(TransactionId xid)
  *		must happen)
  *	* Compressing the array is O(S) and requires exclusive lock
  *	* Removing an XID is O(logS) and requires exclusive lock
- *	* Taking a snapshot is O(S) and requires shared lock
+ *	* Taking a snapshot is O(S), O(N) next call; requires shared lock
  *	* Checking for an XID is O(logS) and requires shared lock
  *
  * In comparison, using a hash table for KnownAssignedXids would mean that
@@ -4615,12 +4632,13 @@ KnownAssignedXidsCompress(bool force)
 	 * re-aligning data to 0th element.
 	 */
 	compress_index = 0;
-	for (i = tail; i < head; i++)
+	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
 	{
 		if (KnownAssignedXidsValid[i])
 		{
 			KnownAssignedXids[compress_index] = KnownAssignedXids[i];
 			KnownAssignedXidsValid[compress_index] = true;
+			pg_atomic_write_u32(&KnownAssignedXidsNext[compress_index], 1);
 			compress_index++;
 		}
 	}
@@ -4723,6 +4741,7 @@ KnownAssignedXidsAdd(TransactionId from_xid, TransactionId to_xid,
 	{
 		KnownAssignedXids[head] = next_xid;
 		KnownAssignedXidsValid[head] = true;
+		pg_atomic_write_u32(&KnownAssignedXidsNext[head], 1);
 		TransactionIdAdvance(next_xid);
 		head++;
 	}
@@ -4938,7 +4957,7 @@ KnownAssignedXidsRemovePreceding(TransactionId removeXid)
 	tail = pArray->tailKnownAssignedXids;
 	head = pArray->headKnownAssignedXids;
 
-	for (i = tail; i < head; i++)
+	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
 	{
 		if (KnownAssignedXidsValid[i])
 		{
@@ -4961,7 +4980,7 @@ KnownAssignedXidsRemovePreceding(TransactionId removeXid)
 	/*
 	 * Advance the tail pointer if we've marked the tail item invalid.
 	 */
-	for (i = tail; i < head; i++)
+	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
 	{
 		if (KnownAssignedXidsValid[i])
 			break;
@@ -5011,7 +5030,10 @@ KnownAssignedXidsGetAndSetXmin(TransactionId *xarray, TransactionId *xmin,
 	int			count = 0;
 	int			head,
 				tail;
-	int			i;
+	int			i,
+				prev;
+	uint32		offset = 0,
+				prevOffset;
 
 	/*
 	 * Fetch head just once, since it may change while we loop. We can stop
@@ -5025,9 +5047,16 @@ KnownAssignedXidsGetAndSetXmin(TransactionId *xarray, TransactionId *xmin,
 	SpinLockAcquire(&procArray->known_assigned_xids_lck);
 	tail = procArray->tailKnownAssignedXids;
 	head = procArray->headKnownAssignedXids;
+	/**
+	 * Store previous valid xid found. Also, store its offset to avoid
+	 * additional read later.
+	 */
+	prev = tail;
+	prevOffset = pg_atomic_read_u32(&KnownAssignedXidsNext[prev]);
 	SpinLockRelease(&procArray->known_assigned_xids_lck);
 
-	for (i = tail; i < head; i++)
+	for (i = tail; i < head;
+		 i += (offset = pg_atomic_read_u32(&KnownAssignedXidsNext[i])))
 	{
 		/* Skip any gaps in the array */
 		if (KnownAssignedXidsValid[i])
@@ -5049,6 +5078,24 @@ KnownAssignedXidsGetAndSetXmin(TransactionId *xarray, TransactionId *xmin,
 			if (TransactionIdIsValid(xmax) &&
 				TransactionIdFollowsOrEquals(knownXid, xmax))
 				break;
+
+			if (prev != i)
+			{
+				uint32 n = i - prev;
+				/**
+				 * Do not touch the cache if value unchanged. This way we
+				 * could avoid additional cache miss.
+				 */
+				if (n != prevOffset)
+					pg_atomic_write_u32(&KnownAssignedXidsNext[prev], n);
+				/**
+				 * Remember this xid as previous valid. Also, manually store
+				 * prevOffset from current fetched value to avoid additional
+				 * atomic read.
+				 */
+				prev = i;
+				prevOffset = offset;
+			}
 
 			/* Add knownXid into output array */
 			xarray[count++] = knownXid;
@@ -5077,7 +5124,7 @@ KnownAssignedXidsGetOldestXmin(void)
 	head = procArray->headKnownAssignedXids;
 	SpinLockRelease(&procArray->known_assigned_xids_lck);
 
-	for (i = tail; i < head; i++)
+	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
 	{
 		/* Skip any gaps in the array */
 		if (KnownAssignedXidsValid[i])
@@ -5112,7 +5159,7 @@ KnownAssignedXidsDisplay(int trace_level)
 
 	initStringInfo(&buf);
 
-	for (i = tail; i < head; i++)
+	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
 	{
 		if (KnownAssignedXidsValid[i])
 		{
