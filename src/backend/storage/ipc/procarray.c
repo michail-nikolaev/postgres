@@ -267,7 +267,7 @@ static PGPROC *allProcs;
  */
 static TransactionId *KnownAssignedXids;
 static bool *KnownAssignedXidsValid;
-static pg_atomic_uint32 *KnownAssignedXidsNext;
+static int32 *KnownAssignedXidsNext;
 static TransactionId latestObservedXid = InvalidTransactionId;
 
 /*
@@ -448,12 +448,12 @@ CreateSharedProcArray(void)
 			ShmemInitStruct("KnownAssignedXidsValid",
 							mul_size(sizeof(bool), TOTAL_MAX_CACHED_SUBXIDS),
 							&found);
-		KnownAssignedXidsNext = (pg_atomic_uint32 *)
+		KnownAssignedXidsNext = (int32 *)
 				ShmemInitStruct("KnownAssignedXidsNext",
-								mul_size(sizeof(pg_atomic_uint32), TOTAL_MAX_CACHED_SUBXIDS),
+								mul_size(sizeof(int32), TOTAL_MAX_CACHED_SUBXIDS),
 								&found);
 		for (i = 0; i < TOTAL_MAX_CACHED_SUBXIDS; i++)
-			pg_atomic_init_u32(&KnownAssignedXidsNext[i], 1);
+			KnownAssignedXidsNext[i] = 1;
 	}
 }
 
@@ -4632,13 +4632,13 @@ KnownAssignedXidsCompress(bool force)
 	 * re-aligning data to 0th element.
 	 */
 	compress_index = 0;
-	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
+	for (i = tail; i < head; i += KnownAssignedXidsNext[i])
 	{
 		if (KnownAssignedXidsValid[i])
 		{
 			KnownAssignedXids[compress_index] = KnownAssignedXids[i];
 			KnownAssignedXidsValid[compress_index] = true;
-			pg_atomic_write_u32(&KnownAssignedXidsNext[compress_index], 1);
+			KnownAssignedXidsNext[compress_index] = 1;
 			compress_index++;
 		}
 	}
@@ -4741,7 +4741,7 @@ KnownAssignedXidsAdd(TransactionId from_xid, TransactionId to_xid,
 	{
 		KnownAssignedXids[head] = next_xid;
 		KnownAssignedXidsValid[head] = true;
-		pg_atomic_write_u32(&KnownAssignedXidsNext[head], 1);
+		KnownAssignedXidsNext[head] = 1;
 		TransactionIdAdvance(next_xid);
 		head++;
 	}
@@ -4957,7 +4957,7 @@ KnownAssignedXidsRemovePreceding(TransactionId removeXid)
 	tail = pArray->tailKnownAssignedXids;
 	head = pArray->headKnownAssignedXids;
 
-	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
+	for (i = tail; i < head; i += KnownAssignedXidsNext[i])
 	{
 		if (KnownAssignedXidsValid[i])
 		{
@@ -4980,7 +4980,7 @@ KnownAssignedXidsRemovePreceding(TransactionId removeXid)
 	/*
 	 * Advance the tail pointer if we've marked the tail item invalid.
 	 */
-	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
+	for (i = tail; i < head; i += KnownAssignedXidsNext[i])
 	{
 		if (KnownAssignedXidsValid[i])
 			break;
@@ -5031,8 +5031,7 @@ KnownAssignedXidsGetAndSetXmin(TransactionId *xarray, TransactionId *xmin,
 	int			head,
 				tail;
 	int			i,
-				prev;
-	uint32		offset = 0,
+				prev,
 				prevOffset;
 
 	/*
@@ -5052,11 +5051,10 @@ KnownAssignedXidsGetAndSetXmin(TransactionId *xarray, TransactionId *xmin,
 	 * additional read later.
 	 */
 	prev = tail;
-	prevOffset = pg_atomic_read_u32(&KnownAssignedXidsNext[prev]);
+	prevOffset = KnownAssignedXidsNext[prev];
 	SpinLockRelease(&procArray->known_assigned_xids_lck);
 
-	for (i = tail; i < head;
-		 i += (offset = pg_atomic_read_u32(&KnownAssignedXidsNext[i])))
+	for (i = tail; i < head; i += KnownAssignedXidsNext[i])
 	{
 		/* Skip any gaps in the array */
 		if (KnownAssignedXidsValid[i])
@@ -5081,20 +5079,20 @@ KnownAssignedXidsGetAndSetXmin(TransactionId *xarray, TransactionId *xmin,
 
 			if (prev != i)
 			{
-				uint32 n = i - prev;
+				int32 n = i - prev;
 				/**
 				 * Do not touch the cache if value unchanged. This way we
 				 * could avoid additional cache miss.
 				 */
 				if (n != prevOffset)
-					pg_atomic_write_u32(&KnownAssignedXidsNext[prev], n);
+					KnownAssignedXidsNext[prev] = n;
 				/**
 				 * Remember this xid as previous valid. Also, manually store
 				 * prevOffset from current fetched value to avoid additional
 				 * atomic read.
 				 */
 				prev = i;
-				prevOffset = offset;
+				prevOffset = KnownAssignedXidsNext[i];
 			}
 
 			/* Add knownXid into output array */
@@ -5124,7 +5122,7 @@ KnownAssignedXidsGetOldestXmin(void)
 	head = procArray->headKnownAssignedXids;
 	SpinLockRelease(&procArray->known_assigned_xids_lck);
 
-	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
+	for (i = tail; i < head; i += KnownAssignedXidsNext[i])
 	{
 		/* Skip any gaps in the array */
 		if (KnownAssignedXidsValid[i])
@@ -5159,7 +5157,7 @@ KnownAssignedXidsDisplay(int trace_level)
 
 	initStringInfo(&buf);
 
-	for (i = tail; i < head; i += pg_atomic_read_u32(&KnownAssignedXidsNext[i]))
+	for (i = tail; i < head; i += KnownAssignedXidsNext[i])
 	{
 		if (KnownAssignedXidsValid[i])
 		{
