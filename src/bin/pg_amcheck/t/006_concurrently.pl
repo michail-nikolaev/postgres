@@ -37,7 +37,7 @@ $node->safe_psql('postgres', q(CREATE INDEX idx ON tbl(i)));
 # lock to ensure only one RC runs at a time.
 #
 $node->pgbench(
-	'--no-vacuum --client=5 --transactions=1500',
+	'--no-vacuum --client=5 --transactions=15000',
 	0,
 	[qr{actually processed}],
 	[qr{^$}],
