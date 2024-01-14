@@ -114,7 +114,7 @@ static bool ReindexRelationConcurrently(const ReindexStmt *stmt,
 										Oid relationOid,
 										const ReindexParams *params);
 static void update_relispartition(Oid relationId, bool newval);
-static inline void set_indexsafe_procflags(void);
+static inline void set_indexsafe_procflags(bool reportXmin);
 
 /*
  * callback argument type for RangeVarCallbackForReindexIndex()
@@ -433,7 +433,7 @@ WaitForOlderSnapshots(TransactionId limitXmin, bool progress)
 
 	old_snapshots = GetCurrentVirtualXIDs(limitXmin, true, false,
 										  PROC_IS_AUTOVACUUM | PROC_IN_VACUUM
-										  | PROC_IN_SAFE_IC,
+										  | PROC_IN_SAFE_IC_MASK,
 										  &n_old_snapshots);
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, n_old_snapshots);
@@ -454,7 +454,7 @@ WaitForOlderSnapshots(TransactionId limitXmin, bool progress)
 			newer_snapshots = GetCurrentVirtualXIDs(limitXmin,
 													true, false,
 													PROC_IS_AUTOVACUUM | PROC_IN_VACUUM
-													| PROC_IN_SAFE_IC,
+													| PROC_IN_SAFE_IC_MASK,
 													&n_newer_snapshots);
 			for (j = i; j < n_old_snapshots; j++)
 			{
@@ -1641,9 +1641,9 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
+	/* TODO Tell concurrent index builds to ignore us, if index qualifies */
 	if (safe_index)
-		set_indexsafe_procflags();
+		set_indexsafe_procflags(false);
 
 	/*
 	 * The index is now visible, so we can report the OID.  While on it,
@@ -1713,9 +1713,9 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
+	/* TODO Tell concurrent index builds to ignore us, if index qualifies */
 	if (safe_index)
-		set_indexsafe_procflags();
+		set_indexsafe_procflags(true);
 
 	/*
 	 * Phase 3 of concurrent index build
@@ -1773,9 +1773,9 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
+	/* TODO Tell concurrent index builds to ignore us, if index qualifies */
 	if (safe_index)
-		set_indexsafe_procflags();
+		set_indexsafe_procflags(true);
 
 	/* We should now definitely not be advertising any xmin. */
 	Assert(MyProc->xmin == InvalidTransactionId);
@@ -4071,9 +4071,9 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Tell concurrent indexing to ignore us, if index qualifies */
+		/* TODO Tell concurrent indexing to ignore us, if index qualifies */
 		if (newidx->safe)
-			set_indexsafe_procflags();
+			set_indexsafe_procflags(false);
 
 		/* Set ActiveSnapshot since functions in the indexes may need it */
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -4131,9 +4131,9 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Tell concurrent indexing to ignore us, if index qualifies */
+		/* TODO Tell concurrent indexing to ignore us, if index qualifies */
 		if (newidx->safe)
-			set_indexsafe_procflags();
+			set_indexsafe_procflags(true);
 
 		/*
 		 * Take the "reference snapshot" that will be used by validate_index()
@@ -4202,11 +4202,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	StartTransactionCommand();
 
 	/*
-	 * Because this transaction only does catalog manipulations and doesn't do
+	 * TODO Because this transaction only does catalog manipulations and doesn't do
 	 * any index operations, we can set the PROC_IN_SAFE_IC flag here
 	 * unconditionally.
 	 */
-	set_indexsafe_procflags();
+	set_indexsafe_procflags(true);
 
 	forboth(lc, indexIds, lc2, newIndexIds)
 	{
@@ -4539,9 +4539,10 @@ update_relispartition(Oid relationId, bool newval)
 }
 
 /*
- * Set the PROC_IN_SAFE_IC flag in MyProc->statusFlags.
+ * Set the PROC_IN_SAFE_IC_NO_XMIN or
+ * PROC_IN_SAFE_IC_XMIN flag in MyProc->statusFlags.
  *
- * When doing concurrent index builds, we can set this flag
+ * TODO When doing concurrent index builds, we can set this flag
  * to tell other processes concurrently running CREATE
  * INDEX CONCURRENTLY or REINDEX CONCURRENTLY to ignore us when
  * doing their waits for concurrent snapshots.  On one hand it
@@ -4557,7 +4558,7 @@ update_relispartition(Oid relationId, bool newval)
  * set for each transaction.)
  */
 static inline void
-set_indexsafe_procflags(void)
+set_indexsafe_procflags(bool reportXmin)
 {
 	/*
 	 * This should only be called before installing xid or xmin in MyProc;
@@ -4567,7 +4568,10 @@ set_indexsafe_procflags(void)
 		   MyProc->xmin == InvalidTransactionId);
 
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags |= PROC_IN_SAFE_IC;
+	if (reportXmin)
+		MyProc->statusFlags |= PROC_IN_SAFE_IC_XMIN;
+	else
+		MyProc->statusFlags |= PROC_IN_SAFE_IC_NO_XMIN;
 	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
 	LWLockRelease(ProcArrayLock);
 }

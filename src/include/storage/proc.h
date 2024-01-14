@@ -54,28 +54,31 @@ struct XidCache
 /*
  * Flags for PGPROC->statusFlags and PROC_HDR->statusFlags[]
  */
-#define		PROC_IS_AUTOVACUUM	0x01	/* is it an autovac worker? */
-#define		PROC_IN_VACUUM		0x02	/* currently running lazy vacuum */
-#define		PROC_IN_SAFE_IC		0x04	/* currently running CREATE INDEX
-										 * CONCURRENTLY or REINDEX
-										 * CONCURRENTLY on non-expressional,
-										 * non-partial index */
-#define		PROC_VACUUM_FOR_WRAPAROUND	0x08	/* set by autovac only */
-#define		PROC_IN_LOGICAL_DECODING	0x10	/* currently doing logical
+#define		PROC_IS_AUTOVACUUM			0x01	/* is it an autovac worker? */
+#define		PROC_IN_VACUUM				0x02	/* currently running lazy vacuum */
+#define		PROC_IN_SAFE_IC_NO_XMIN		0x04	/* TODO currently running CREATE INDEX */
+#define		PROC_IN_SAFE_IC_XMIN		0x08	/* CONCURRENTLY or REINDEX */
+												/* CONCURRENTLY on non-expressional, */
+												/* non-partial index */
+#define		PROC_VACUUM_FOR_WRAPAROUND	0x10	/* set by autovac only */
+#define		PROC_IN_LOGICAL_DECODING	0x20	/* currently doing logical
 												 * decoding outside xact */
-#define		PROC_AFFECTS_ALL_HORIZONS	0x20	/* this proc's xmin must be
+#define		PROC_AFFECTS_ALL_HORIZONS	0x30	/* this proc's xmin must be
 												 * included in vacuum horizons
 												 * in all databases */
 
 /* flags reset at EOXact */
 #define		PROC_VACUUM_STATE_MASK \
-	(PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_VACUUM_FOR_WRAPAROUND)
+	(PROC_IN_VACUUM | PROC_IN_SAFE_IC_NO_XMIN | PROC_IN_SAFE_IC_XMIN | PROC_VACUUM_FOR_WRAPAROUND)
+
+#define		PROC_IN_SAFE_IC_MASK \
+	(PROC_IN_SAFE_IC_NO_XMIN | PROC_IN_SAFE_IC_XMIN)
 
 /*
  * Xmin-related flags. Make sure any flags that affect how the process' Xmin
  * value is interpreted by VACUUM are included here.
  */
-#define		PROC_XMIN_FLAGS (PROC_IN_VACUUM | PROC_IN_SAFE_IC)
+#define		PROC_XMIN_FLAGS (PROC_IN_VACUUM | PROC_IN_SAFE_IC_NO_XMIN)
 
 /*
  * We allow a small number of "weak" relation locks (AccessShareLock,
