@@ -6,17 +6,29 @@ use strict;
 use warnings;
 
 use Config;
+use Errno;
 
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
+use Time::HiRes qw(usleep);
+use IPC::SysV;
+use threads;
+use Test::More;
+use Test::Builder;
 
-use Test::More tests => 3;
 
-my ($node, $result);
+# TODO: refactor to https://metacpan.org/pod/IPC%3A%3AShareable
+my ($pid, $shmem_id, $shmem_key,  $shmem_size);
+eval 'sub IPC_CREAT {0001000}' unless defined &IPC_CREAT;
+$shmem_size = 4;
+$shmem_key = rand(1000000);
+$shmem_id = shmget($shmem_key, $shmem_size, &IPC_CREAT | 0777) or die "Can't shmget: $!";
+shmwrite($shmem_id, "wait", 0, $shmem_size) or die "Can't shmwrite: $!";
 
 #
 # Test set-up
 #
+my ($node, $result);
 $node = PostgreSQL::Test::Cluster->new('RC_test');
 $node->init;
 $node->append_conf('postgresql.conf',
@@ -29,60 +41,100 @@ $node->safe_psql('postgres', q(CREATE TABLE tbl(i int primary key,
 								c3 money default 0, updated_at timestamp)));
 $node->safe_psql('postgres', q(CREATE INDEX idx ON tbl(i)));
 
-#
-# Stress RC with pgbench.
-#
-# pgbench might try to launch more than one instance of the RC
-# transaction concurrently.  That would deadlock, so use an advisory
-# lock to ensure only one RC runs at a time.
-#
-$node->pgbench(
-	'--no-vacuum --client=5 --transactions=15000',
-	0,
-	[qr{actually processed}],
-	[qr{^$}],
-	'concurrent INSERTs, UPDATES and RC',
-	{
-		'002_pgbench_concurrent_transaction_inserts' => q(
-			BEGIN;
-			INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			SELECT pg_sleep(case when random()<0.05 then 0.01 else 0 end);
-			INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			COMMIT;
-		  ),
-		# Ensure some HOT updates happen
-		'002_pgbench_concurrent_transaction_updates' => q(
-			BEGIN;
-			INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			SELECT pg_sleep(case when random()<0.05 then 0.01 else 0 end);
-			INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-				on conflict(i) do update set updated_at = now();
-			COMMIT;
-		  ),
-		'002_pgbench_concurrent_cic' => q(
-			SELECT pg_try_advisory_lock(42)::integer AS gotlock \gset
-			\if :gotlock
-				REINDEX INDEX CONCURRENTLY idx;
-				SELECT bt_index_check('idx',true);
-				SELECT pg_advisory_unlock(42);
-			\endif
-		  )
-	});
+my $builder = Test::More->builder;
+$builder->use_numbers(0);
+$builder->no_plan();
 
-$node->stop;
-done_testing();
+my $child  = $builder->child("pg_bench");
+
+if(!defined($pid = fork())) {
+   # fork returned undef, so unsuccessful
+   die "Cannot fork a child: $!";
+} elsif ($pid == 0) {
+
+    $node->pgbench(
+        '--no-vacuum --client=15 --transactions=2500',
+        0,
+        [qr{actually processed}],
+        [qr{^$}],
+        'concurrent INSERTs, UPDATES and RC',
+        {
+            '002_pgbench_concurrent_transaction_inserts' => q(
+                BEGIN;
+                INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                SELECT pg_sleep(case when random()<0.05 then 0.01 else 0 end);
+                INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                COMMIT;
+              ),
+            # Ensure some HOT updates happen
+            '002_pgbench_concurrent_transaction_updates' => q(
+                BEGIN;
+                INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                SELECT pg_sleep(case when random()<0.05 then 0.01 else 0 end);
+                INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
+                    on conflict(i) do update set updated_at = now();
+                COMMIT;
+              )
+        });
+
+    if ($child->is_passing()) {
+        shmwrite($shmem_id, "done", 0, $shmem_size) or die "Can't shmwrite: $!";
+    } else {
+        shmwrite($shmem_id, "fail", 0, $shmem_size) or die "Can't shmwrite: $!";
+    }
+
+    sleep(1);
+} else {
+    my $pg_bench_fork_flag;
+    shmread($shmem_id, $pg_bench_fork_flag, 0, $shmem_size) or die "Can't shmread: $!";
+
+    subtest 'reindex run subtest' => sub {
+        is($pg_bench_fork_flag, "wait", "pg_bench_fork_flag is correct");
+
+        while (1)
+        {
+            $node->safe_psql('postgres', q(REINDEX INDEX CONCURRENTLY idx;));
+
+            my ($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT bt_index_parent_check('idx', true, true);));
+            is($result, '0', 'bt_index_check is correct');
+            if ($result)
+            {
+                diag($stderr);
+            }
+            else
+            {
+                diag(':)');
+            }
+
+            usleep(10 * 1000);
+
+            shmread($shmem_id, $pg_bench_fork_flag, 0, $shmem_size) or die "Can't shmread: $!";
+            last if $pg_bench_fork_flag eq "done";
+            last if $pg_bench_fork_flag eq "fail";
+        }
+
+        is($pg_bench_fork_flag, "done", "pg_bench_fork_flag is correct");
+    };
+
+
+    $child->finalize();
+    $child->summary();
+    $node->stop;
+    done_testing();
+}
+
