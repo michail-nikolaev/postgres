@@ -1856,7 +1856,8 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			 * CONCURRENTLY or REINDEX CONCURRENTLY on a "safe" index -- but
 			 * only on vacuums of user-defined tables. todo
 			 */
-			if (!(statusFlags & PROC_IN_SAFE_IC_NO_XMIN))
+			// todo
+			if (!(statusFlags & PROC_IN_SAFE_IC_NO_XMIN) && !(statusFlags & PROC_IN_SAFE_IC_XMIN))
 				h->data_oldest_nonremovable =
 					TransactionIdOlder(h->data_oldest_nonremovable, xmin);
 

@@ -1748,7 +1748,7 @@ DefineIndex(Oid tableId,
 	/*
 	 * Scan the index and the heap, insert any missing index entries.
 	 */
-	validate_index(tableId, indexRelationId, snapshot);
+	limitXmin = validate_index(tableId, indexRelationId, snapshot);
 
 	/*
 	 * Drop the reference snapshot.  We must do this before waiting out other
@@ -1757,7 +1757,6 @@ DefineIndex(Oid tableId,
 	 * they must wait for.  But first, save the snapshot's xmin to use as
 	 * limitXmin for GetCurrentVirtualXIDs().
 	 */
-	limitXmin = snapshot->xmin;
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snapshot);
@@ -4063,6 +4062,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 		/* Start new transaction for this index's concurrent build */
 		StartTransactionCommand();
+		//sleep(1);
 
 		/*
 		 * Check for user-requested abort.  This is inside a transaction so as
@@ -4093,10 +4093,12 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		index_concurrently_build(newidx->tableId, newidx->indexId);
 
 		PopActiveSnapshot();
+		//sleep(1);
 		CommitTransactionCommand();
 	}
 
 	StartTransactionCommand();
+	//sleep(1);
 
 	/*
 	 * Because we don't take a snapshot or Xid in this transaction, there's no
@@ -4114,6 +4116,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
 	WaitForLockersMultiple(lockTags, ShareLock, true);
+	//sleep(1);
 	CommitTransactionCommand();
 
 	foreach(lc, newIndexIds)
@@ -4123,6 +4126,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		Snapshot	snapshot;
 
 		StartTransactionCommand();
+		//sleep(1);
 
 		/*
 		 * Check for user-requested abort.  This is inside a transaction so as
@@ -4153,13 +4157,12 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		progress_vals[3] = newidx->amId;
 		pgstat_progress_update_multi_param(4, progress_index, progress_vals);
 
-		validate_index(newidx->tableId, newidx->indexId, snapshot);
+		limitXmin = validate_index(newidx->tableId, newidx->indexId, snapshot);
 
 		/*
-		 * We can now do away with our active snapshot, we still need to save
+		 * We can now do away with our active refSnapshot, we still need to save
 		 * the xmin limit to wait for older snapshots.
 		 */
-		limitXmin = snapshot->xmin;
 
 		PopActiveSnapshot();
 		UnregisterSnapshot(snapshot);

@@ -1744,13 +1744,100 @@ heapam_index_build_range_scan(Relation heapRelation,
 	return reltuples;
 }
 
-static void
+void
+test_sleep(int ms)
+{
+	float8		endtime;
+
+	endtime = ((float8) GetCurrentTimestamp() / 1000.0) + ms;
+
+	for (;;)
+	{
+		float8		delay;
+		long		delay_ms;
+
+		CHECK_FOR_INTERRUPTS();
+
+		delay = endtime - ((float8) GetCurrentTimestamp() / 1000.0);
+		if (delay > 0.0)
+			delay_ms = (long) (delay);
+		else
+			break;
+
+		pg_usleep(delay_ms * 1000L);
+	}
+}
+
+void
+debug_snapshot(Snapshot snapshot, char* name)
+{
+	TransactionId topXid;
+	TransactionId *children;
+	int			nchildren;
+	int			addTopXid;
+	StringInfoData buf;
+	FILE	   *f;
+	int			i;
+	MemoryContext oldcxt;
+
+	topXid = GetTopTransactionIdIfAny();
+	if (IsSubTransaction())
+		ereport(ERROR,
+				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+						errmsg("cannot export a snapshot from a subtransaction")));
+
+	nchildren = xactGetCommittedChildren(&children);
+
+	//snapshot = CopySnapshot(snapshot);
+
+	initStringInfo(&buf);
+
+	//appendStringInfo(&buf, "v	xid:%d/%u\n", MyProc->backendId, MyProc->lxid);
+	appendStringInfo(&buf, "	pid:%d\n", MyProcPid);
+	appendStringInfo(&buf, "	dbid:%u\n", MyDatabaseId);
+	appendStringInfo(&buf, "	iso:%d\n", XactIsoLevel);
+	appendStringInfo(&buf, "	ro:%d\n", XactReadOnly);
+
+	appendStringInfo(&buf, "	xmin:%u\n", snapshot->xmin);
+	appendStringInfo(&buf, "	xmax:%u\n", snapshot->xmax);
+
+	addTopXid = (TransactionIdIsValid(topXid) &&
+				 TransactionIdPrecedes(topXid, snapshot->xmax)) ? 1 : 0;
+	appendStringInfo(&buf, "	xcnt:%d\n", snapshot->xcnt + addTopXid);
+	for (i = 0; i < snapshot->xcnt; i++)
+		appendStringInfo(&buf, "	xip:%u\n", snapshot->xip[i]);
+	if (addTopXid)
+		appendStringInfo(&buf, "	xip:%u\n", topXid);
+
+	/*
+	 * Similarly, we add our subcommitted child XIDs to the subxid data. Here,
+	 * we have to cope with possible overflow.
+	 */
+	if (snapshot->suboverflowed ||
+		snapshot->subxcnt + nchildren > GetMaxSnapshotSubxidCount())
+		appendStringInfoString(&buf, "	sof:1\n");
+	else
+	{
+		appendStringInfoString(&buf, "	sof:0\n");
+		appendStringInfo(&buf, "	sxcnt:%d\n", snapshot->subxcnt + nchildren);
+		for (i = 0; i < snapshot->subxcnt; i++)
+			appendStringInfo(&buf, "	sxp:%u\n", snapshot->subxip[i]);
+		for (i = 0; i < nchildren; i++)
+			appendStringInfo(&buf, "	sxp:%u\n", children[i]);
+	}
+	appendStringInfo(&buf, "	rec:%u\n", snapshot->takenDuringRecovery);
+
+	ereport(INFO, errmsg("snapshot %s\n\"%s\"", name, buf.data));
+}
+
+static TransactionId
 heapam_index_validate_scan(Relation heapRelation,
 						   Relation indexRelation,
 						   IndexInfo *indexInfo,
-						   Snapshot snapshot,
+						   Snapshot refSnapshot,
 						   ValidateIndexState *state)
 {
+	TransactionId xmin;
 	TableScanDesc scan;
 	HeapScanDesc hscan;
 	HeapTuple	heapTuple;
@@ -1758,11 +1845,14 @@ heapam_index_validate_scan(Relation heapRelation,
 	bool		isnull[INDEX_MAX_KEYS];
 	ExprState  *predicate;
 	TupleTableSlot *slot;
+	Snapshot scanSnapshot;
 	EState	   *estate;
 	ExprContext *econtext;
 	BlockNumber root_blkno = InvalidBlockNumber;
 	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
+	OffsetNumber lineoff, lines;
 	bool		in_index[MaxHeapTuplesPerPage];
+	bool		visible_to_referenceSnapshot[MaxHeapTuplesPerPage];
 	BlockNumber previous_blkno = InvalidBlockNumber;
 
 	/* state variables for the merge */
@@ -1790,6 +1880,19 @@ heapam_index_validate_scan(Relation heapRelation,
 	/* Set up execution state for predicate, if any. */
 	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 
+
+	//test_sleep(1000);
+	//xmin = refSnapshot->xmin;
+	scanSnapshot = RegisterSnapshot(GetLatestSnapshot());
+	//scanSnapshot = RegisterSnapshot(refSnapshot);
+	//xmin = TransactionIdOlder(xmin, scanSnapshot->xmin);
+	//RegisterSnapshot(scanSnapshot);
+	PushActiveSnapshot(scanSnapshot);
+	xmin = scanSnapshot->xmin;
+
+	//debug_snapshot(scanSnapshot, "scan");
+	//debug_snapshot(refSnapshot, "ref");
+
 	/*
 	 * Prepare for scan of the base relation.  We need just those tuples
 	 * satisfying the passed-in reference snapshot.  We must disable syncscan
@@ -1797,7 +1900,7 @@ heapam_index_validate_scan(Relation heapRelation,
 	 * match the sorted TIDs.
 	 */
 	scan = table_beginscan_strat(heapRelation,	/* relation */
-								 snapshot,	/* snapshot */
+								 scanSnapshot,
 								 0, /* number of keys */
 								 NULL,	/* scan key */
 								 true,	/* buffer access strategy OK */
@@ -1815,6 +1918,8 @@ heapam_index_validate_scan(Relation heapRelation,
 		ItemPointer heapcursor = &heapTuple->t_self;
 		ItemPointerData rootTuple;
 		OffsetNumber root_offnum;
+		OffsetNumber tuple_offnum;
+		bool updateSnapshot = false;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -1826,6 +1931,10 @@ heapam_index_validate_scan(Relation heapRelation,
 			pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE,
 										 hscan->rs_cblock);
 			previous_blkno = hscan->rs_cblock;
+			if (previous_blkno % 64 == 0)
+			{
+				updateSnapshot = true; // TODO skip first read
+			}
 		}
 
 		/*
@@ -1844,10 +1953,38 @@ heapam_index_validate_scan(Relation heapRelation,
 		 */
 		if (hscan->rs_cblock != root_blkno)
 		{
+			bool		all_visible;
 			Page		page = BufferGetPage(hscan->rs_cbuf);
 
 			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
 			heap_get_root_tuples(page, root_offsets);
+			lines = PageGetMaxOffsetNumber(page);
+
+			////////////////////////////////////////
+			memset(visible_to_referenceSnapshot, 0, sizeof(visible_to_referenceSnapshot));
+			all_visible = PageIsAllVisible(page);
+
+			for (lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)
+			{
+				ItemId		lpp = PageGetItemId(page, lineoff);
+				HeapTupleData loctup;
+
+				if (!ItemIdIsNormal(lpp))
+					continue;
+
+				loctup.t_tableOid = RelationGetRelid(hscan->rs_base.rs_rd);
+				loctup.t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+				loctup.t_len = ItemIdGetLength(lpp);
+				ItemPointerSet(&(loctup.t_self), hscan->rs_cblock, lineoff);
+
+				if (all_visible)
+					visible_to_referenceSnapshot[lineoff - 1] = true;
+				else
+					visible_to_referenceSnapshot[lineoff - 1] = HeapTupleSatisfiesVisibility(&loctup, refSnapshot, hscan->rs_cbuf);
+
+			}
+			////////////////////////////////////////
+
 			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 
 			memset(in_index, 0, sizeof(in_index));
@@ -1857,7 +1994,7 @@ heapam_index_validate_scan(Relation heapRelation,
 
 		/* Convert actual tuple TID to root TID */
 		rootTuple = *heapcursor;
-		root_offnum = ItemPointerGetOffsetNumber(heapcursor);
+		tuple_offnum = root_offnum = ItemPointerGetOffsetNumber(heapcursor);
 
 		if (HeapTupleIsHeapOnly(heapTuple))
 		{
@@ -1916,65 +2053,114 @@ heapam_index_validate_scan(Relation heapRelation,
 			 ItemPointerCompare(indexcursor, &rootTuple) > 0) &&
 			!in_index[root_offnum - 1])
 		{
+			bool doInsert = true;
+			bool foundHot = false;
 			MemoryContextReset(econtext->ecxt_per_tuple_memory);
 
 			/* Set up for predicate or expression evaluation */
 			ExecStoreHeapTuple(heapTuple, slot, false);
 
+//			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
+//			if (visible_to_referenceSnapshot[tuple_offnum - 1] != HeapTupleSatisfiesVisibility(heapTuple, refSnapshot, hscan->rs_cbuf))
+//			{
+//				ereport(ERROR,
+//						(errcode(ERRCODE_INDEX_CORRUPTED),
+//								errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
+//			}
+//			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+
+			if (visible_to_referenceSnapshot[tuple_offnum - 1])
+			{
+				foundHot = true;
+			}
+			else
+			{
+				for (lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)
+				{
+					if ((root_offsets[lineoff - 1] == root_offnum) && visible_to_referenceSnapshot[lineoff - 1])
+					{
+						foundHot = true;
+						break;
+					}
+				}
+			}
+
+			//if (!visible_to_referenceSnapshot[tuple_offnum - 1]) {
+			if (!foundHot) {
+				doInsert = false;
+				doInsert = false;
+			}
+
 			/*
 			 * In a partial index, discard tuples that don't satisfy the
 			 * predicate.
 			 */
-			if (predicate != NULL)
-			{
-				if (!ExecQual(predicate, econtext))
-					continue;
+			if (predicate != NULL){
+				if (doInsert && !ExecQual(predicate, econtext))
+					doInsert = false;
 			}
 
-			/*
-			 * For the current heap tuple, extract all the attributes we use
-			 * in this index, and note which are null.  This also performs
-			 * evaluation of any expressions needed.
-			 */
-			FormIndexDatum(indexInfo,
-						   slot,
-						   estate,
-						   values,
-						   isnull);
 
-			/*
-			 * You'd think we should go ahead and build the index tuple here,
-			 * but some index AMs want to do further processing on the data
-			 * first. So pass the values[] and isnull[] arrays, instead.
-			 */
+			if (doInsert) {
+				/*
+				 * For the current heap tuple, extract all the attributes we use
+				 * in this index, and note which are null.  This also performs
+				 * evaluation of any expressions needed.
+				 */
+				FormIndexDatum(indexInfo,
+							   slot,
+							   estate,
+							   values,
+							   isnull);
 
-			/*
-			 * If the tuple is already committed dead, you might think we
-			 * could suppress uniqueness checking, but this is no longer true
-			 * in the presence of HOT, because the insert is actually a proxy
-			 * for a uniqueness check on the whole HOT-chain.  That is, the
-			 * tuple we have here could be dead because it was already
-			 * HOT-updated, and if so the updating transaction will not have
-			 * thought it should insert index entries.  The index AM will
-			 * check the whole HOT-chain and correctly detect a conflict if
-			 * there is one.
-			 */
+				/*
+				 * You'd think we should go ahead and build the index tuple here,
+				 * but some index AMs want to do further processing on the data
+				 * first. So pass the values[] and isnull[] arrays, instead.
+				 */
 
-			index_insert(indexRelation,
-						 values,
-						 isnull,
-						 &rootTuple,
-						 heapRelation,
-						 indexInfo->ii_Unique ?
-						 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
-						 false,
-						 indexInfo);
+				/*
+				 * If the tuple is already committed dead, you might think we
+				 * could suppress uniqueness checking, but this is no longer true
+				 * in the presence of HOT, because the insert is actually a proxy
+				 * for a uniqueness check on the whole HOT-chain.  That is, the
+				 * tuple we have here could be dead because it was already
+				 * HOT-updated, and if so the updating transaction will not have
+				 * thought it should insert index entries.  The index AM will
+				 * check the whole HOT-chain and correctly detect a conflict if
+				 * there is one.
+				 */
+				//if (rand() % 1000 != 0)
+				{
+					index_insert(indexRelation,
+								 values,
+								 isnull,
+								 &rootTuple,
+								 heapRelation,
+								 indexInfo->ii_Unique ?
+								 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
+								 false,
+								 indexInfo);
+				}
 
-			state->tups_inserted += 1;
+				state->tups_inserted += 1;
+			}
+		}
+		if (updateSnapshot) {
+			PopActiveSnapshot();
+			UnregisterSnapshot(scanSnapshot);
+
+			scanSnapshot = RegisterSnapshot(GetLatestSnapshot());
+			PushActiveSnapshot(scanSnapshot);
+			xmin = scanSnapshot->xmin;
+
+			table_scan_replace_snapshot(scan, scanSnapshot);
 		}
 	}
 
 	table_endscan(scan);
+	PopActiveSnapshot();
+	UnregisterSnapshot(scanSnapshot);
 
 	ExecDropSingleTupleTableSlot(slot);
 
@@ -1983,6 +2169,8 @@ heapam_index_validate_scan(Relation heapRelation,
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+
+	return xmin;
 }
 
 /*

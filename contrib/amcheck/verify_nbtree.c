@@ -128,6 +128,7 @@ typedef struct BtreeCheckState
 	bloom_filter *filter;
 	/* Debug counter */
 	int64		heaptuplespresent;
+	int64		heaptuplesmissing
 } BtreeCheckState;
 
 /*
@@ -541,12 +542,12 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 		 */
 		total_pages = RelationGetNumberOfBlocks(rel);
 		total_elems = Max(total_pages * (MaxTIDsPerBTreePage / 3),
-						  (int64) state->rel->rd_rel->reltuples);
+						  (int64) state->rel->rd_rel->reltuples) * 100;
 		/* Generate a random seed to avoid repetition */
 		seed = pg_prng_uint64(&pg_global_prng_state);
 		/* Create Bloom filter to fingerprint index */
 		state->filter = bloom_create(total_elems, maintenance_work_mem, seed);
-		state->heaptuplespresent = 0;
+		state->heaptuplespresent  = state->heaptuplesmissing = 0;
 
 		/*
 		 * Register our own snapshot in !readonly case, rather than asking
@@ -712,6 +713,17 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 
 		table_index_build_scan(state->heaprel, state->rel, indexinfo, true, false,
 							   bt_tuple_present_callback, (void *) state, scan);
+		if (state->heaptuplesmissing)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("index \"%s\" is missing %ld row%s from table \"%s\" with %ld rows present",
+							RelationGetRelationName(state->rel),
+							state->heaptuplesmissing,
+							state->heaptuplesmissing == 1 ? "" : "s",
+							RelationGetRelationName(state->heaprel))),
+							state->heaptuplespresent);
+		}
 
 		ereport(DEBUG1,
 				(errmsg_internal("finished verifying presence of " INT64_FORMAT " tuples from table \"%s\" with bitset %.2f%% set",
@@ -2886,20 +2898,65 @@ bt_tuple_present_callback(Relation index, ItemPointer tid, Datum *values,
 	norm = bt_normalize_tuple(state, itup);
 
 	/* Probe Bloom filter -- tuple should be present */
-	if (bloom_lacks_element(state->filter, (unsigned char *) norm,
-							IndexTupleSize(norm)))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("heap tuple (%u,%u) from table \"%s\" lacks matching index tuple within index \"%s\"",
-						ItemPointerGetBlockNumber(&(itup->t_tid)),
-						ItemPointerGetOffsetNumber(&(itup->t_tid)),
-						RelationGetRelationName(state->heaprel),
-						RelationGetRelationName(state->rel)),
-				 !state->readonly
-				 ? errhint("Retrying verification using the function bt_index_parent_check() might provide a more specific error.")
-				 : 0));
+	if (bloom_lacks_element(state->filter, (unsigned char *) norm, IndexTupleSize(norm)))
+	{
+		ItemPointerData tmp_tid;
+		TupleTableSlot *slot;
+		BufferHeapTupleTableSlot *bslot;
+		StringInfoData buf;
 
-	state->heaptuplespresent++;
+		initStringInfo(&buf);
+
+		slot = table_slot_create(state->heaprel, NULL);
+		bslot = (BufferHeapTupleTableSlot *) slot;
+
+		ItemPointerCopy(tid, &tmp_tid);
+
+
+
+		IndexFetchTableData *scan = table_index_fetch_begin(state->heaprel);
+		bool		call_again, all_dead = false;
+		bool		first_call = true;
+		do
+		{
+			if (table_index_fetch_tuple(scan, &tmp_tid, SnapshotAny, slot, &call_again, &all_dead))
+			{
+				TransactionId xmin, xmax;
+
+				xmin = HeapTupleHeaderGetXmin(bslot->base.tupdata.t_data);
+				xmax = HeapTupleHeaderGetUpdateXid(bslot->base.tupdata.t_data);
+				appendStringInfo(&buf, "%s(xmin=%d,xmax=%d%s)", first_call ? "" : ",", xmin, xmax, all_dead ? ",dead" : "");
+				first_call = false;
+			}
+			else
+			{
+				if (first_call)
+					appendStringInfo(&buf, all_dead ? "(dead)" : "(null)");
+			}
+		} while (call_again);
+		table_index_fetch_end(scan);
+
+
+		ereport(WARNING,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+						errmsg("heap tuple (%u,%u) [%s] from table \"%s\" lacks matching index tuple within index \"%s\"",
+							   ItemPointerGetBlockNumber(&(itup->t_tid)),
+							   ItemPointerGetOffsetNumber(&(itup->t_tid)),
+							   buf.data,
+							   RelationGetRelationName(state->heaprel),
+							   RelationGetRelationName(state->rel)),
+						!state->readonly
+						? errhint(
+								"Retrying verification using the function bt_index_parent_check() might provide a more specific error.")
+						: 0));
+		state->heaptuplesmissing++;
+
+		ExecDropSingleTupleTableSlot(slot);
+	}
+	else
+	{
+		state->heaptuplespresent++;
+	}
 	pfree(itup);
 	/* Cannot leak memory here */
 	if (norm != itup)

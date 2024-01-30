@@ -713,10 +713,10 @@ typedef struct TableAmRoutine
 										   TableScanDesc scan);
 
 	/* see table_index_validate_scan for reference about parameters */
-	void		(*index_validate_scan) (Relation table_rel,
+	TransactionId		(*index_validate_scan) (Relation table_rel,
 										Relation index_rel,
 										struct IndexInfo *index_info,
-										Snapshot snapshot,
+										Snapshot refSnapshot,
 										struct ValidateIndexState *state);
 
 
@@ -1057,6 +1057,8 @@ table_rescan_set_params(TableScanDesc scan, struct ScanKeyData *key,
 										 allow_strat, allow_sync,
 										 allow_pagemode);
 }
+
+extern void table_scan_replace_snapshot(TableScanDesc scan, Snapshot snapshot);
 
 /*
  * Return next tuple from `scan`, store in slot.
@@ -1845,17 +1847,17 @@ table_index_build_range_scan(Relation table_rel,
  *
  * See validate_index() for an explanation.
  */
-static inline void
+static inline TransactionId
 table_index_validate_scan(Relation table_rel,
 						  Relation index_rel,
 						  struct IndexInfo *index_info,
-						  Snapshot snapshot,
+						  Snapshot refSnapshot,
 						  struct ValidateIndexState *state)
 {
-	table_rel->rd_tableam->index_validate_scan(table_rel,
+	return table_rel->rd_tableam->index_validate_scan(table_rel,
 											   index_rel,
 											   index_info,
-											   snapshot,
+											   refSnapshot,
 											   state);
 }
 

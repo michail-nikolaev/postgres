@@ -3290,8 +3290,8 @@ IndexCheckExclusion(Relation heapRelation,
  * making the table append-only by setting use_fsm).  However that would
  * add yet more locking issues.
  */
-void
-validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
+TransactionId
+validate_index(Oid heapId, Oid indexId, Snapshot refSnapshot)
 {
 	Relation	heapRelation,
 				indexRelation;
@@ -3301,6 +3301,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
+	TransactionId xmin;
 
 	{
 		const int	progress_index[] = {
@@ -3393,10 +3394,10 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	 */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN);
-	table_index_validate_scan(heapRelation,
+	xmin = table_index_validate_scan(heapRelation,
 							  indexRelation,
 							  indexInfo,
-							  snapshot,
+							  refSnapshot,
 							  &state);
 
 	/* Done with tuplesort object */
@@ -3418,6 +3419,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	/* Close rels, but keep locks */
 	index_close(indexRelation, NoLock);
 	table_close(heapRelation, NoLock);
+	return xmin;
 }
 
 /*
