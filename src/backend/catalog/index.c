@@ -3321,6 +3321,8 @@ validate_index(Oid heapId, Oid indexId, Snapshot refSnapshot)
 
 	/* Open and lock the parent heap relation */
 	heapRelation = table_open(heapId, ShareUpdateExclusiveLock);
+	RelationGetIndexList(heapRelation);
+	Assert(heapRelation->rd_indexisbuilding);
 
 	/*
 	 * Switch to the table owner's userid, so that any index functions are run

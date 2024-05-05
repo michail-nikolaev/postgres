@@ -4568,12 +4568,15 @@ set_indexsafe_procflags(bool reportXmin)
 	 * otherwise, concurrent processes could see an Xmin that moves backwards.
 	 */
 	Assert(MyProc->xid == InvalidTransactionId &&
-		   MyProc->xmin == InvalidTransactionId);
+		   MyProc->xmin == InvalidTransactionId &&
+		   MyProc->safeIcXmin == InvalidTransactionId);
 
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 	if (reportXmin)
+	{
 		MyProc->statusFlags |= PROC_IN_SAFE_IC_XMIN;
-	else
+		MyProc->safeIcXmin = MyProc->xmin;
+	} else
 		MyProc->statusFlags |= PROC_IN_SAFE_IC_NO_XMIN;
 	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
 	LWLockRelease(ProcArrayLock);

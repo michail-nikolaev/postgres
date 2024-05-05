@@ -2495,7 +2495,7 @@ PhysicalReplicationSlotNewXmin(TransactionId feedbackXmin, TransactionId feedbac
 	ReplicationSlot *slot = MyReplicationSlot;
 
 	SpinLockAcquire(&slot->mutex);
-	MyProc->xmin = InvalidTransactionId;
+	MyProc->xmin = MyProc->safeIcXmin = InvalidTransactionId;
 
 	/*
 	 * For physical replication we don't need the interlock provided by xmin
@@ -2624,7 +2624,7 @@ ProcessStandbyHSFeedbackMessage(void)
 	if (!TransactionIdIsNormal(feedbackXmin)
 		&& !TransactionIdIsNormal(feedbackCatalogXmin))
 	{
-		MyProc->xmin = InvalidTransactionId;
+		MyProc->xmin = MyProc->safeIcXmin = InvalidTransactionId;
 		if (MyReplicationSlot != NULL)
 			PhysicalReplicationSlotNewXmin(feedbackXmin, feedbackCatalogXmin);
 		return;

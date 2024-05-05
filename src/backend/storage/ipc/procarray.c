@@ -701,7 +701,7 @@ ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
 		Assert(!proc->subxidStatus.overflowed);
 
 		proc->vxid.lxid = InvalidLocalTransactionId;
-		proc->xmin = InvalidTransactionId;
+		proc->xmin = proc->safeIcXmin = InvalidTransactionId;
 
 		/* be sure this is cleared in abort */
 		proc->delayChkptFlags = 0;
@@ -930,7 +930,7 @@ ProcArrayClearTransaction(PGPROC *proc)
 	proc->xid = InvalidTransactionId;
 
 	proc->vxid.lxid = InvalidLocalTransactionId;
-	proc->xmin = InvalidTransactionId;
+	proc->xmin = proc->safeIcXmin = InvalidTransactionId;
 	proc->recoveryConflictPending = false;
 
 	Assert(!(proc->statusFlags & PROC_VACUUM_STATE_MASK));
@@ -1857,9 +1857,16 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			 * only on vacuums of user-defined tables. todo
 			 */
 			// todo
-			if (!(statusFlags & PROC_IN_SAFE_IC_NO_XMIN) && !(statusFlags & PROC_IN_SAFE_IC_XMIN))
-				h->data_oldest_nonremovable =
-					TransactionIdOlder(h->data_oldest_nonremovable, xmin);
+			if (!(statusFlags & PROC_IN_SAFE_IC_NO_XMIN))
+			{
+				if (statusFlags & PROC_IN_SAFE_IC_XMIN) {
+					h->data_oldest_nonremovable =
+							TransactionIdOlder(h->data_oldest_nonremovable, proc->safeIcXmin);
+				} else {
+					h->data_oldest_nonremovable =
+							TransactionIdOlder(h->data_oldest_nonremovable, xmin);
+				}
+			}
 
 			/* Catalog tables need to consider all backends in this db */
 			h->catalog_oldest_nonremovable =
@@ -1993,6 +2000,8 @@ GlobalVisHorizonKindForRel(Relation rel)
 
 	if (rel == NULL || rel->rd_rel->relisshared || RecoveryInProgress())
 		return VISHORIZON_SHARED;
+	else if (rel != NULL && rel->rd_indexvalid && rel->rd_indexisbuilding)
+		return VISHORIZON_CATALOG;
 	else if (IsCatalogRelation(rel) ||
 			 RelationIsAccessibleInLogicalDecoding(rel))
 		return VISHORIZON_CATALOG;
@@ -4548,6 +4557,26 @@ void
 KnownAssignedTransactionIdsIdleMaintenance(void)
 {
 	KnownAssignedXidsCompress(KAX_STARTUP_PROCESS_IDLE, false);
+}
+
+void
+AdvanceIndexSafeXmin(Snapshot snapshot)
+{
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+	if (MyProc->statusFlags & PROC_IN_SAFE_IC_XMIN)
+	{
+		Assert(MyProc->xmin == InvalidTransactionId ||
+					TransactionIdPrecedesOrEquals(MyProc->xmin, snapshot->xmin));
+		Assert(MyProc->safeIcXmin == InvalidTransactionId ||
+			   TransactionIdPrecedesOrEquals(MyProc->safeIcXmin, snapshot->xmin));
+		Assert(MyProc->xid == InvalidTransactionId ||
+					TransactionIdPrecedesOrEquals(MyProc->xid, snapshot->xmin));
+		MyProc->safeIcXmin = snapshot->xmin;
+
+		Assert(MyProc->xmin == InvalidTransactionId ||
+			   TransactionIdPrecedesOrEquals(MyProc->xmin, MyProc->safeIcXmin));
+	}
+	LWLockRelease(ProcArrayLock);
 }
 
 

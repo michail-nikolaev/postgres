@@ -260,8 +260,31 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 			 * not the relation has indexes, since we cannot safely determine
 			 * that during on-access pruning with the current implementation.
 			 */
+			//if (relation->rd_id == 2610 || relation->rd_id == 1249 || relation->rd_id == 1259) {
+			//if (!relation->rd_indexvalid) {
 			heap_page_prune_and_freeze(relation, buffer, vistest, 0,
 									   NULL, &presult, PRUNE_ON_ACCESS, &dummy_off_loc, NULL, NULL);
+			//} else if (!relation->rd_indexisbuilding) {
+				//heap_page_prune_and_freeze(relation, buffer, vistest, 0,
+										   //NULL, &presult, PRUNE_ON_ACCESS, &dummy_off_loc, NULL, NULL);
+			//}
+//			else if (relation->rd_id != 16393) {
+//				if (!relation->rd_indexvalid) {
+//					int a = 3;
+//				}
+//				if (!relation->rd_indexisbuilding) {
+//					int a = 3;
+//				}
+//			} else if (relation->rd_id == 16393) {
+//				if (!relation->rd_indexvalid) {
+//					int a = 3;
+//				}
+//				if (!relation->rd_indexisbuilding) {
+//					int a = 3;
+//				}
+//			}
+				//heap_page_prune_and_freeze(relation, buffer, vistest, 0,
+				//						   NULL, &presult, PRUNE_ON_ACCESS, &dummy_off_loc, NULL, NULL);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is

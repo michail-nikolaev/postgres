@@ -4769,6 +4769,7 @@ RelationGetIndexList(Relation relation)
 	Oid			pkeyIndex = InvalidOid;
 	Oid			candidateIndex = InvalidOid;
 	bool		pkdeferrable = false;
+	bool 		indexisbuilding = false;
 	MemoryContext oldcxt;
 
 	/* Quick exit if we already computed the list. */
@@ -4808,6 +4809,9 @@ RelationGetIndexList(Relation relation)
 
 		/* add index's OID to result list */
 		result = lappend_oid(result, index->indexrelid);
+
+		if (index->indisready && !index->indisvalid)
+			indexisbuilding = true;
 
 		/*
 		 * Non-unique or predicate indexes aren't interesting for either oid
@@ -4869,6 +4873,7 @@ RelationGetIndexList(Relation relation)
 	relation->rd_indexlist = list_copy(result);
 	relation->rd_pkindex = pkeyIndex;
 	relation->rd_ispkdeferrable = pkdeferrable;
+	relation->rd_indexisbuilding = indexisbuilding;
 	if (replident == REPLICA_IDENTITY_DEFAULT && OidIsValid(pkeyIndex) && !pkdeferrable)
 		relation->rd_replidindex = pkeyIndex;
 	else if (replident == REPLICA_IDENTITY_INDEX && OidIsValid(candidateIndex))

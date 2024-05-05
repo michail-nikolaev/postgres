@@ -920,7 +920,7 @@ SnapshotResetXmin(void)
 
 	if (pairingheap_is_empty(&RegisteredSnapshots))
 	{
-		MyProc->xmin = InvalidTransactionId;
+		MyProc->xmin = MyProc->safeIcXmin = InvalidTransactionId;
 		return;
 	}
 
@@ -929,6 +929,9 @@ SnapshotResetXmin(void)
 
 	if (TransactionIdPrecedes(MyProc->xmin, minSnapshot->xmin))
 		MyProc->xmin = minSnapshot->xmin;
+
+	if (TransactionIdIsValid(MyProc->safeIcXmin) && TransactionIdPrecedes(MyProc->safeIcXmin, minSnapshot->xmin))
+		MyProc->safeIcXmin = minSnapshot->xmin;
 }
 
 /*

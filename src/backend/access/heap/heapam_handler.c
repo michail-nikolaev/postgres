@@ -41,6 +41,7 @@
 #include "storage/bufpage.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -1881,7 +1882,8 @@ heapam_index_validate_scan(Relation heapRelation,
 	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 
 
-	//test_sleep(1000);
+	//test_sleep(10000);
+
 	//xmin = refSnapshot->xmin;
 	scanSnapshot = RegisterSnapshot(GetLatestSnapshot());
 	//scanSnapshot = RegisterSnapshot(refSnapshot);
@@ -1889,6 +1891,7 @@ heapam_index_validate_scan(Relation heapRelation,
 	//RegisterSnapshot(scanSnapshot);
 	PushActiveSnapshot(scanSnapshot);
 	xmin = scanSnapshot->xmin;
+	AdvanceIndexSafeXmin(scanSnapshot);
 
 	//debug_snapshot(scanSnapshot, "scan");
 	//debug_snapshot(refSnapshot, "ref");
@@ -1915,6 +1918,7 @@ heapam_index_validate_scan(Relation heapRelation,
 	 */
 	while ((heapTuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
+
 		ItemPointer heapcursor = &heapTuple->t_self;
 		ItemPointerData rootTuple;
 		OffsetNumber root_offnum;
@@ -2152,6 +2156,8 @@ heapam_index_validate_scan(Relation heapRelation,
 
 			scanSnapshot = RegisterSnapshot(GetLatestSnapshot());
 			PushActiveSnapshot(scanSnapshot);
+			AdvanceIndexSafeXmin(scanSnapshot);
+
 			xmin = scanSnapshot->xmin;
 
 			table_scan_replace_snapshot(scan, scanSnapshot);

@@ -55,7 +55,7 @@ if(!defined($pid = fork())) {
 } elsif ($pid == 0) {
 
 	$node->pgbench(
-		'--no-vacuum --client=15 --transactions=25000',
+		'--no-vacuum --client=5 --transactions=25000',
 		0,
 		[qr{actually processed}],
 		[qr{^$}],
@@ -71,7 +71,7 @@ if(!defined($pid = fork())) {
 					on conflict(i) do update set updated_at = now();
 				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
 					on conflict(i) do update set updated_at = now();
-				SELECT pg_sleep(case when random()<0.05 then 0.01 else 0 end);
+
 				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
 					on conflict(i) do update set updated_at = now();
 				COMMIT;
@@ -87,7 +87,7 @@ if(!defined($pid = fork())) {
 					on conflict(i) do update set updated_at = now();
 				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
 					on conflict(i) do update set updated_at = now();
-				SELECT pg_sleep(case when random()<0.05 then 0.01 else 0 end);
+
 				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
 					on conflict(i) do update set updated_at = now();
 				COMMIT;

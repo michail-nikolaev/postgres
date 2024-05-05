@@ -40,6 +40,7 @@ extern void ExpireTreeKnownAssignedTransactionIds(TransactionId xid,
 extern void ExpireAllKnownAssignedTransactionIds(void);
 extern void ExpireOldKnownAssignedTransactionIds(TransactionId xid);
 extern void KnownAssignedTransactionIdsIdleMaintenance(void);
+extern void AdvanceIndexSafeXmin(Snapshot snapshot);
 
 extern int	GetMaxSnapshotXidCount(void);
 extern int	GetMaxSnapshotSubxidCount(void);
