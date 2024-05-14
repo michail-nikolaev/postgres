@@ -78,6 +78,7 @@
 
 /* Progress parameters for CREATE INDEX */
 /* 3, 4 and 5 reserved for "waitfor" metrics */
+// TODO: new phase names
 #define PROGRESS_CREATEIDX_COMMAND				0
 #define PROGRESS_CREATEIDX_INDEX_OID			6
 #define PROGRESS_CREATEIDX_ACCESS_METHOD_OID	8
@@ -90,6 +91,7 @@
 /* 15 and 16 reserved for "block number" metrics */
 
 /* Phases of CREATE INDEX (as advertised via PROGRESS_CREATEIDX_PHASE) */
+// TODO: new phase names
 #define PROGRESS_CREATEIDX_PHASE_WAIT_1			1
 #define PROGRESS_CREATEIDX_PHASE_BUILD			2
 #define PROGRESS_CREATEIDX_PHASE_WAIT_2			3

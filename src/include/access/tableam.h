@@ -715,9 +715,12 @@ typedef struct TableAmRoutine
 	/* see table_index_validate_scan for reference about parameters */
 	void		(*index_validate_scan) (Relation table_rel,
 										Relation index_rel,
+										Relation aux_index_rel,
 										struct IndexInfo *index_info,
+										struct IndexInfo *aux_index_info,
 										Snapshot snapshot,
-										struct ValidateIndexState *state);
+										struct ValidateIndexState *state,
+										struct ValidateIndexState *aux_state);
 
 
 	/* ------------------------------------------------------------------------
@@ -1847,17 +1850,24 @@ table_index_build_range_scan(Relation table_rel,
  */
 static inline void
 table_index_validate_scan(Relation table_rel,
-						  Relation index_rel,
-						  struct IndexInfo *index_info,
-						  Snapshot snapshot,
-						  struct ValidateIndexState *state)
+								   Relation index_rel,
+								   Relation aux_index_rel,
+								   struct IndexInfo *index_info,
+								   struct IndexInfo *aux_index_info,
+								   Snapshot snapshot,
+								   struct ValidateIndexState *state,
+								   struct ValidateIndexState *auxstate)
 {
 	table_rel->rd_tableam->index_validate_scan(table_rel,
-											   index_rel,
-											   index_info,
-											   snapshot,
-											   state);
+														index_rel,
+														aux_index_rel,
+														index_info,
+														aux_index_info,
+														snapshot,
+														state,
+														auxstate);
 }
+
 
 
 /* ----------------------------------------------------------------------------

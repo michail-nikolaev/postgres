@@ -638,6 +638,7 @@ UpdateIndexRelation(Oid indexoid,
 	values[Anum_pg_index_indnkeyatts - 1] = Int16GetDatum(indexInfo->ii_NumIndexKeyAttrs);
 	values[Anum_pg_index_indisunique - 1] = BoolGetDatum(indexInfo->ii_Unique);
 	values[Anum_pg_index_indnullsnotdistinct - 1] = BoolGetDatum(indexInfo->ii_NullsNotDistinct);
+	values[Anum_pg_index_indauxiliary - 1] = BoolGetDatum(indexInfo->ii_Auxiliary);
 	values[Anum_pg_index_indisprimary - 1] = BoolGetDatum(primary);
 	values[Anum_pg_index_indisexclusion - 1] = BoolGetDatum(isexclusion);
 	values[Anum_pg_index_indimmediate - 1] = BoolGetDatum(immediate);
@@ -1295,7 +1296,8 @@ index_create(Relation heapRelation,
  */
 Oid
 index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
-							   Oid tablespaceOid, const char *newName)
+							   Oid tablespaceOid, const char *newName,
+							   bool auxiliary)
 {
 	Relation	indexRelation;
 	IndexInfo  *oldInfo,
@@ -1393,7 +1395,9 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							oldInfo->ii_NullsNotDistinct,
 							false,	/* not ready for inserts */
 							true,
-							indexRelation->rd_indam->amsummarizing);
+							indexRelation->rd_indam->amsummarizing,
+							auxiliary);
+	//  TODO: skip expressions, covering and other
 
 	/*
 	 * Extract the list of column names and the column numbers for the new
@@ -1518,7 +1522,7 @@ index_concurrently_build(Oid heapRelationId,
 	indexInfo->ii_BrokenHotChain = false;
 
 	/* Now build the index */
-	index_build(heapRel, indexRelation, indexInfo, false, true);
+	index_build(heapRel, indexRelation, indexInfo, false, !indexInfo->ii_Auxiliary);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -2426,7 +2430,8 @@ BuildIndexInfo(Relation index)
 					   indexStruct->indnullsnotdistinct,
 					   indexStruct->indisready,
 					   false,
-					   index->rd_indam->amsummarizing);
+					   index->rd_indam->amsummarizing,
+					   indexStruct->indauxiliary);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -2485,7 +2490,8 @@ BuildDummyIndexInfo(Relation index)
 					   indexStruct->indnullsnotdistinct,
 					   indexStruct->indisready,
 					   false,
-					   index->rd_indam->amsummarizing);
+					   index->rd_indam->amsummarizing,
+					   indexStruct->indauxiliary);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -2515,6 +2521,9 @@ CompareIndexInfo(const IndexInfo *info1, const IndexInfo *info2,
 	int			i;
 
 	if (info1->ii_Unique != info2->ii_Unique)
+		return false;
+
+	if (info1->ii_Auxiliary != info2->ii_Auxiliary)
 		return false;
 
 	if (info1->ii_NullsNotDistinct != info2->ii_NullsNotDistinct)
@@ -3287,28 +3296,30 @@ IndexCheckExclusion(Relation heapRelation,
  * add yet more locking issues.
  */
 void
-validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
+validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 {
 	Relation	heapRelation,
-				indexRelation;
-	IndexInfo  *indexInfo;
-	IndexVacuumInfo ivinfo;
-	ValidateIndexState state;
+			indexRelation,
+			auxIndexRelation;
+	IndexInfo  *indexInfo,
+				*auxIndexInfo;
+	IndexVacuumInfo ivinfo, auxivinfo;
+	ValidateIndexState state, auxState;
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
 
 	{
 		const int	progress_index[] = {
-			PROGRESS_CREATEIDX_PHASE,
-			PROGRESS_CREATEIDX_TUPLES_DONE,
-			PROGRESS_CREATEIDX_TUPLES_TOTAL,
-			PROGRESS_SCAN_BLOCKS_DONE,
-			PROGRESS_SCAN_BLOCKS_TOTAL
+				PROGRESS_CREATEIDX_PHASE,
+				PROGRESS_CREATEIDX_TUPLES_DONE,
+				PROGRESS_CREATEIDX_TUPLES_TOTAL,
+				PROGRESS_SCAN_BLOCKS_DONE,
+				PROGRESS_SCAN_BLOCKS_TOTAL
 		};
 		const int64 progress_vals[] = {
-			PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN,
-			0, 0, 0, 0
+				PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN,
+				0, 0, 0, 0
 		};
 
 		pgstat_progress_update_multi_param(5, progress_index, progress_vals);
@@ -3329,6 +3340,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	RestrictSearchPath();
 
 	indexRelation = index_open(indexId, RowExclusiveLock);
+	auxIndexRelation = index_open(auxIndexId, RowExclusiveLock);
 
 	/*
 	 * Fetch info needed for index_insert.  (You might think this should be
@@ -3336,9 +3348,12 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	 * been built in a previous transaction.)
 	 */
 	indexInfo = BuildIndexInfo(indexRelation);
+	auxIndexInfo = BuildIndexInfo(auxIndexRelation);
 
 	/* mark build is concurrent just for consistency */
 	indexInfo->ii_Concurrent = true;
+	auxIndexInfo->ii_Concurrent = true;
+	auxIndexInfo->ii_Auxiliary = true;
 
 	/*
 	 * Scan the index and gather up all the TIDs into a tuplesort object.
@@ -3351,6 +3366,9 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	ivinfo.message_level = DEBUG2;
 	ivinfo.num_heap_tuples = heapRelation->rd_rel->reltuples;
 	ivinfo.strategy = NULL;
+
+	auxivinfo = ivinfo;
+	auxivinfo.index = auxIndexRelation;
 
 	/*
 	 * Encode TIDs as int8 values for the sort, rather than directly sorting
@@ -3368,21 +3386,31 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	(void) index_bulk_delete(&ivinfo, NULL,
 							 validate_index_callback, (void *) &state);
 
+	auxState.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
+											InvalidOid, false,
+											maintenance_work_mem,
+											NULL, TUPLESORT_NONE);
+	auxState.htups = auxState.itups = auxState.tups_inserted = 0;
+
+	(void) index_bulk_delete(&auxivinfo, NULL,
+							 validate_index_callback, (void *) &auxState);
+
 	/* Execute the sort */
 	{
 		const int	progress_index[] = {
-			PROGRESS_CREATEIDX_PHASE,
-			PROGRESS_SCAN_BLOCKS_DONE,
-			PROGRESS_SCAN_BLOCKS_TOTAL
+				PROGRESS_CREATEIDX_PHASE,
+				PROGRESS_SCAN_BLOCKS_DONE,
+				PROGRESS_SCAN_BLOCKS_TOTAL
 		};
 		const int64 progress_vals[] = {
-			PROGRESS_CREATEIDX_PHASE_VALIDATE_SORT,
-			0, 0
+				PROGRESS_CREATEIDX_PHASE_VALIDATE_SORT,
+				0, 0
 		};
 
 		pgstat_progress_update_multi_param(3, progress_index, progress_vals);
 	}
 	tuplesort_performsort(state.tuplesort);
+	tuplesort_performsort(auxState.tuplesort);
 
 	/*
 	 * Now scan the heap and "merge" it with the index
@@ -3391,15 +3419,20 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 								 PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN);
 	table_index_validate_scan(heapRelation,
 							  indexRelation,
+							  auxIndexRelation,
 							  indexInfo,
+							  auxIndexInfo,
 							  snapshot,
-							  &state);
+							  &state,
+							  &auxState);
 
 	/* Done with tuplesort object */
 	tuplesort_end(state.tuplesort);
+	tuplesort_end(auxState.tuplesort);
 
 	/* Make sure to release resources cached in indexInfo (if needed). */
 	index_insert_cleanup(indexRelation, indexInfo);
+	index_insert_cleanup(auxIndexRelation, auxIndexInfo);
 
 	elog(DEBUG2,
 		 "validate_index found %.0f heap tuples, %.0f index tuples; inserted %.0f missing tuples",
@@ -3412,6 +3445,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	SetUserIdAndSecContext(save_userid, save_sec_context);
 
 	/* Close rels, but keep locks */
+	index_close(auxIndexRelation, NoLock);
 	index_close(indexRelation, NoLock);
 	table_close(heapRelation, NoLock);
 }
@@ -3470,6 +3504,7 @@ index_set_state_flags(Oid indexId, IndexStateFlagsAction action)
 			Assert(indexForm->indislive);
 			Assert(indexForm->indisready);
 			Assert(!indexForm->indisvalid);
+			Assert(!indexForm->indauxiliary);
 			indexForm->indisvalid = true;
 			break;
 		case INDEX_DROP_CLEAR_VALID:
@@ -3505,6 +3540,10 @@ index_set_state_flags(Oid indexId, IndexStateFlagsAction action)
 			Assert(!indexForm->indisreplident);
 			indexForm->indisready = false;
 			indexForm->indislive = false;
+			break;
+		case INDEX_DROP_CLEAR_READY:
+			Assert(indexForm->indauxiliary);
+			indexForm->indisready = false;
 			break;
 	}
 
