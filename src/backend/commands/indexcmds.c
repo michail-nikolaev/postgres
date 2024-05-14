@@ -238,7 +238,7 @@ CheckIndexCompatible(Oid oldId,
 	 */
 	indexInfo = makeIndexInfo(numberOfAttributes, numberOfAttributes,
 							  accessMethodId, NIL, NIL, false, false,
-							  false, false, amsummarizing);
+							  false, false, amsummarizing, false);
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
 	opclassIds = palloc_array(Oid, numberOfAttributes);
@@ -542,7 +542,9 @@ DefineIndex(Oid tableId,
 {
 	bool		concurrent;
 	char	   *indexRelationName;
+	char	   *auxIndexRelationName;
 	char	   *accessMethodName;
+	Oid			auxIndexRelationId;
 	Oid		   *typeIds;
 	Oid		   *collationIds;
 	Oid		   *opclassIds;
@@ -571,6 +573,7 @@ DefineIndex(Oid tableId,
 	int			numberOfKeyAttributes;
 	TransactionId limitXmin;
 	ObjectAddress address;
+	ObjectAddress auxAddress;
 	LockRelId	heaprelid;
 	LOCKTAG		heaplocktag;
 	LOCKMODE	lockmode;
@@ -808,6 +811,7 @@ DefineIndex(Oid tableId,
 	 * Select name for index if caller didn't specify
 	 */
 	indexRelationName = stmt->idxname;
+	auxIndexRelationName = NULL;
 	if (indexRelationName == NULL)
 		indexRelationName = ChooseIndexName(RelationGetRelationName(rel),
 											namespaceId,
@@ -815,6 +819,12 @@ DefineIndex(Oid tableId,
 											stmt->excludeOpNames,
 											stmt->primary,
 											stmt->isconstraint);
+	if (concurrent)
+		auxIndexRelationName = ChooseRelationName(indexRelationName,
+												  NULL,
+												  "ccaux",
+												  namespaceId,
+												  false);
 
 	/*
 	 * look up the access method, verify it can handle the requested features
@@ -904,7 +914,7 @@ DefineIndex(Oid tableId,
 							  stmt->nulls_not_distinct,
 							  !concurrent,
 							  concurrent,
-							  amissummarizing);
+							  amissummarizing, false);
 
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
@@ -1595,6 +1605,28 @@ DefineIndex(Oid tableId,
 
 		return address;
 	}
+	else
+	{
+		Oid			save_userid;
+		int			save_sec_context;
+		int			save_nestlevel;
+
+		GetUserIdAndSecContext(&save_userid, &save_sec_context);
+		SetUserIdAndSecContext(rel->rd_rel->relowner,
+							   save_sec_context | SECURITY_RESTRICTED_OPERATION);
+		save_nestlevel = NewGUCNestLevel();
+		RestrictSearchPath();
+
+		auxIndexRelationId = index_concurrently_create_copy(rel, indexRelationId,
+														    tablespaceId, auxIndexRelationName, true);
+		ObjectAddressSet(auxAddress, RelationRelationId, auxIndexRelationId);
+
+		/* Roll back any GUC changes executed by index functions */
+		AtEOXact_GUC(false, save_nestlevel);
+
+		/* Restore userid and security context */
+		SetUserIdAndSecContext(save_userid, save_sec_context);
+	}
 
 	/* save lockrelid and locktag for below, then close rel */
 	heaprelid = rel->rd_lockInfo.lockRelId;
@@ -1626,6 +1658,20 @@ DefineIndex(Oid tableId,
 
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+
+	{
+		StartTransactionCommand();
+		if (safe_index)
+			set_indexsafe_procflags();
+		WaitForLockers(heaplocktag, ShareLock, true);
+
+		PushActiveSnapshot(GetTransactionSnapshot());
+		index_concurrently_build(tableId, auxIndexRelationId);
+		PopActiveSnapshot();
+
+		CommitTransactionCommand();
+	}
+
 	StartTransactionCommand();
 
 	/* Tell concurrent index builds to ignore us, if index qualifies */
@@ -1713,6 +1759,12 @@ DefineIndex(Oid tableId,
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
 	WaitForLockers(heaplocktag, ShareLock, true);
+	index_set_state_flags(auxIndexRelationId, INDEX_DROP_CLEAR_READY);
+	CommitTransactionCommand();
+
+	StartTransactionCommand();
+	if (safe_index)
+		set_indexsafe_procflags();
 
 	/*
 	 * Now take the "reference snapshot" that will be used by validate_index()
@@ -1735,7 +1787,7 @@ DefineIndex(Oid tableId,
 	/*
 	 * Scan the index and the heap, insert any missing index entries.
 	 */
-	validate_index(tableId, indexRelationId, snapshot);
+	validate_index(tableId, indexRelationId, auxIndexRelationId, snapshot);
 
 	/*
 	 * Drop the reference snapshot.  We must do this before waiting out other
@@ -1758,6 +1810,32 @@ DefineIndex(Oid tableId,
 	 * transaction, and do our wait before any snapshot has been taken in it.
 	 */
 	CommitTransactionCommand();
+
+	{
+		StartTransactionCommand();
+		if (safe_index)
+			set_indexsafe_procflags();
+		index_concurrently_set_dead(tableId, auxIndexRelationId);
+		CommitTransactionCommand();
+	}
+
+	WaitForLockers(heaplocktag, ShareLock, true);
+
+
+	{
+		StartTransactionCommand();
+		if (safe_index)
+			set_indexsafe_procflags();
+
+		/*
+		 * Use PERFORM_DELETION_CONCURRENT_LOCK so that index_drop() uses the
+		 * right lock level.
+		 */
+		performDeletion(&auxAddress, DROP_RESTRICT,
+								 PERFORM_DELETION_CONCURRENT_LOCK | PERFORM_DELETION_INTERNAL);
+		CommitTransactionCommand();
+	}
+
 	StartTransactionCommand();
 
 	/* Tell concurrent index builds to ignore us, if index qualifies */
@@ -3431,6 +3509,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	typedef struct ReindexIndexInfo
 	{
 		Oid			indexId;
+		Oid			auxIndexId;
 		Oid			tableId;
 		Oid			amId;
 		bool		safe;		/* for set_indexsafe_procflags */
@@ -3558,6 +3637,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 						oldcontext = MemoryContextSwitchTo(private_context);
 
 						idx = palloc_object(ReindexIndexInfo);
+						idx->auxIndexId = InvalidOid;
 						idx->indexId = cellOid;
 						/* other fields set later */
 
@@ -3608,6 +3688,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 							oldcontext = MemoryContextSwitchTo(private_context);
 
 							idx = palloc_object(ReindexIndexInfo);
+							idx->auxIndexId = InvalidOid;
 							idx->indexId = cellOid;
 							indexIds = lappend(indexIds, idx);
 							/* other fields set later */
@@ -3689,6 +3770,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 				 * that invalid indexes are allowed here.
 				 */
 				idx = palloc_object(ReindexIndexInfo);
+				idx->auxIndexId = InvalidOid;
 				idx->indexId = relationOid;
 				indexIds = lappend(indexIds, idx);
 				/* other fields set later */
@@ -3754,15 +3836,18 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	foreach(lc, indexIds)
 	{
 		char	   *concurrentName;
+		char	   *auxConcurrentName;
 		ReindexIndexInfo *idx = lfirst(lc);
 		ReindexIndexInfo *newidx;
 		Oid			newIndexId;
+		Oid			auxIndexId;
 		Relation	indexRel;
 		Relation	heapRel;
 		Oid			save_userid;
 		int			save_sec_context;
 		int			save_nestlevel;
 		Relation	newIndexRel;
+		Relation	auxIndexRel;
 		LockRelId  *lockrelid;
 		Oid			tablespaceid;
 
@@ -3805,6 +3890,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 											"ccnew",
 											get_rel_namespace(indexRel->rd_index->indrelid),
 											false);
+		auxConcurrentName = ChooseRelationName(get_rel_name(idx->indexId),
+											NULL,
+											"ccaux",
+											get_rel_namespace(indexRel->rd_index->indrelid),
+											false);
 
 		/* Choose the new tablespace, indexes of toast tables are not moved */
 		if (OidIsValid(params->tablespaceOid) &&
@@ -3817,13 +3907,21 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		newIndexId = index_concurrently_create_copy(heapRel,
 													idx->indexId,
 													tablespaceid,
-													concurrentName);
+													concurrentName,
+													false);
+
+		auxIndexId = index_concurrently_create_copy(heapRel,
+													idx->indexId,
+													tablespaceid,
+													auxConcurrentName,
+													true);
 
 		/*
 		 * Now open the relation of the new index, a session-level lock is
 		 * also needed on it.
 		 */
 		newIndexRel = index_open(newIndexId, ShareUpdateExclusiveLock);
+		auxIndexRel = index_open(auxIndexId, ShareUpdateExclusiveLock);
 
 		/*
 		 * Save the list of OIDs and locks in private context
@@ -3831,6 +3929,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		oldcontext = MemoryContextSwitchTo(private_context);
 
 		newidx = palloc_object(ReindexIndexInfo);
+		newidx->auxIndexId = auxIndexId;
 		newidx->indexId = newIndexId;
 		newidx->safe = idx->safe;
 		newidx->tableId = idx->tableId;
@@ -3850,10 +3949,14 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		lockrelid = palloc_object(LockRelId);
 		*lockrelid = newIndexRel->rd_lockInfo.lockRelId;
 		relationLocks = lappend(relationLocks, lockrelid);
+		lockrelid = palloc_object(LockRelId);
+		*lockrelid = auxIndexRel->rd_lockInfo.lockRelId;
+		relationLocks = lappend(relationLocks, lockrelid);
 
 		MemoryContextSwitchTo(oldcontext);
 
 		index_close(indexRel, NoLock);
+		index_close(auxIndexRel, NoLock);
 		index_close(newIndexRel, NoLock);
 
 		/* Roll back any GUC changes executed by index functions */
@@ -3919,6 +4022,35 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+
+	{
+		StartTransactionCommand();
+		WaitForLockersMultiple(lockTags, ShareLock, true);
+		CommitTransactionCommand();
+	}
+
+	foreach(lc, newIndexIds)
+	{
+		ReindexIndexInfo *newidx = lfirst(lc);
+
+		StartTransactionCommand();
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Tell concurrent indexing to ignore us, if index qualifies */
+		if (newidx->safe)
+			set_indexsafe_procflags();
+
+		/* Set ActiveSnapshot since functions in the indexes may need it */
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+		/* Build auxiliary index, it is fast - without any actual heap scan, just an empty index. */
+		index_concurrently_build(newidx->tableId, newidx->auxIndexId);
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+
 	StartTransactionCommand();
 
 	/*
@@ -4000,6 +4132,22 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	WaitForLockersMultiple(lockTags, ShareLock, true);
 	CommitTransactionCommand();
 
+	StartTransactionCommand();
+	/*
+	 * Because this transaction only does catalog manipulations and doesn't do
+	 * any index operations, we can set the PROC_IN_SAFE_IC flag here
+	 * unconditionally.
+	 */
+	set_indexsafe_procflags();
+	foreach(lc, newIndexIds)
+	{
+		ReindexIndexInfo *newidx = lfirst(lc);
+		CHECK_FOR_INTERRUPTS();
+
+		index_set_state_flags(newidx->auxIndexId, INDEX_DROP_CLEAR_READY);
+	}
+	CommitTransactionCommand();
+
 	foreach(lc, newIndexIds)
 	{
 		ReindexIndexInfo *newidx = lfirst(lc);
@@ -4037,7 +4185,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		progress_vals[3] = newidx->amId;
 		pgstat_progress_update_multi_param(4, progress_index, progress_vals);
 
-		validate_index(newidx->tableId, newidx->indexId, snapshot);
+		validate_index(newidx->tableId, newidx->indexId, newidx->auxIndexId, snapshot);
 
 		/*
 		 * We can now do away with our active snapshot, we still need to save
@@ -4117,6 +4265,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 * valid and the old one as not valid.
 		 */
 		index_concurrently_swap(newidx->indexId, oldidx->indexId, oldName);
+		index_set_state_flags(newidx->auxIndexId, INDEX_DROP_CLEAR_VALID);
 
 		/*
 		 * Invalidate the relcache for the table, so that after this commit
@@ -4171,6 +4320,16 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		index_concurrently_set_dead(oldidx->tableId, oldidx->indexId);
 	}
 
+	foreach(lc, newIndexIds)
+	{
+		ReindexIndexInfo *newidx = lfirst(lc);
+
+		CHECK_FOR_INTERRUPTS();
+
+		index_concurrently_set_dead(newidx->tableId, newidx->auxIndexId);
+	}
+
+
 	/* Commit this transaction to make the updates visible. */
 	CommitTransactionCommand();
 	StartTransactionCommand();
@@ -4203,6 +4362,18 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 			object.classId = RelationRelationId;
 			object.objectId = idx->indexId;
+			object.objectSubId = 0;
+
+			add_exact_object_address(&object, objects);
+		}
+
+		foreach(lc, newIndexIds)
+		{
+			ReindexIndexInfo *idx = lfirst(lc);
+			ObjectAddress object;
+
+			object.classId = RelationRelationId;
+			object.objectId = idx->auxIndexId;
 			object.objectSubId = 0;
 
 			add_exact_object_address(&object, objects);
