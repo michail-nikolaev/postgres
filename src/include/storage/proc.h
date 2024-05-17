@@ -180,6 +180,7 @@ struct PGPROC
 								 * starting our xact, excluding LAZY VACUUM:
 								 * vacuum must not remove tuples deleted by
 								 * xid >= xmin ! */
+	TransactionId catalogXmin;
 
 	int			pid;			/* Backend's process ID; 0 if prepared xact */
 
