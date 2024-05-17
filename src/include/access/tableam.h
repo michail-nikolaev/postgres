@@ -703,7 +703,7 @@ typedef struct TableAmRoutine
 										   TableScanDesc scan);
 
 	/* see table_index_validate_scan for reference about parameters */
-	void		(*index_validate_scan) (Relation table_rel,
+	TransactionId 		(*index_validate_scan) (Relation table_rel,
 										Relation index_rel,
 										Relation aux_index_rel,
 										struct IndexInfo *index_info,
@@ -1838,7 +1838,7 @@ table_index_build_range_scan(Relation table_rel,
  *
  * See validate_index() for an explanation.
  */
-static inline void
+static inline TransactionId
 table_index_validate_scan(Relation table_rel,
 								   Relation index_rel,
 								   Relation aux_index_rel,
@@ -1848,7 +1848,7 @@ table_index_validate_scan(Relation table_rel,
 								   struct ValidateIndexState *state,
 								   struct ValidateIndexState *auxstate)
 {
-	table_rel->rd_tableam->index_validate_scan(table_rel,
+	return table_rel->rd_tableam->index_validate_scan(table_rel,
 														index_rel,
 														aux_index_rel,
 														index_info,

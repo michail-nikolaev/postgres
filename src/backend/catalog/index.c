@@ -67,6 +67,7 @@
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -3297,14 +3298,16 @@ IndexCheckExclusion(Relation heapRelation,
  * making the table append-only by setting use_fsm).  However that would
  * add yet more locking issues.
  */
-void
-validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
+TransactionId
+validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 {
 	Relation	heapRelation,
 			indexRelation,
 			auxIndexRelation;
 	IndexInfo  *indexInfo,
 				*auxIndexInfo;
+	Snapshot snapshot;
+	TransactionId limitXmin;
 	IndexVacuumInfo ivinfo, auxivinfo;
 	ValidateIndexState state, auxState;
 	Oid			save_userid;
@@ -3326,6 +3329,27 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 
 		pgstat_progress_update_multi_param(5, progress_index, progress_vals);
 	}
+
+	/*
+	 * Now take the "reference snapshot" that will be used by validate_index()
+	 * to filter candidate tuples.  Beware!  There might still be snapshots in
+	 * use that treat some transaction as in-progress that our reference
+	 * snapshot treats as committed.  If such a recently-committed transaction
+	 * deleted tuples in the table, we will not include them in the index; yet
+	 * those transactions which see the deleting one as still-in-progress will
+	 * expect such tuples to be there once we mark the index as valid.
+	 *
+	 * We solve this by waiting for all endangered transactions to exit before
+	 * we mark the index as valid.
+	 *
+	 * We also set ActiveSnapshot to this snap, since functions in indexes may
+	 * need a snapshot.
+	 */
+	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(snapshot);
+
+	Assert(!TransactionIdIsValid(MyProc->catalogXmin));
+	Assert(TransactionIdIsValid(MyProc->xmin));
 
 	/* Open and lock the parent heap relation */
 	heapRelation = table_open(heapId, ShareUpdateExclusiveLock);
@@ -3378,6 +3402,16 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 	 * is a pass-by-reference type on all platforms, whereas int8 is
 	 * pass-by-value on most platforms.
 	 */
+	auxState.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
+											   InvalidOid, false,
+											   maintenance_work_mem,
+											   NULL, TUPLESORT_NONE);
+	auxState.htups = auxState.itups = auxState.tups_inserted = 0;
+
+	(void) index_bulk_delete(&auxivinfo, NULL,
+							 validate_index_callback, (void *) &auxState);
+
+
 	state.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
 											InvalidOid, false,
 											maintenance_work_mem,
@@ -3388,14 +3422,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 	(void) index_bulk_delete(&ivinfo, NULL,
 							 validate_index_callback, (void *) &state);
 
-	auxState.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
-											InvalidOid, false,
-											maintenance_work_mem,
-											NULL, TUPLESORT_NONE);
-	auxState.htups = auxState.itups = auxState.tups_inserted = 0;
 
-	(void) index_bulk_delete(&auxivinfo, NULL,
-							 validate_index_callback, (void *) &auxState);
 
 	/* Execute the sort */
 	{
@@ -3415,18 +3442,39 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 	tuplesort_performsort(auxState.tuplesort);
 
 	/*
+	 * Drop the reference snapshot.  We must do this before waiting out other
+	 * snapshot holders, else we will deadlock against other processes also
+	 * doing CREATE INDEX CONCURRENTLY, which would see our snapshot as one
+	 * they must wait for.  But first, save the snapshot's xmin to use as
+	 * limitXmin for GetCurrentVirtualXIDs().
+ 	*/
+	limitXmin = snapshot->xmin;
+	if (safeIndex)
+	{
+		PopActiveSnapshot();
+		UnregisterSnapshot(snapshot);
+		snapshot = InvalidSnapshot;
+	}
+
+	/*
 	 * Now scan the heap and "merge" it with the index
 	 */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN);
-	table_index_validate_scan(heapRelation,
+	limitXmin = TransactionIdOlder(limitXmin, table_index_validate_scan(heapRelation,
 							  indexRelation,
 							  auxIndexRelation,
 							  indexInfo,
 							  auxIndexInfo,
-							  snapshot,
+							  snapshot, /* may be invalid */
 							  &state,
-							  &auxState);
+							  &auxState));
+
+	if (snapshot != InvalidSnapshot)
+	{
+		PopActiveSnapshot();
+		UnregisterSnapshot(snapshot);
+	}
 
 	/* Done with tuplesort object */
 	tuplesort_end(state.tuplesort);
@@ -3450,6 +3498,10 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 	index_close(auxIndexRelation, NoLock);
 	index_close(indexRelation, NoLock);
 	table_close(heapRelation, NoLock);
+
+	Assert(TransactionIdIsValid(MyProc->catalogXmin));
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	return limitXmin;
 }
 
 /*
