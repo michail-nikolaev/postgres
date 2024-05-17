@@ -1784,6 +1784,9 @@ DefineIndex(Oid tableId,
 	snapshot = RegisterSnapshot(GetTransactionSnapshot());
 	PushActiveSnapshot(snapshot);
 
+	Assert(!TransactionIdIsValid(MyProc->catalogXmin));
+	Assert(TransactionIdIsValid(MyProc->xmin));
+
 	/*
 	 * Scan the index and the heap, insert any missing index entries.
 	 */
@@ -1800,6 +1803,9 @@ DefineIndex(Oid tableId,
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snapshot);
+
+	Assert(TransactionIdIsValid(MyProc->catalogXmin));
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	/*
 	 * The snapshot subsystem could still contain registered snapshots that
@@ -1843,7 +1849,7 @@ DefineIndex(Oid tableId,
 		set_indexsafe_procflags();
 
 	/* We should now definitely not be advertising any xmin. */
-	Assert(MyProc->xmin == InvalidTransactionId);
+	Assert(MyProc->xmin == InvalidTransactionId && MyProc->catalogXmin == InvalidTransactionId);
 
 	/*
 	 * The index is now valid in the sense that it contains all currently
@@ -4174,6 +4180,9 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
 		PushActiveSnapshot(snapshot);
 
+		Assert(!TransactionIdIsValid(MyProc->catalogXmin));
+		Assert(TransactionIdIsValid(MyProc->xmin));
+
 		/*
 		 * Update progress for the index to build, with the correct parent
 		 * table involved.
@@ -4195,6 +4204,9 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 		PopActiveSnapshot();
 		UnregisterSnapshot(snapshot);
+
+		Assert(TransactionIdIsValid(MyProc->catalogXmin));
+		Assert(!TransactionIdIsValid(MyProc->xmin));
 
 		/*
 		 * To ensure no deadlocks, we must commit and start yet another
@@ -4622,7 +4634,8 @@ set_indexsafe_procflags(void)
 	 * otherwise, concurrent processes could see an Xmin that moves backwards.
 	 */
 	Assert(MyProc->xid == InvalidTransactionId &&
-		   MyProc->xmin == InvalidTransactionId);
+		   MyProc->xmin == InvalidTransactionId &&
+		   MyProc->catalogXmin == InvalidTransactionId);
 
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 	MyProc->statusFlags |= PROC_IN_SAFE_IC;
