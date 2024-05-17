@@ -41,6 +41,7 @@
 #include "storage/bufpage.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -1749,7 +1750,10 @@ heapam_index_build_range_scan(Relation heapRelation,
 	return reltuples;
 }
 
-static void
+
+#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL		500	/* 500 ms */
+
+static TransactionId
 heapam_index_validate_scan(Relation table_rel,
 						   Relation index_rel,
 						   Relation  aux_index_rel,
@@ -1760,6 +1764,7 @@ heapam_index_validate_scan(Relation table_rel,
 						   struct ValidateIndexState *aux_state)
 {
 	IndexFetchTableData *fetch;
+	TransactionId limitXmin;
 
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
@@ -1780,6 +1785,21 @@ heapam_index_validate_scan(Relation table_rel,
 					fetched;
 	bool			tuplesort_empty = false,
 					auxtuplesort_empty = false;
+	instr_time		snapshotTime,
+					currentTime,
+					elapsed;
+	bool			reset_snapshots;
+
+	reset_snapshots = (snapshot == InvalidSnapshot);
+	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xmin));
+
+	if (reset_snapshots)
+	{
+		snapshot = RegisterSnapshot(GetLatestSnapshot());
+		PushActiveSnapshot(snapshot);
+		INSTR_TIME_SET_CURRENT(snapshotTime);
+	}
+	limitXmin = snapshot->xmin;
 
 	/*
 	 * sanity checks
@@ -1810,6 +1830,25 @@ heapam_index_validate_scan(Relation table_rel,
 	while (!auxtuplesort_empty)
 	{
 		CHECK_FOR_INTERRUPTS();
+
+		if (reset_snapshots)
+		{
+			INSTR_TIME_SET_CURRENT(currentTime);
+			elapsed = currentTime;
+			INSTR_TIME_SUBTRACT(elapsed, snapshotTime);
+			if (INSTR_TIME_GET_MILLISEC(elapsed) >= VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL)
+			{
+				PopActiveSnapshot();
+				UnregisterSnapshot(snapshot);
+				Assert(!TransactionIdIsValid(MyProc->xmin));
+
+				snapshot = RegisterSnapshot(GetLatestSnapshot());
+				PushActiveSnapshot(snapshot);
+				limitXmin = TransactionIdOlder(limitXmin, snapshot->xmin);
+				INSTR_TIME_SET_CURRENT(snapshotTime);
+				currentTime = snapshotTime;
+			}
+		}
 
 		{
 			Datum ts_val;
@@ -1922,6 +1961,13 @@ heapam_index_validate_scan(Relation table_rel,
 	FreeExecutorState(estate);
 
 	heapam_index_fetch_end(fetch);
+
+	if (reset_snapshots)
+	{
+		PopActiveSnapshot();
+		UnregisterSnapshot(snapshot);
+	}
+	return limitXmin;
 }
 
 /*
