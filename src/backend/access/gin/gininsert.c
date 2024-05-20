@@ -17,6 +17,7 @@
 #include "access/gin_private.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
@@ -380,6 +381,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * prefers to receive tuples in TID order.
 	 */
 	reltuples = table_index_build_scan(heap, index, indexInfo, false, true,
+									   ResetSnapshotsAllowed(indexInfo),
 									   ginBuildCallback, (void *) &buildstate,
 									   NULL);
 

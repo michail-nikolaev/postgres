@@ -1328,6 +1328,12 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 }
 
 void
+heap_setscansnapshot(TableScanDesc sscan, Snapshot snapshot)
+{
+	sscan->rs_snapshot = snapshot;
+}
+
+void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 				  ItemPointer maxtid)
 {

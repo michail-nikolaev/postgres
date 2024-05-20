@@ -1493,9 +1493,7 @@ index_concurrently_build(Oid heapRelationId,
 	int			save_nestlevel;
 	Relation	indexRelation;
 	IndexInfo  *indexInfo;
-
-	/* This had better make sure that a snapshot is active */
-	Assert(ActiveSnapshotSet());
+	Snapshot 	snapshot = InvalidSnapshot;
 
 	/* Open and lock the parent heap relation */
 	heapRel = table_open(heapRelationId, ShareUpdateExclusiveLock);
@@ -1513,6 +1511,12 @@ index_concurrently_build(Oid heapRelationId,
 
 	indexRelation = index_open(indexRelationId, RowExclusiveLock);
 
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	Assert(!TransactionIdIsValid(MyProc->xid));
+
+	/* BuildIndexInfo requires as snapshot for expressions and predicates */
+	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(snapshot);
 	/*
 	 * We have to re-build the IndexInfo struct, since it was lost in the
 	 * commit of the transaction where this concurrent index was created at
@@ -1523,11 +1527,24 @@ index_concurrently_build(Oid heapRelationId,
 	indexInfo->ii_Concurrent = true;
 	indexInfo->ii_BrokenHotChain = false;
 
+	if (IsSafeConcurrentIndex(indexInfo))
+	{
+		PopActiveSnapshot();
+		UnregisterSnapshot(snapshot);
+		snapshot = InvalidSnapshot;
+	}
+
 	/* Now build the index */
-	index_build(heapRel, indexRelation, indexInfo, false, !indexInfo->ii_Auxiliary);
+ 	index_build(heapRel, indexRelation, indexInfo, false, !indexInfo->ii_Auxiliary);
+
+	if (snapshot != InvalidSnapshot)
+	{
+		UnregisterSnapshot(snapshot);
+		PopActiveSnapshot();
+	}
 
 	/* Roll back any GUC changes executed by index functions */
-	AtEOXact_GUC(false, save_nestlevel);
+ 	AtEOXact_GUC(false, save_nestlevel);
 
 	/* Restore userid and security context */
 	SetUserIdAndSecContext(save_userid, save_sec_context);
@@ -2504,6 +2521,20 @@ BuildDummyIndexInfo(Relation index)
 	return ii;
 }
 
+bool
+IsSafeConcurrentIndex(const IndexInfo* indexInfo)
+{
+	return indexInfo->ii_Concurrent &&
+			(indexInfo->ii_Predicate == NULL) &&
+			(indexInfo->ii_Expressions == NULL);
+}
+
+bool
+ResetSnapshotsAllowed(const IndexInfo* indexInfo)
+{
+	return IsSafeConcurrentIndex(indexInfo) && !TransactionIdIsValid(MyProc->xid);
+}
+
 /*
  * CompareIndexInfo
  *		Return whether the properties of two indexes (in different tables)
@@ -3410,6 +3441,15 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 
 	(void) index_bulk_delete(&auxivinfo, NULL,
 							 validate_index_callback, (void *) &auxState);
+
+	if (safeIndex)
+	{
+		PopActiveSnapshot();
+		UnregisterSnapshot(snapshot);
+
+		snapshot = RegisterSnapshot(GetLatestSnapshot());
+		PushActiveSnapshot(snapshot);
+	}
 
 
 	state.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,

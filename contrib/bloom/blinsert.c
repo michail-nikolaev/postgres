@@ -141,6 +141,7 @@ blbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	/* Do the heap scan */
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
+									   IsSafeConcurrentIndex(indexInfo),
 									   bloomBuildCallback, (void *) &buildstate,
 									   NULL);
 

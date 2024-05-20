@@ -1173,6 +1173,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 							  bool allow_sync,
 							  bool anyvisible,
 							  bool progress,
+							  bool reset_snapshots,
 							  BlockNumber start_blockno,
 							  BlockNumber numblocks,
 							  IndexBuildCallback callback,
@@ -1192,10 +1193,12 @@ heapam_index_build_range_scan(Relation heapRelation,
 	ExprContext *econtext;
 	Snapshot	snapshot;
 	bool		need_unregister_snapshot = false;
+	bool		need_pop_active_snapshot = false;
 	TransactionId OldestXmin;
 	BlockNumber previous_blkno = InvalidBlockNumber;
 	BlockNumber root_blkno = InvalidBlockNumber;
 	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
+	int blocks_seen = 0;
 
 	if (indexInfo->ii_Auxiliary)
 	{
@@ -1219,6 +1222,9 @@ heapam_index_build_range_scan(Relation heapRelation,
 	 * only one of those is requested.
 	 */
 	Assert(!(anyvisible && checking_uniqueness));
+	Assert(!(anyvisible && reset_snapshots));
+	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xmin));
+	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xid));
 
 	/*
 	 * Need an EState for evaluation of index expressions and partial-index
@@ -1259,9 +1265,17 @@ heapam_index_build_range_scan(Relation heapRelation,
 		{
 			snapshot = RegisterSnapshot(GetTransactionSnapshot());
 			need_unregister_snapshot = true;
+			if (reset_snapshots)
+			{
+				PushActiveSnapshot(snapshot);
+				need_pop_active_snapshot = true;
+			}
 		}
 		else
+		{
+			Assert(!reset_snapshots);
 			snapshot = SnapshotAny;
+		}
 
 		scan = table_beginscan_strat(heapRelation,	/* relation */
 									 snapshot,	/* snapshot */
@@ -1281,6 +1295,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 		 */
 		Assert(!IsBootstrapProcessingMode());
 		Assert(allow_sync);
+		Assert(!reset_snapshots);
 		snapshot = scan->rs_snapshot;
 	}
 
@@ -1337,6 +1352,19 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 		CHECK_FOR_INTERRUPTS();
 
+		if (reset_snapshots && (blocks_seen % 64 == 0))
+		{
+			PopActiveSnapshot();
+			UnregisterSnapshot(snapshot);
+
+			Assert(!TransactionIdIsValid(MyProc->xmin));
+			Assert(!TransactionIdIsValid(MyProc->xid));
+
+			snapshot = RegisterSnapshot(GetLatestSnapshot());
+			PushActiveSnapshot(snapshot);
+			heap_setscansnapshot(scan, snapshot);
+		}
+
 		/* Report scan progress, if asked to. */
 		if (progress)
 		{
@@ -1390,6 +1418,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 
 			root_blkno = hscan->rs_cblock;
+			blocks_seen++;
 		}
 
 		if (snapshot == SnapshotAny)
@@ -1731,6 +1760,8 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 	table_endscan(scan);
 
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 	/* we can now forget our snapshot, if set and registered by us */
 	if (need_unregister_snapshot)
 		UnregisterSnapshot(snapshot);
@@ -1837,6 +1868,7 @@ heapam_index_validate_scan(Relation table_rel,
 				PopActiveSnapshot();
 				UnregisterSnapshot(snapshot);
 				Assert(!TransactionIdIsValid(MyProc->xmin));
+				Assert(!TransactionIdIsValid(MyProc->xid));
 
 				snapshot = RegisterSnapshot(GetLatestSnapshot());
 				PushActiveSnapshot(snapshot);
