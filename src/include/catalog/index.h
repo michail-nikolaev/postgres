@@ -127,6 +127,10 @@ extern IndexInfo *BuildIndexInfo(Relation index);
 
 extern IndexInfo *BuildDummyIndexInfo(Relation index);
 
+extern bool IsSafeConcurrentIndex(const IndexInfo* indexInfo);
+
+extern bool ResetSnapshotsAllowed(const IndexInfo* indexInfo);
+
 extern bool CompareIndexInfo(const IndexInfo *info1, const IndexInfo *info2,
 							 const Oid *collations1, const Oid *collations2,
 							 const Oid *opfamilies1, const Oid *opfamilies2,

@@ -58,7 +58,7 @@ if(!defined($pid = fork())) {
 } elsif ($pid == 0) {
 
 	$node->pgbench(
-		'--no-vacuum --client=10 --transactions=2500',
+		'--no-vacuum --client=10 --transactions=25000',
 		0,
 		[qr{actually processed}],
 		[qr{^$}],
@@ -136,8 +136,24 @@ if(!defined($pid = fork())) {
 
 		my ($result, $stdout, $stderr, $n, $stderr_saved);
 		$n = 0;
+
+		$node->psql('postgres', q(CREATE FUNCTION predicate_stable() RETURNS bool IMMUTABLE
+                                  LANGUAGE plpgsql AS $$
+                                  BEGIN
+                                    EXECUTE 'SELECT txid_current()';
+                                    RETURN true;
+                                  END; $$;));
+
+		$node->psql('postgres', q(CREATE FUNCTION predicate_const(integer) RETURNS bool IMMUTABLE
+                                  LANGUAGE plpgsql AS $$
+                                  BEGIN
+                                    RETURN MOD($1, 2) = 0;
+                                  END; $$;));
 		while (1)
 		{
+
+			($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=0);));
+			is($result, '0', 'ALTER TABLE is correct');
 
 			if (1)
 			{
@@ -161,10 +177,22 @@ if(!defined($pid = fork())) {
 
 			if (1)
 			{
-				($result, $stdout, $stderr) = $node->psql('postgres', q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at);));
+				my $variant = int(rand(4));
+				my $sql;
+				if ($variant == 0) {
+					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at););
+				} elsif ($variant == 1) {
+					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_stable(););
+				} elsif ($variant == 2) {
+					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE MOD(i, 2) = 0;);
+				} elsif ($variant == 3) {
+					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_const(i););
+				} else { diag("wrong variant"); }
+
+				($result, $stdout, $stderr) = $node->psql('postgres', $sql);
 				is($result, '0', 'CREATE INDEX is correct');
 				$stderr_saved = $stderr;
-				#ok(send_query_and_wait(\%psql, q[CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at);], qr/^CREATE INDEX$/m), 'CREATE INDEX');
+				#ok(send_query_and_wait(\%psql, q[CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_stable();], qr/^CREATE INDEX$/m), 'CREATE INDEX');
 
 				#sleep(rand() * 0.5);
 

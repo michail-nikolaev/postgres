@@ -1663,9 +1663,7 @@ DefineIndex(Oid tableId,
 			set_indexsafe_procflags();
 		WaitForLockers(heaplocktag, ShareLock, true);
 
-		PushActiveSnapshot(GetTransactionSnapshot());
 		index_concurrently_build(tableId, auxIndexRelationId);
-		PopActiveSnapshot();
 
 		CommitTransactionCommand();
 	}
@@ -1729,14 +1727,8 @@ DefineIndex(Oid tableId,
 	 * HOT-chain or the extension of the chain is HOT-safe for this index.
 	 */
 
-	/* Set ActiveSnapshot since functions in the indexes may need it */
-	PushActiveSnapshot(GetTransactionSnapshot());
-
 	/* Perform concurrent build of index */
 	index_concurrently_build(tableId, indexRelationId);
-
-	/* we can do away with our snapshot */
-	PopActiveSnapshot();
 
 	/*
 	 * Commit this transaction to make the indisready update visible.
@@ -4008,13 +4000,9 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		if (newidx->safe)
 			set_indexsafe_procflags();
 
-		/* Set ActiveSnapshot since functions in the indexes may need it */
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		/* Build auxiliary index, it is fast - without any actual heap scan, just an empty index. */
 		index_concurrently_build(newidx->tableId, newidx->auxIndexId);
 
-		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
 
@@ -4058,9 +4046,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		if (newidx->safe)
 			set_indexsafe_procflags();
 
-		/* Set ActiveSnapshot since functions in the indexes may need it */
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		/*
 		 * Update progress for the index to build, with the correct parent
 		 * table involved.
@@ -4075,7 +4060,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/* Perform concurrent build of new index */
 		index_concurrently_build(newidx->tableId, newidx->indexId);
 
-		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
 

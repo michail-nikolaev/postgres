@@ -20,6 +20,7 @@
 #include "access/spgist_private.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
@@ -121,7 +122,7 @@ spgbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 											  "SP-GiST build temporary context",
 											  ALLOCSET_DEFAULT_SIZES);
 
-	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
+	reltuples = table_index_build_scan(heap, index, indexInfo, true, true, ResetSnapshotsAllowed(indexInfo),
 									   spgistBuildCallback, (void *) &buildstate,
 									   NULL);
 

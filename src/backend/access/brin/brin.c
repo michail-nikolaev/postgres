@@ -1219,6 +1219,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		 * generate summary for the same range twice).
 		 */
 		reltuples = table_index_build_scan(heap, index, indexInfo, false, true,
+										   ResetSnapshotsAllowed(indexInfo),
 										   brinbuildCallback, (void *) state, NULL);
 
 		/*
@@ -1804,6 +1805,7 @@ summarize_range(IndexInfo *indexInfo, BrinBuildState *state, Relation heapRel,
 	 */
 	state->bs_currRangeStart = heapBlk;
 	table_index_build_range_scan(heapRel, state->bs_irel, indexInfo, false, true, false,
+								 false,
 								 heapBlk, scanNumBlks,
 								 brinbuildCallback, (void *) state, NULL);
 
@@ -2819,6 +2821,7 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 									ParallelTableScanFromBrinShared(brinshared));
 
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
+									   false,
 									   brinbuildCallbackParallel, state, scan);
 
 	/* insert the last item */
