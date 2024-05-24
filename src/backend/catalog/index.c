@@ -1527,7 +1527,7 @@ index_concurrently_build(Oid heapRelationId,
 	indexInfo->ii_Concurrent = true;
 	indexInfo->ii_BrokenHotChain = false;
 
-	if (IsSafeConcurrentIndex(indexInfo))
+	if (ResetSnapshotsAllowed(indexInfo))
 	{
 		PopActiveSnapshot();
 		UnregisterSnapshot(snapshot);
@@ -2522,17 +2522,11 @@ BuildDummyIndexInfo(Relation index)
 }
 
 bool
-IsSafeConcurrentIndex(const IndexInfo* indexInfo)
-{
-	return indexInfo->ii_Concurrent &&
-			(indexInfo->ii_Predicate == NULL) &&
-			(indexInfo->ii_Expressions == NULL);
-}
-
-bool
 ResetSnapshotsAllowed(const IndexInfo* indexInfo)
 {
-	return IsSafeConcurrentIndex(indexInfo) && !TransactionIdIsValid(MyProc->xid);
+	return indexInfo->ii_Concurrent &&
+		   (indexInfo->ii_Predicate == NULL) &&
+		   (indexInfo->ii_Expressions == NULL) && !TransactionIdIsValid(MyProc->xid);
 }
 
 /*
