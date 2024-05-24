@@ -1227,7 +1227,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 	 */
 	Assert(!(anyvisible && checking_uniqueness));
 	Assert(!(anyvisible && reset_snapshots));
-	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xmin));
+	Assert(!reset_snapshots || ThereAreNoPriorRegisteredSnapshots());
 	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xid));
 
 	/*
@@ -1299,8 +1299,9 @@ heapam_index_build_range_scan(Relation heapRelation,
 		 */
 		Assert(!IsBootstrapProcessingMode());
 		Assert(allow_sync);
-		Assert(!reset_snapshots);
 		snapshot = scan->rs_snapshot;
+		if (reset_snapshots && !HaveRegisteredSnapshot())
+			snapshot = RegisterSnapshot(snapshot);
 	}
 
 	hscan = (HeapScanDesc) scan;

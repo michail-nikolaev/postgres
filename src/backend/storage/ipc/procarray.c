@@ -2139,7 +2139,7 @@ GetSnapshotDataReuse(Snapshot snapshot, bool catalog)
 	}
 
 	if (!TransactionIdIsValid(TransactionXmin))
-		TransactionXmin = snapshot->xmin;;
+		TransactionXmin = snapshot->xmin;
 
 	RecentXmin = snapshot->xmin;
 	Assert(TransactionIdPrecedesOrEquals(TransactionXmin, RecentXmin));

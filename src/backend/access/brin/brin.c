@@ -64,6 +64,7 @@ typedef struct BrinShared
 	Oid			heaprelid;
 	Oid			indexrelid;
 	bool		isconcurrent;
+	bool		resetsnapshots;
 	BlockNumber pagesPerRange;
 	int			scantuplesortstates;
 
@@ -226,7 +227,7 @@ static void brin_fill_empty_ranges(BrinBuildState *state,
 
 /* parallel index builds */
 static void _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
-								 bool isconcurrent, int request);
+								 bool isconcurrent, bool resetsnapshots, int request);
 static void _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state);
 static Size _brin_parallel_estimate_shared(Relation heap, Snapshot snapshot);
 static double _brin_parallel_heapscan(BrinBuildState *buildstate);
@@ -1158,6 +1159,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 */
 	if (indexInfo->ii_ParallelWorkers > 0)
 		_brin_begin_parallel(state, heap, index, indexInfo->ii_Concurrent,
+							 ResetSnapshotsAllowed(indexInfo),
 							 indexInfo->ii_ParallelWorkers);
 
 	/*
@@ -2352,7 +2354,7 @@ check_null_keys(BrinValues *bval, ScanKey *nullkeys, int nnullkeys)
  */
 static void
 _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
-					 bool isconcurrent, int request)
+					 bool isconcurrent, bool resetsnapshots, int request)
 {
 	ParallelContext *pcxt;
 	int			scantuplesortstates;
@@ -2371,16 +2373,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	leaderparticipates = false;
 #endif
 
-	/*
-	 * Enter parallel mode, and create context for parallel build of brin
-	 * index
-	 */
-	EnterParallelMode();
-	Assert(request > 0);
-	pcxt = CreateParallelContext("postgres", "_brin_parallel_build_main",
-								 request);
-
-	scantuplesortstates = leaderparticipates ? request + 1 : request;
+	Assert(!resetsnapshots || !TransactionIdIsValid(MyProc->xmin));
+	Assert(!resetsnapshots || !TransactionIdIsValid(MyProc->xid));
 
 	/*
 	 * Prepare for scan of the base relation.  In a normal index build, we use
@@ -2393,6 +2387,19 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 		snapshot = SnapshotAny;
 	else
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	if (resetsnapshots)
+		PushActiveSnapshot(snapshot);
+
+	/*
+	 * Enter parallel mode, and create context for parallel build of brin
+	 * index
+	 */
+	EnterParallelMode();
+	Assert(request > 0);
+	pcxt = CreateParallelContext("postgres", "_brin_parallel_build_main",
+								 request);
+
+	scantuplesortstates = leaderparticipates ? request + 1 : request;
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BRIN_SHARED workspace.
@@ -2435,6 +2442,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
+		if (resetsnapshots)
+			PopActiveSnapshot();
 		if (IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
@@ -2448,6 +2457,7 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	brinshared->heaprelid = RelationGetRelid(heap);
 	brinshared->indexrelid = RelationGetRelid(index);
 	brinshared->isconcurrent = isconcurrent;
+	brinshared->resetsnapshots = resetsnapshots;
 	brinshared->scantuplesortstates = scantuplesortstates;
 	brinshared->pagesPerRange = buildstate->bs_pagesPerRange;
 	ConditionVariableInit(&brinshared->workersdonecv);
@@ -2460,7 +2470,7 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 
 	table_parallelscan_initialize(heap,
 								  ParallelTableScanFromBrinShared(brinshared),
-								  snapshot);
+								  resetsnapshots ? InvalidSnapshot : snapshot);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -2506,7 +2516,7 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 		brinleader->nparticipanttuplesorts++;
 	brinleader->brinshared = brinshared;
 	brinleader->sharedsort = sharedsort;
-	brinleader->snapshot = snapshot;
+	brinleader->snapshot = resetsnapshots ? InvalidSnapshot : snapshot;
 	brinleader->walusage = walusage;
 	brinleader->bufferusage = bufferusage;
 
@@ -2520,6 +2530,9 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	/* Save leader state now that it's clear build will be parallel */
 	buildstate->bs_leader = brinleader;
 
+	if (resetsnapshots)
+		WaitForParallelWorkersToAttach(pcxt, true);
+
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
 		_brin_leader_participate_as_worker(buildstate, heap, index);
@@ -2528,7 +2541,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
 	 */
-	WaitForParallelWorkersToAttach(pcxt);
+	if (!resetsnapshots)
+		WaitForParallelWorkersToAttach(pcxt, false);
 }
 
 /*
@@ -2538,6 +2552,7 @@ static void
 _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 {
 	int			i;
+	Snapshot 	snapshot = brinleader->snapshot;
 
 	/* Shutdown worker processes */
 	WaitForParallelWorkersToFinish(brinleader->pcxt);
@@ -2550,8 +2565,14 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(brinleader->snapshot))
-		UnregisterSnapshot(brinleader->snapshot);
+	if (brinleader->brinshared->resetsnapshots)
+	{
+		Assert(snapshot == InvalidSnapshot);
+		snapshot = GetActiveSnapshot();
+		PopActiveSnapshot();
+	}
+	if (IsMVCCSnapshot(snapshot))
+		UnregisterSnapshot(snapshot);
 	DestroyParallelContext(brinleader->pcxt);
 	ExitParallelMode();
 }
@@ -2821,7 +2842,7 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 									ParallelTableScanFromBrinShared(brinshared));
 
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
-									   false,
+									   brinshared->resetsnapshots,
 									   brinbuildCallbackParallel, state, scan);
 
 	/* insert the last item */

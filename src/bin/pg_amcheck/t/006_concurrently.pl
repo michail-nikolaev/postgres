@@ -152,7 +152,11 @@ if(!defined($pid = fork())) {
 		while (1)
 		{
 
-			($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=0);));
+			if (int(rand(2)) == 0) {
+				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=0);));
+			} else {
+				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=4);));
+			}
 			is($result, '0', 'ALTER TABLE is correct');
 
 			if (1)

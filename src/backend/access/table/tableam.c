@@ -149,15 +149,23 @@ table_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan,
 
 	pscan->phs_snapshot_off = snapshot_off;
 
-	if (IsMVCCSnapshot(snapshot))
+
+	if (snapshot == InvalidSnapshot)
+	{
+		pscan->phs_snapshot_any = false;
+		pscan->phs_snapshot_invalid = true;
+	}
+	else if (IsMVCCSnapshot(snapshot))
 	{
 		SerializeSnapshot(snapshot, (char *) pscan + pscan->phs_snapshot_off);
 		pscan->phs_snapshot_any = false;
+		pscan->phs_snapshot_invalid = false;
 	}
 	else
 	{
 		Assert(snapshot == SnapshotAny);
 		pscan->phs_snapshot_any = true;
+		pscan->phs_snapshot_invalid = false;
 	}
 }
 
@@ -170,7 +178,11 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan)
 
 	Assert(RelationGetRelid(relation) == pscan->phs_relid);
 
-	if (!pscan->phs_snapshot_any)
+	if (pscan->phs_snapshot_invalid)
+	{
+		snapshot = GetActiveSnapshot();
+	}
+	else if (!pscan->phs_snapshot_any)
 	{
 		/* Snapshot was serialized -- restore it */
 		snapshot = RestoreSnapshot((char *) pscan + pscan->phs_snapshot_off);
