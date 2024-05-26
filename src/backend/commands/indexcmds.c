@@ -1208,7 +1208,8 @@ DefineIndex(Oid tableId,
 					 coloptions, NULL, reloptions,
 					 flags, constr_flags,
 					 allowSystemTableMods, !check_rights,
-					 &createdConstraintId);
+					 &createdConstraintId,
+					 rel->rd_rel->relpersistence);
 
 	ObjectAddressSet(address, RelationRelationId, indexRelationId);
 
@@ -1615,8 +1616,8 @@ DefineIndex(Oid tableId,
 		save_nestlevel = NewGUCNestLevel();
 		RestrictSearchPath();
 
-		auxIndexRelationId = index_concurrently_create_copy(rel, indexRelationId,
-														    tablespaceId, auxIndexRelationName, true);
+		auxIndexRelationId = index_concurrently_create_aux(rel, indexRelationId,
+													tablespaceId, auxIndexRelationName);
 		ObjectAddressSet(auxAddress, RelationRelationId, auxIndexRelationId);
 
 		/* Roll back any GUC changes executed by index functions */
@@ -3866,14 +3867,12 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		newIndexId = index_concurrently_create_copy(heapRel,
 													idx->indexId,
 													tablespaceid,
-													concurrentName,
-													false);
+													concurrentName);
 
-		auxIndexId = index_concurrently_create_copy(heapRel,
+		auxIndexId = index_concurrently_create_aux(heapRel,
 													idx->indexId,
 													tablespaceid,
-													auxConcurrentName,
-													true);
+													auxConcurrentName);
 
 		/*
 		 * Now open the relation of the new index, a session-level lock is

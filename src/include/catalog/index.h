@@ -44,6 +44,8 @@ typedef struct ReindexParams
 #define REINDEXOPT_MISSING_OK 	0x04	/* skip missing relations */
 #define REINDEXOPT_CONCURRENTLY	0x08	/* concurrent mode */
 
+#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL		500	/* 500 ms */
+
 /* state info for validate_index bulkdelete callback */
 typedef struct ValidateIndexState
 {
@@ -87,7 +89,8 @@ extern Oid	index_create(Relation heapRelation,
 						 bits16 constr_flags,
 						 bool allow_system_table_mods,
 						 bool is_internal,
-						 Oid *constraintId);
+						 Oid *constraintId,
+						 char relpersistence);
 
 #define	INDEX_CONSTR_CREATE_MARK_AS_PRIMARY	(1 << 0)
 #define	INDEX_CONSTR_CREATE_DEFERRABLE		(1 << 1)
@@ -98,8 +101,12 @@ extern Oid	index_create(Relation heapRelation,
 extern Oid	index_concurrently_create_copy(Relation heapRelation,
 										   Oid oldIndexId,
 										   Oid tablespaceOid,
-										   const char *newName,
-										   bool auxiliary);
+										   const char *newName);
+
+extern Oid	index_concurrently_create_aux(Relation heapRelation,
+											 Oid mainIndexId,
+											 Oid tablespaceOid,
+											 const char *newName);
 
 extern void index_concurrently_build(Oid heapRelationId,
 									 Oid indexRelationId);

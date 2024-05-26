@@ -743,7 +743,8 @@ index_create(Relation heapRelation,
 			 bits16 constr_flags,
 			 bool allow_system_table_mods,
 			 bool is_internal,
-			 Oid *constraintId)
+			 Oid *constraintId,
+			 char relpersistence)
 {
 	Oid			heapRelationId = RelationGetRelid(heapRelation);
 	Relation	pg_class;
@@ -754,7 +755,6 @@ index_create(Relation heapRelation,
 	bool		is_exclusion;
 	Oid			namespaceId;
 	int			i;
-	char		relpersistence;
 	bool		isprimary = (flags & INDEX_CREATE_IS_PRIMARY) != 0;
 	bool		invalid = (flags & INDEX_CREATE_INVALID) != 0;
 	bool		concurrent = (flags & INDEX_CREATE_CONCURRENT) != 0;
@@ -784,7 +784,6 @@ index_create(Relation heapRelation,
 	namespaceId = RelationGetNamespace(heapRelation);
 	shared_relation = heapRelation->rd_rel->relisshared;
 	mapped_relation = RelationIsMapped(heapRelation);
-	relpersistence = heapRelation->rd_rel->relpersistence;
 
 	/*
 	 * check parameters
@@ -1297,8 +1296,7 @@ index_create(Relation heapRelation,
  */
 Oid
 index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
-							   Oid tablespaceOid, const char *newName,
-							   bool auxiliary)
+							   Oid tablespaceOid, const char *newName)
 {
 	Relation	indexRelation;
 	IndexInfo  *oldInfo,
@@ -1397,8 +1395,7 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							false,	/* not ready for inserts */
 							true,
 							indexRelation->rd_indam->amsummarizing,
-							auxiliary);
-	//  TODO: skip expressions, covering and other
+							false);
 
 	/*
 	 * Extract the list of column names and the column numbers for the new
@@ -1463,12 +1460,151 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							  0,
 							  true, /* allow table to be a system catalog? */
 							  false,	/* is_internal? */
-							  NULL);
+							  NULL,
+							  heapRelation->rd_rel->relpersistence);
 
 	/* Close the relations used and clean up */
 	index_close(indexRelation, NoLock);
 	ReleaseSysCache(indexTuple);
 	ReleaseSysCache(classTuple);
+
+	return newIndexId;
+}
+
+Oid
+index_concurrently_create_aux(Relation heapRelation, Oid mainIndexId,
+							   Oid tablespaceOid, const char *newName)
+{
+	Relation	indexRelation;
+	IndexInfo  *oldInfo,
+			*newInfo;
+	Oid			newIndexId = InvalidOid;
+	HeapTuple	indexTuple;
+
+	List	   *indexColNames = NIL;
+	List	   *indexExprs = NIL;
+	List	   *indexPreds = NIL;
+
+	Oid *auxOpclassIds;
+	int16 *auxColoptions;
+
+	indexRelation = index_open(mainIndexId, RowExclusiveLock);
+
+	/* The new index needs some information from the old index */
+	oldInfo = BuildIndexInfo(indexRelation);
+
+	/*
+	 * Build of an auxiliary index with exclusion constraints is not
+	 * supported.
+	 */
+	if (oldInfo->ii_ExclusionOps != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("auxiliary index creation for exclusion constraints is not supported")));
+
+	/* Get the array of class and column options IDs from index info */
+	indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(mainIndexId));
+	if (!HeapTupleIsValid(indexTuple))
+		elog(ERROR, "cache lookup failed for index %u", mainIndexId);
+
+
+	/*
+	 * Fetch the list of expressions and predicates directly from the
+	 * catalogs.  This cannot rely on the information from IndexInfo of the
+	 * old index as these have been flattened for the planner.
+	 */
+	if (oldInfo->ii_Expressions != NIL)
+	{
+		Datum		exprDatum;
+		char	   *exprString;
+
+		exprDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+										   Anum_pg_index_indexprs);
+		exprString = TextDatumGetCString(exprDatum);
+		indexExprs = (List *) stringToNode(exprString);
+		pfree(exprString);
+	}
+	if (oldInfo->ii_Predicate != NIL)
+	{
+		Datum		predDatum;
+		char	   *predString;
+
+		predDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+										   Anum_pg_index_indpred);
+		predString = TextDatumGetCString(predDatum);
+		indexPreds = (List *) stringToNode(predString);
+
+		/* Also convert to implicit-AND format */
+		indexPreds = make_ands_implicit((Expr *) indexPreds);
+		pfree(predString);
+	}
+
+	/*
+	 * Build the index information for the new index.  Note that rebuild of
+	 * indexes with exclusion constraints is not supported, hence there is no
+	 * need to fill all the ii_Exclusion* fields.
+	 */
+	newInfo = makeIndexInfo(oldInfo->ii_NumIndexAttrs,
+							oldInfo->ii_NumIndexKeyAttrs,
+							JAM_AM_OID,
+							indexExprs,
+							indexPreds,
+							false, /* aux index are not unique */
+							oldInfo->ii_NullsNotDistinct,
+							false,	/* not ready for inserts */
+							true,
+							false, /* aux are not summarizing */
+							true);
+
+	/*
+	 * Extract the list of column names and the column numbers for the new
+	 * index information.  All this information will be used for the index
+	 * creation.
+	 */
+	for (int i = 0; i < oldInfo->ii_NumIndexAttrs; i++)
+	{
+		TupleDesc	indexTupDesc = RelationGetDescr(indexRelation);
+		Form_pg_attribute att = TupleDescAttr(indexTupDesc, i);
+
+		indexColNames = lappend(indexColNames, NameStr(att->attname));
+		newInfo->ii_IndexAttrNumbers[i] = oldInfo->ii_IndexAttrNumbers[i];
+	}
+
+	auxOpclassIds = palloc0(sizeof(Oid) * newInfo->ii_NumIndexAttrs);
+	auxColoptions = palloc0(sizeof(int16) * newInfo->ii_NumIndexAttrs);
+
+	for (int i = 0; i < newInfo->ii_NumIndexAttrs; i++)
+	{
+		auxOpclassIds[i] = RECORD_JAM_OPS_OID;
+		auxColoptions[i] = 0;
+	}
+
+	newIndexId = index_create(heapRelation,
+							  newName,
+							  InvalidOid,    /* indexRelationId */
+							  InvalidOid,    /* parentIndexRelid */
+							  InvalidOid,    /* parentConstraintId */
+							  InvalidRelFileNumber, /* relFileNumber */
+							  newInfo,
+							  indexColNames,
+							  JAM_AM_OID,
+							  tablespaceOid,
+							  indexRelation->rd_indcollation,
+							  auxOpclassIds,
+							  NULL,
+							  auxColoptions,
+							  NULL,
+							  (Datum) 0,
+							  INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT,
+							  0,
+							  true, /* allow table to be a system catalog? */
+							  false,    /* is_internal? */
+							  NULL,
+							  RELPERSISTENCE_UNLOGGED);
+
+	/* Close the relations used and clean up */
+	index_close(indexRelation, NoLock);
+	ReleaseSysCache(indexTuple);
 
 	return newIndexId;
 }
@@ -3336,6 +3472,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
+	int			main_work_mem_part = (maintenance_work_mem * 8) / 10;
 
 	{
 		const int	progress_index[] = {
@@ -3415,6 +3552,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	ivinfo.message_level = DEBUG2;
 	ivinfo.num_heap_tuples = heapRelation->rd_rel->reltuples;
 	ivinfo.strategy = NULL;
+	ivinfo.validate_index = true;
 
 	auxivinfo = ivinfo;
 	auxivinfo.index = auxIndexRelation;
@@ -3427,7 +3565,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	 */
 	auxState.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
 											   InvalidOid, false,
-											   maintenance_work_mem,
+											   maintenance_work_mem - main_work_mem_part,
 											   NULL, TUPLESORT_NONE);
 	auxState.htups = auxState.itups = auxState.tups_inserted = 0;
 
@@ -3446,7 +3584,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 
 	state.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
 											InvalidOid, false,
-											maintenance_work_mem,
+											main_work_mem_part,
 											NULL, TUPLESORT_NONE);
 	state.htups = state.itups = state.tups_inserted = 0;
 
