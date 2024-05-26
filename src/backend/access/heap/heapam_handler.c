@@ -1198,12 +1198,11 @@ heapam_index_build_range_scan(Relation heapRelation,
 	BlockNumber previous_blkno = InvalidBlockNumber;
 	BlockNumber root_blkno = InvalidBlockNumber;
 	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
-	int blocks_seen = 0;
+	instr_time		snapshotTime,
+					currentTime,
+					elapsed;
 
-	if (indexInfo->ii_Auxiliary)
-	{
-		return 0;
-	}
+	Assert(!indexInfo->ii_Auxiliary);
 
 	/*
 	 * sanity checks
@@ -1297,8 +1296,13 @@ heapam_index_build_range_scan(Relation heapRelation,
 		Assert(allow_sync);
 		snapshot = scan->rs_snapshot;
 		if (reset_snapshots && !HaveRegisteredSnapshot())
+		{
 			snapshot = RegisterSnapshot(snapshot);
+			need_unregister_snapshot = true;
+		}
 	}
+	if (reset_snapshots)
+		INSTR_TIME_SET_CURRENT(snapshotTime);
 
 	hscan = (HeapScanDesc) scan;
 
@@ -1353,17 +1357,26 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 		CHECK_FOR_INTERRUPTS();
 
-		if (reset_snapshots && (blocks_seen % 64 == 0))
+		if (reset_snapshots)
 		{
-			PopActiveSnapshot();
-			UnregisterSnapshot(snapshot);
+			INSTR_TIME_SET_CURRENT(currentTime);
+			elapsed = currentTime;
+			INSTR_TIME_SUBTRACT(elapsed, snapshotTime);
+			if (INSTR_TIME_GET_MILLISEC(elapsed) >= VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL)
+			{
+				PopActiveSnapshot();
+				UnregisterSnapshot(snapshot);
 
-			Assert(!TransactionIdIsValid(MyProc->xmin));
-			Assert(!TransactionIdIsValid(MyProc->xid));
+				Assert(!TransactionIdIsValid(MyProc->xmin));
+				Assert(!TransactionIdIsValid(MyProc->xid));
 
-			snapshot = RegisterSnapshot(GetLatestSnapshot());
-			PushActiveSnapshot(snapshot);
-			heap_setscansnapshot(scan, snapshot);
+				snapshot = RegisterSnapshot(GetLatestSnapshot());
+				PushActiveSnapshot(snapshot);
+				heap_setscansnapshot(scan, snapshot);
+
+				INSTR_TIME_SET_CURRENT(snapshotTime);
+				currentTime = snapshotTime;
+			}
 		}
 
 		/* Report scan progress, if asked to. */
@@ -1419,7 +1432,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 
 			root_blkno = hscan->rs_cblock;
-			blocks_seen++;
 		}
 
 		if (snapshot == SnapshotAny)
@@ -1777,9 +1789,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 	return reltuples;
 }
-
-
-#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL		500	/* 500 ms */
 
 static TransactionId
 heapam_index_validate_scan(Relation table_rel,

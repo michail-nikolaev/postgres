@@ -161,7 +161,7 @@ if(!defined($pid = fork())) {
 
 			if (1)
 			{
-				($result, $stdout, $stderr) = $node->psql('postgres', q(REINDEX INDEX CONCURRENTLY idx;));
+				($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT pg_sleep(0);REINDEX INDEX CONCURRENTLY idx;));
 				is($result, '0', 'REINDEX is correct');
 				#ok(send_query_and_wait(\%psql, q[REINDEX INDEX CONCURRENTLY idx;], qr/^REINDEX$/m), 'REINDEX');
 				if ($result) {
@@ -181,7 +181,7 @@ if(!defined($pid = fork())) {
 
 			if (1)
 			{
-				my $variant = int(rand(4));
+				my $variant = int(rand(6));
 				my $sql;
 				if ($variant == 0) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at););
@@ -191,6 +191,10 @@ if(!defined($pid = fork())) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE MOD(i, 2) = 0;);
 				} elsif ($variant == 3) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_const(i););
+				} elsif ($variant == 4) {
+					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(predicate_const(i)););
+				} elsif ($variant == 5) {
+					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, predicate_const(i), updated_at) WHERE predicate_const(i););
 				} else { diag("wrong variant"); }
 
 				($result, $stdout, $stderr) = $node->psql('postgres', $sql);
