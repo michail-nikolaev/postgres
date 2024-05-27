@@ -3195,7 +3195,8 @@ ProcNumberGetProc(ProcNumber procNumber)
  */
 void
 ProcNumberGetTransactionIds(ProcNumber procNumber, TransactionId *xid,
-							TransactionId *xmin, int *nsubxid, bool *overflowed)
+							TransactionId *xmin, TransactionId *catalogXmin,
+							int *nsubxid, bool *overflowed)
 {
 	PGPROC	   *proc;
 
@@ -3214,7 +3215,8 @@ ProcNumberGetTransactionIds(ProcNumber procNumber, TransactionId *xid,
 	if (proc->pid != 0)
 	{
 		*xid = proc->xid;
-		*xmin = TransactionIdOlder(proc->xmin, proc->catalogXmin);
+		*xmin = proc->xmin;
+		*catalogXmin = proc->catalogXmin;
 		*nsubxid = proc->subxidStatus.count;
 		*overflowed = proc->subxidStatus.overflowed;
 	}
