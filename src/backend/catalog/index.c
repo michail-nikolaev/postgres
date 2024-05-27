@@ -2661,6 +2661,7 @@ ResetSnapshotsAllowed(const IndexInfo* indexInfo)
 {
 	return indexInfo->ii_Concurrent &&
 		   (indexInfo->ii_Predicate == NULL) &&
+		   (!indexInfo->ii_Unique) &&
 		   (indexInfo->ii_Expressions == NULL) && !TransactionIdIsValid(MyProc->xid);
 }
 
