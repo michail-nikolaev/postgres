@@ -195,6 +195,8 @@ if(!defined($pid = fork())) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(predicate_const(i)););
 				} elsif ($variant == 5) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, predicate_const(i), updated_at) WHERE predicate_const(i););
+				} elsif ($variant == 5) {
+					$sql = q(CREATE UNIQUE INDEX CONCURRENTLY idx_2 ON tbl(i););
 				} else { diag("wrong variant"); }
 
 				($result, $stdout, $stderr) = $node->psql('postgres', $sql);
