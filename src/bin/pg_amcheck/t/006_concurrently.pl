@@ -58,7 +58,7 @@ if(!defined($pid = fork())) {
 } elsif ($pid == 0) {
 
 	$node->pgbench(
-		'--no-vacuum --client=10 --transactions=25000',
+		'--no-vacuum --client=10 --transactions=10000',
 		0,
 		[qr{actually processed}],
 		[qr{^$}],
@@ -115,7 +115,12 @@ if(!defined($pid = fork())) {
 		shmwrite($shmem_id, "fail", 0, $shmem_size) or die "Can't shmwrite: $!";
 	}
 
-	sleep(2);
+	my $pg_bench_fork_flag;
+	while (1) {
+		shmread($shmem_id, $pg_bench_fork_flag, 0, $shmem_size) or die "Can't shmread: $!";
+		sleep(0.1);
+		last if $pg_bench_fork_flag eq "stop";
+	}
 } else {
 	my $pg_bench_fork_flag;
 	shmread($shmem_id, $pg_bench_fork_flag, 0, $shmem_size) or die "Can't shmread: $!";
@@ -237,7 +242,6 @@ if(!defined($pid = fork())) {
 				($result, $stdout, $stderr) = $node->psql('postgres', q(DROP INDEX CONCURRENTLY idx_2;));
 				is($result, '0', 'DROP INDEX is correct');
 			}
-
 			shmread($shmem_id, $pg_bench_fork_flag, 0, $shmem_size) or die "Can't shmread: $!";
 			last if $pg_bench_fork_flag ne "wait";
 		}
@@ -248,12 +252,14 @@ if(!defined($pid = fork())) {
 
 		is($pg_bench_fork_flag, "done", "pg_bench_fork_flag is correct");
 	};
-
+	sleep(10);
 
 	$child->finalize();
 	$child->summary();
 	$node->stop;
 	done_testing();
+
+	shmwrite($shmem_id, "stop", 0, $shmem_size) or die "Can't shmwrite: $!";
 }
 
 # Send query, wait until string matches

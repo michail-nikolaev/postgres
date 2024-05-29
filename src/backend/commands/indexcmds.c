@@ -1663,7 +1663,6 @@ DefineIndex(Oid tableId,
 		StartTransactionCommand();
 		if (safe_index)
 			set_indexsafe_procflags();
-		WaitForLockers(heaplocktag, ShareLock, true);
 
 		index_concurrently_build(tableId, auxIndexRelationId);
 
@@ -3985,12 +3984,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 
-	{
-		StartTransactionCommand();
-		WaitForLockersMultiple(lockTags, ShareLock, true);
-		CommitTransactionCommand();
-	}
-
 	foreach(lc, newIndexIds)
 	{
 		ReindexIndexInfo *newidx = lfirst(lc);
@@ -4133,7 +4126,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 		limitXmin = validate_index(newidx->tableId, newidx->indexId, newidx->auxIndexId, newidx->safe);
 
-		Assert(TransactionIdIsValid(MyProc->catalogXmin));
 		Assert(!newidx->safe || !TransactionIdIsValid(MyProc->xmin));
 
 		/*
