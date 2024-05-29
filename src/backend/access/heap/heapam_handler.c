@@ -1371,6 +1371,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 				PopActiveSnapshot();
 				UnregisterSnapshot(snapshot);
 
+				InvalidateCatalogSnapshotConditionally();
 				Assert(!TransactionIdIsValid(MyProc->xmin));
 				Assert(!TransactionIdIsValid(MyProc->xid));
 
@@ -1379,7 +1380,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 				heap_setscansnapshot(scan, snapshot);
 
 				INSTR_TIME_SET_CURRENT(snapshotTime);
-				currentTime = snapshotTime;
 			}
 		}
 
@@ -1881,6 +1881,8 @@ heapam_index_validate_scan(Relation table_rel,
 			{
 				PopActiveSnapshot();
 				UnregisterSnapshot(snapshot);
+
+				InvalidateCatalogSnapshotConditionally();
 				Assert(!TransactionIdIsValid(MyProc->xmin));
 				Assert(!TransactionIdIsValid(MyProc->xid));
 
@@ -1888,7 +1890,6 @@ heapam_index_validate_scan(Relation table_rel,
 				PushActiveSnapshot(snapshot);
 				limitXmin = TransactionIdOlder(limitXmin, snapshot->xmin);
 				INSTR_TIME_SET_CURRENT(snapshotTime);
-				currentTime = snapshotTime;
 			}
 		}
 
