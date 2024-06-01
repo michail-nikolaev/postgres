@@ -701,7 +701,7 @@ ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
 		Assert(!proc->subxidStatus.overflowed);
 
 		proc->vxid.lxid = InvalidLocalTransactionId;
-		proc->xmin = proc->catalogXmin = InvalidTransactionId;
+		proc->xmin = InvalidTransactionId;
 
 		/* be sure this is cleared in abort */
 		proc->delayChkptFlags = 0;
@@ -743,7 +743,7 @@ ProcArrayEndTransactionInternal(PGPROC *proc, TransactionId latestXid)
 	ProcGlobal->xids[pgxactoff] = InvalidTransactionId;
 	proc->xid = InvalidTransactionId;
 	proc->vxid.lxid = InvalidLocalTransactionId;
-	proc->xmin = proc->catalogXmin = InvalidTransactionId;
+	proc->xmin = InvalidTransactionId;
 
 	/* be sure this is cleared in abort */
 	proc->delayChkptFlags = 0;
@@ -930,7 +930,7 @@ ProcArrayClearTransaction(PGPROC *proc)
 	proc->xid = InvalidTransactionId;
 
 	proc->vxid.lxid = InvalidLocalTransactionId;
-	proc->xmin = proc->catalogXmin = InvalidTransactionId;
+	proc->xmin = InvalidTransactionId;
 	proc->recoveryConflictPending = false;
 
 	Assert(!(proc->statusFlags & PROC_VACUUM_STATE_MASK));
@@ -1739,6 +1739,8 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 	bool		in_recovery = RecoveryInProgress();
 	TransactionId *other_xids = ProcGlobal->xids;
 
+	/* inferred after ProcArrayLock is released */
+	h->catalog_oldest_nonremovable = InvalidTransactionId;
 
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
 
@@ -1759,7 +1761,6 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 
 		h->oldest_considered_running = initial;
 		h->shared_oldest_nonremovable = initial;
-		h->catalog_oldest_nonremovable = initial;
 		h->data_oldest_nonremovable = initial;
 
 		/*
@@ -1795,13 +1796,10 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 		int8		statusFlags = ProcGlobal->statusFlags[index];
 		TransactionId xid;
 		TransactionId xmin;
-		TransactionId catalogXmin;
-		TransactionId olderXmin;
 
 		/* Fetch xid just once - see GetNewTransactionId */
 		xid = UINT32_ACCESS_ONCE(other_xids[index]);
 		xmin = UINT32_ACCESS_ONCE(proc->xmin);
-		catalogXmin = UINT32_ACCESS_ONCE(proc->catalogXmin);
 
 		/*
 		 * Consider both the transaction's Xmin, and its Xid.
@@ -1811,13 +1809,10 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 		 * some not-yet-set Xmin.
 		 */
 		xmin = TransactionIdOlder(xmin, xid);
-		catalogXmin = TransactionIdOlder(catalogXmin, xid);
 
 		/* if neither is set, this proc doesn't influence the horizon */
-		if (!TransactionIdIsValid(xmin) && !TransactionIdIsValid(catalogXmin))
+		if (!TransactionIdIsValid(xmin))
 			continue;
-
-		olderXmin = TransactionIdOlder(xmin, catalogXmin);
 
 		/*
 		 * Don't ignore any procs when determining which transactions might be
@@ -1826,7 +1821,7 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 		 * include them here as well..
 		 */
 		h->oldest_considered_running =
-			TransactionIdOlder(h->oldest_considered_running, olderXmin);
+			TransactionIdOlder(h->oldest_considered_running, xmin);
 
 		/*
 		 * Skip over backends either vacuuming (which is ok with rows being
@@ -1838,7 +1833,7 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 
 		/* shared tables need to take backends in all databases into account */
 		h->shared_oldest_nonremovable =
-			TransactionIdOlder(h->shared_oldest_nonremovable, olderXmin);
+			TransactionIdOlder(h->shared_oldest_nonremovable, xmin);
 
 		/*
 		 * Normally sessions in other databases are ignored for anything but
@@ -1864,12 +1859,8 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			(statusFlags & PROC_AFFECTS_ALL_HORIZONS) ||
 			in_recovery)
 		{
-			if (TransactionIdIsValid(xmin))
-				h->data_oldest_nonremovable =
-					TransactionIdOlder(h->data_oldest_nonremovable, xmin);
-			if (TransactionIdIsValid(olderXmin))
-				h->catalog_oldest_nonremovable =
-						TransactionIdOlder(h->catalog_oldest_nonremovable, olderXmin);
+			h->data_oldest_nonremovable =
+				TransactionIdOlder(h->data_oldest_nonremovable, xmin);
 		}
 	}
 
@@ -1894,8 +1885,6 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			TransactionIdOlder(h->shared_oldest_nonremovable, kaxmin);
 		h->data_oldest_nonremovable =
 			TransactionIdOlder(h->data_oldest_nonremovable, kaxmin);
-		h->catalog_oldest_nonremovable =
-			TransactionIdOlder(h->catalog_oldest_nonremovable, kaxmin);
 		/* temp relations cannot be accessed in recovery */
 	}
 
@@ -1923,7 +1912,7 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 	h->shared_oldest_nonremovable =
 		TransactionIdOlder(h->shared_oldest_nonremovable,
 						   h->slot_catalog_xmin);
-
+	h->catalog_oldest_nonremovable = h->data_oldest_nonremovable;
 	h->catalog_oldest_nonremovable =
 		TransactionIdOlder(h->catalog_oldest_nonremovable,
 						   h->slot_catalog_xmin);
@@ -2103,16 +2092,13 @@ GetMaxSnapshotSubxidCount(void)
  * least in the case we already hold a snapshot), but that's for another day.
  */
 static bool
-GetSnapshotDataReuse(Snapshot snapshot, bool catalog)
+GetSnapshotDataReuse(Snapshot snapshot)
 {
 	uint64		curXactCompletionCount;
 
 	Assert(LWLockHeldByMe(ProcArrayLock));
 
 	if (unlikely(snapshot->snapXactCompletionCount == 0))
-		return false;
-
-	if (unlikely(snapshot->catalog != catalog))
 		return false;
 
 	curXactCompletionCount = TransamVariables->xactCompletionCount;
@@ -2139,19 +2125,8 @@ GetSnapshotDataReuse(Snapshot snapshot, bool catalog)
 	 * requirement that concurrent GetSnapshotData() calls yield the same
 	 * xmin.
 	 */
-	if (!catalog)
-	{
-		if (!TransactionIdIsValid(MyProc->xmin))
-			MyProc->xmin = snapshot->xmin;
-	}
-	else
-	{
-		if (!TransactionIdIsValid(MyProc->catalogXmin))
-			MyProc->catalogXmin = snapshot->xmin;
-	}
-
-	if (!TransactionIdIsValid(TransactionXmin))
-		TransactionXmin = snapshot->xmin;
+	if (!TransactionIdIsValid(MyProc->xmin))
+		MyProc->xmin = TransactionXmin = snapshot->xmin;
 
 	RecentXmin = snapshot->xmin;
 	Assert(TransactionIdPrecedesOrEquals(TransactionXmin, RecentXmin));
@@ -2198,8 +2173,8 @@ GetSnapshotDataReuse(Snapshot snapshot, bool catalog)
  * Note: this function should probably not be called with an argument that's
  * not statically allocated (see xip allocation below).
  */
-static Snapshot
-GetSnapshotDataImpl(Snapshot snapshot, bool catalog)
+Snapshot
+GetSnapshotData(Snapshot snapshot)
 {
 	ProcArrayStruct *arrayP = procArray;
 	TransactionId *other_xids = ProcGlobal->xids;
@@ -2257,7 +2232,7 @@ GetSnapshotDataImpl(Snapshot snapshot, bool catalog)
 	 */
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
 
-	if (GetSnapshotDataReuse(snapshot, catalog))
+	if (GetSnapshotDataReuse(snapshot))
 	{
 		LWLockRelease(ProcArrayLock);
 		return snapshot;
@@ -2437,18 +2412,8 @@ GetSnapshotDataImpl(Snapshot snapshot, bool catalog)
 	replication_slot_xmin = procArray->replication_slot_xmin;
 	replication_slot_catalog_xmin = procArray->replication_slot_catalog_xmin;
 
-	if (!catalog)
-	{
-		if (!TransactionIdIsValid(MyProc->xmin))
-			MyProc->xmin = xmin;
-	}
-	else
-	{
-		if (!TransactionIdIsValid(MyProc->catalogXmin))
-			MyProc->catalogXmin = xmin;
-	}
-	if (!TransactionIdIsValid(TransactionXmin))
-		TransactionXmin = xmin;
+	if (!TransactionIdIsValid(MyProc->xmin))
+		MyProc->xmin = TransactionXmin = xmin;
 
 	LWLockRelease(ProcArrayLock);
 
@@ -2541,7 +2506,6 @@ GetSnapshotDataImpl(Snapshot snapshot, bool catalog)
 	snapshot->subxcnt = subcount;
 	snapshot->suboverflowed = suboverflowed;
 	snapshot->snapXactCompletionCount = curXactCompletionCount;
-	snapshot->catalog = catalog;
 
 	snapshot->curcid = GetCurrentCommandId(false);
 
@@ -2556,19 +2520,6 @@ GetSnapshotDataImpl(Snapshot snapshot, bool catalog)
 	snapshot->whenTaken = 0;
 
 	return snapshot;
-}
-
-Snapshot
-GetSnapshotData(Snapshot snapshot)
-{
-	return GetSnapshotDataImpl(snapshot, false);
-}
-
-
-Snapshot
-GetCatalogSnapshotData(Snapshot snapshot)
-{
-	return GetSnapshotDataImpl(snapshot, true);
 }
 
 /*
@@ -2641,7 +2592,7 @@ ProcArrayInstallImportedXmin(TransactionId xmin,
 		 * GetSnapshotData first, we'll be overwriting a valid xmin here, so
 		 * we don't check that.)
 		 */
-		MyProc->xmin = MyProc->catalogXmin = TransactionXmin = xmin;
+		MyProc->xmin = TransactionXmin = xmin;
 
 		result = true;
 		break;
@@ -2694,8 +2645,7 @@ ProcArrayInstallRestoredXmin(TransactionId xmin, PGPROC *proc)
 		 * Install xmin and propagate the statusFlags that affect how the
 		 * value is interpreted by vacuum.
 		 */
-		MyProc->xmin = MyProc->catalogXmin = TransactionXmin = xmin;
-
+		MyProc->xmin = TransactionXmin = xmin;
 		MyProc->statusFlags = (MyProc->statusFlags & ~PROC_XMIN_FLAGS) |
 			(proc->statusFlags & PROC_XMIN_FLAGS);
 		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
@@ -3231,7 +3181,7 @@ ProcNumberGetTransactionIds(ProcNumber procNumber, TransactionId *xid,
 	if (proc->pid != 0)
 	{
 		*xid = proc->xid;
-		*xmin = TransactionIdOlder(proc->xmin, proc->catalogXmin);
+		*xmin = proc->xmin;
 		*nsubxid = proc->subxidStatus.count;
 		*overflowed = proc->subxidStatus.overflowed;
 	}
@@ -3406,10 +3356,8 @@ GetCurrentVirtualXIDs(TransactionId limitXmin, bool excludeXmin0,
 		{
 			/* Fetch xmin just once - might change on us */
 			TransactionId pxmin = UINT32_ACCESS_ONCE(proc->xmin);
-			TransactionId pcatalogXmin = UINT32_ACCESS_ONCE(proc->catalogXmin);
-			TransactionId olderpXmin = TransactionIdOlder(pxmin, pcatalogXmin);
 
-			if (excludeXmin0 && !TransactionIdIsValid(olderpXmin))
+			if (excludeXmin0 && !TransactionIdIsValid(pxmin))
 				continue;
 
 			/*
@@ -3417,7 +3365,7 @@ GetCurrentVirtualXIDs(TransactionId limitXmin, bool excludeXmin0,
 			 * hasn't set xmin yet will not be rejected by this test.
 			 */
 			if (!TransactionIdIsValid(limitXmin) ||
-				TransactionIdPrecedesOrEquals(olderpXmin, limitXmin))
+				TransactionIdPrecedesOrEquals(pxmin, limitXmin))
 			{
 				VirtualTransactionId vxid;
 
@@ -3508,8 +3456,6 @@ GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)
 		{
 			/* Fetch xmin just once - can't change on us, but good coding */
 			TransactionId pxmin = UINT32_ACCESS_ONCE(proc->xmin);
-			TransactionId catalogpXmin = UINT32_ACCESS_ONCE(proc->catalogXmin);
-			TransactionId oldestpXmin = TransactionIdOlder(pxmin, catalogpXmin);
 
 			/*
 			 * We ignore an invalid pxmin because this means that backend has
@@ -3520,7 +3466,7 @@ GetConflictingVirtualXIDs(TransactionId limitXmin, Oid dbOid)
 			 * test here.
 			 */
 			if (!TransactionIdIsValid(limitXmin) ||
-				(TransactionIdIsValid(oldestpXmin) && !TransactionIdFollows(oldestpXmin, limitXmin)))
+				(TransactionIdIsValid(pxmin) && !TransactionIdFollows(pxmin, limitXmin)))
 			{
 				VirtualTransactionId vxid;
 

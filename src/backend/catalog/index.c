@@ -3673,8 +3673,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	index_close(indexRelation, NoLock);
 	table_close(heapRelation, NoLock);
 
-	Assert(TransactionIdIsValid(MyProc->catalogXmin));
-	Assert(!TransactionIdIsValid(MyProc->xmin));
+	Assert(!HaveRegisteredOrActiveSnapshot());
 	return limitXmin;
 }
 

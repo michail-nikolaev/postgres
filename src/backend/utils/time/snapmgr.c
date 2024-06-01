@@ -324,16 +324,6 @@ GetOldestSnapshot(void)
 		RegisteredLSN = OldestRegisteredSnapshot->lsn;
 	}
 
-	if (CatalogSnapshot != NULL)
-	{
-		if (OldestRegisteredSnapshot == NULL ||
-					TransactionIdPrecedes(CatalogSnapshot->xmin, OldestRegisteredSnapshot->xmin))
-		{
-			OldestRegisteredSnapshot = CatalogSnapshot;
-			RegisteredLSN = CatalogSnapshot->lsn;
-		}
-	}
-
 	if (OldestActiveSnapshot != NULL)
 	{
 		XLogRecPtr	ActiveLSN = OldestActiveSnapshot->as_snap->lsn;
@@ -390,7 +380,7 @@ GetNonHistoricCatalogSnapshot(Oid relid)
 	if (CatalogSnapshot == NULL)
 	{
 		/* Get new snapshot. */
-		CatalogSnapshot = GetCatalogSnapshotData(&CatalogSnapshotData);
+		CatalogSnapshot = GetSnapshotData(&CatalogSnapshotData);
 
 		/*
 		 * Make sure the catalog snapshot will be accounted for in decisions
@@ -404,7 +394,7 @@ GetNonHistoricCatalogSnapshot(Oid relid)
 		 * NB: it had better be impossible for this to throw error, since the
 		 * CatalogSnapshot pointer is already valid.
 		 */
-		Assert(TransactionIdIsValid(MyProc->catalogXmin));
+		pairingheap_add(&RegisteredSnapshots, &CatalogSnapshot->ph_node);
 	}
 
 	return CatalogSnapshot;
@@ -425,8 +415,9 @@ InvalidateCatalogSnapshot(void)
 {
 	if (CatalogSnapshot)
 	{
+		pairingheap_remove(&RegisteredSnapshots, &CatalogSnapshot->ph_node);
 		CatalogSnapshot = NULL;
-		MyProc->catalogXmin = InvalidTransactionId;
+		SnapshotResetXmin();
 	}
 }
 
@@ -445,7 +436,7 @@ InvalidateCatalogSnapshotConditionally(void)
 {
 	if (CatalogSnapshot &&
 		ActiveSnapshot == NULL &&
-		pairingheap_is_empty(&RegisteredSnapshots))
+		pairingheap_is_singular(&RegisteredSnapshots))
 		InvalidateCatalogSnapshot();
 }
 
@@ -1082,7 +1073,7 @@ AtEOXact_Snapshot(bool isCommit, bool resetXmin)
 	if (resetXmin)
 		SnapshotResetXmin();
 
-	Assert(resetXmin || (MyProc->xmin == InvalidTransactionId && MyProc->catalogXmin == InvalidTransactionId));
+	Assert(resetXmin || MyProc->xmin == InvalidTransactionId);
 }
 
 
@@ -1606,11 +1597,12 @@ DeleteAllExportedSnapshotFiles(void)
 bool
 ThereAreNoPriorRegisteredSnapshots(void)
 {
-	if (pairingheap_is_empty(&RegisteredSnapshots) ||
-		pairingheap_is_singular(&RegisteredSnapshots))
-		return true;
+	if (CatalogSnapshot != NULL)
+		return pairingheap_is_singular(&RegisteredSnapshots) ||
+		pairingheap_is_double(&RegisteredSnapshots);
 
-	return false;
+	return (pairingheap_is_empty(&RegisteredSnapshots) ||
+		pairingheap_is_singular(&RegisteredSnapshots));
 }
 
 /*
@@ -1627,12 +1619,21 @@ HaveRegisteredOrActiveSnapshot(void)
 	if (ActiveSnapshot != NULL)
 		return true;
 
-	return !pairingheap_is_empty(&RegisteredSnapshots);
+	return HaveRegisteredSnapshot();
 }
 
 bool
 HaveRegisteredSnapshot(void)
 {
+	/*
+	 * The catalog snapshot is in RegisteredSnapshots when valid, but can be
+	 * removed at any time due to invalidation processing. If explicitly
+	 * registered more than one snapshot has to be in RegisteredSnapshots.
+	 */
+	if (CatalogSnapshot != NULL &&
+		pairingheap_is_singular(&RegisteredSnapshots))
+		return false;
+
 	return !pairingheap_is_empty(&RegisteredSnapshots);
 }
 
@@ -1801,7 +1802,6 @@ RestoreSnapshot(char *start_address)
 	snapshot->whenTaken = serialized_snapshot.whenTaken;
 	snapshot->lsn = serialized_snapshot.lsn;
 	snapshot->snapXactCompletionCount = 0;
-	snapshot->catalog = false;
 
 	/* Copy XIDs, if present. */
 	if (serialized_snapshot.xcnt > 0)
