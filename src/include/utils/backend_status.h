@@ -266,8 +266,6 @@ typedef struct LocalPgBackendStatus
 	 */
 	TransactionId backend_xmin;
 
-	TransactionId backend_catalog_xmin;
-
 	/*
 	 * Number of cached subtransactions in the current session.
 	 */
