@@ -99,4 +99,7 @@ extern char *pairingheap_dump(pairingheap *heap,
 #define pairingheap_is_singular(h) \
 	((h)->ph_root && (h)->ph_root->first_child == NULL)
 
+#define pairingheap_is_double(h) \
+	((h)->ph_root && (h)->ph_root->first_child && (h)->ph_root->first_child->first_child == NULL)
+
 #endif							/* PAIRINGHEAP_H */

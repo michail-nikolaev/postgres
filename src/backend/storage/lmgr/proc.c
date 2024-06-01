@@ -381,7 +381,7 @@ InitProcess(void)
 	MyProc->fpVXIDLock = false;
 	MyProc->fpLocalTransactionId = InvalidLocalTransactionId;
 	MyProc->xid = InvalidTransactionId;
-	MyProc->xmin = MyProc->catalogXmin = InvalidTransactionId;
+	MyProc->xmin = InvalidTransactionId;
 	MyProc->pid = MyProcPid;
 	MyProc->vxid.procNumber = MyProcNumber;
 	MyProc->vxid.lxid = InvalidLocalTransactionId;
@@ -579,7 +579,7 @@ InitAuxiliaryProcess(void)
 	MyProc->fpVXIDLock = false;
 	MyProc->fpLocalTransactionId = InvalidLocalTransactionId;
 	MyProc->xid = InvalidTransactionId;
-	MyProc->xmin = MyProc->catalogXmin = InvalidTransactionId;
+	MyProc->xmin = InvalidTransactionId;
 	MyProc->vxid.procNumber = INVALID_PROC_NUMBER;
 	MyProc->vxid.lxid = InvalidLocalTransactionId;
 	MyProc->databaseId = InvalidOid;

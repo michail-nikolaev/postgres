@@ -1832,7 +1832,7 @@ heapam_index_validate_scan(Relation table_rel,
 	bool			reset_snapshots;
 
 	reset_snapshots = (snapshot == InvalidSnapshot);
-	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xmin));
+	Assert(!reset_snapshots || !HaveRegisteredOrActiveSnapshot());
 
 	if (reset_snapshots)
 	{

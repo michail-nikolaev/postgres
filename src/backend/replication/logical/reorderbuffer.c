@@ -1823,7 +1823,6 @@ ReorderBufferCopySnap(ReorderBuffer *rb, Snapshot orig_snap,
 	snap->active_count = 1;		/* mark as active so nobody frees it */
 	snap->regd_count = 0;
 	snap->xip = (TransactionId *) (snap + 1);
-	snap->catalog = orig_snap->catalog;
 
 	memcpy(snap->xip, orig_snap->xip, sizeof(TransactionId) * snap->xcnt);
 
