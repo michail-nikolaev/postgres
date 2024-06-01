@@ -70,6 +70,7 @@ typedef struct JamMetaPageData
 {
 	uint32		magickNumber;
 	uint16		lastBlkNo;
+	bool		skipInserts;
 } JamMetaPageData;
 
 /* Magic number to distinguish jam pages from others */
@@ -87,9 +88,10 @@ typedef struct JamTuple
 		- JamPageGetMaxOffset(page) * (sizeof(JamTuple)) \
 		- MAXALIGN(sizeof(JamPageOpaqueData)))
 
-extern void JamFillMetapage(Relation index, Page metaPage);
+extern void JamFillMetapage(Relation index, Page metaPage, bool skipInserts);
 extern void JamInitMetapage(Relation index, ForkNumber forknum);
 extern void JamInitPage(Page page, uint16 flags);
+extern void JamMarkAsSkipInserts(Relation index);
 
 /* index access method interface functions */
 extern bool jamvalidate(Oid opclassoid);

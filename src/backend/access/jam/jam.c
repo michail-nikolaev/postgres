@@ -180,7 +180,7 @@ jamvalidate(Oid opclassoid)
 
 
 void
-JamFillMetapage(Relation index, Page metaPage)
+JamFillMetapage(Relation index, Page metaPage, bool skipInserts)
 {
 	JamMetaPageData *metadata;
 
@@ -188,6 +188,7 @@ JamFillMetapage(Relation index, Page metaPage)
 	metadata = JamPageGetMeta(metaPage);
 	memset(metadata, 0, sizeof(JamMetaPageData));
 	metadata->magickNumber = JAM_MAGICK_NUMBER;
+	metadata->skipInserts = skipInserts;
 	((PageHeader) metaPage)->pd_lower += sizeof(JamMetaPageData);
 }
 
@@ -211,7 +212,7 @@ JamInitMetapage(Relation index, ForkNumber forknum)
 	state = GenericXLogStart(index);
 	metaPage = GenericXLogRegisterBuffer(state, metaBuffer,
 										 GENERIC_XLOG_FULL_IMAGE);
-	JamFillMetapage(index, metaPage);
+	JamFillMetapage(index, metaPage, forknum == INIT_FORKNUM);
 	GenericXLogFinish(state);
 
 	UnlockReleaseBuffer(metaBuffer);
@@ -276,7 +277,7 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 			metaBuffer;
 	Page page;
 	GenericXLogState *state;
-	uint16 prevBlkNo;
+	uint16 blkNo;
 	Assert(indexInfo->ii_Auxiliary);
 
 	insertCtx = AllocSetContextCreate(CurrentMemoryContext,
@@ -294,22 +295,24 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 	{
 		LockBuffer(metaBuffer, BUFFER_LOCK_SHARE);
 		metaData = JamPageGetMeta(BufferGetPage(metaBuffer));
-		prevBlkNo = metaData->lastBlkNo;
-
-		if (metaData->lastBlkNo > 0)
+		if (metaData->skipInserts)
 		{
-			BlockNumber blkno = metaData->lastBlkNo;
-			/* Don't hold metabuffer lock while doing insert */
-			LockBuffer(metaBuffer, BUFFER_LOCK_UNLOCK);
+			UnlockReleaseBuffer(metaBuffer);
+			return false;
+		}
+		blkNo = metaData->lastBlkNo;
+		/* Don't hold metabuffer lock while doing insert */
+		LockBuffer(metaBuffer, BUFFER_LOCK_UNLOCK);
 
-			buffer = ReadBuffer(index, blkno);
+		if (blkNo > 0)
+		{
+			buffer = ReadBuffer(index, blkNo);
 			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
 			state = GenericXLogStart(index);
 			page = GenericXLogRegisterBuffer(state, buffer, 0);
 
-			if (PageIsNew(page))
-				JamInitPage(page, 0);
+			Assert(!PageIsNew(page));
 
 			if (JamPageAddItem(page, itup))
 			{
@@ -325,22 +328,22 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 			/* Didn't fit, must try other pages */
 			GenericXLogAbort(state);
 			UnlockReleaseBuffer(buffer);
-		} else
-		{
-			/* No entries in notFullPage */
-			LockBuffer(metaBuffer, BUFFER_LOCK_UNLOCK);
 		}
 
 		LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
-		metaData = JamPageGetMeta(BufferGetPage(metaBuffer));
-		if (prevBlkNo != metaData->lastBlkNo)
+
+		state = GenericXLogStart(index);
+		metaData = JamPageGetMeta(GenericXLogRegisterBuffer(state, metaBuffer, GENERIC_XLOG_FULL_IMAGE));
+		if (blkNo != metaData->lastBlkNo)
 		{
+			Assert(blkNo < metaData->lastBlkNo);
 			// someone else inserted the new page into the index, lets try again
+			GenericXLogAbort(state);
 			LockBuffer(metaBuffer, BUFFER_LOCK_UNLOCK);
 			continue;
-		} else
+		}
+		else
 		{
-			state = GenericXLogStart(index);
 			/* Must extend the file */
 			buffer = ExtendBufferedRel(BMR_REL(index), MAIN_FORKNUM, NULL,
 									   EB_LOCK_FIRST);
@@ -415,6 +418,8 @@ IndexBulkDeleteResult *jambulkdelete(IndexVacuumInfo *info,
 
 	if (!info->validate_index)
 	{
+		JamMarkAsSkipInserts(index);
+
 		ereport(WARNING, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				errmsg("\"%s\" is not a not implemented, seems like this index need to be dropped", __func__)));
 		return NULL;
@@ -465,9 +470,36 @@ IndexBulkDeleteResult *jambulkdelete(IndexVacuumInfo *info,
 	return stats;
 }
 
+void JamMarkAsSkipInserts(Relation index)
+{
+	JamMetaPageData *metaData;
+	Buffer metaBuffer;
+	Page metaPage;
+	GenericXLogState *state;
+
+	metaBuffer = ReadBuffer(index, JAM_METAPAGE_BLKNO);
+	LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
+
+	state = GenericXLogStart(index);
+	metaPage = GenericXLogRegisterBuffer(state, metaBuffer,
+										 GENERIC_XLOG_FULL_IMAGE);
+	metaData = JamPageGetMeta(metaPage);
+	if (!metaData->skipInserts)
+	{
+		metaData->skipInserts = true;
+		GenericXLogFinish(state);
+	}
+	else
+	{
+		GenericXLogAbort(state);
+	}
+	UnlockReleaseBuffer(metaBuffer);
+}
+
 IndexBulkDeleteResult *jamvacuumcleanup(IndexVacuumInfo *info,
 										IndexBulkDeleteResult *stats)
 {
+	JamMarkAsSkipInserts(info->index);
 	ereport(WARNING, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			errmsg("\"%s\" is not a not implemented, seems like this index need to be dropped", __func__)));
 	return NULL;
