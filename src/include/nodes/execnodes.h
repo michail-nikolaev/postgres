@@ -200,7 +200,6 @@ typedef struct IndexInfo
 	bool		ii_CheckedUnchanged;
 	bool		ii_IndexUnchanged;
 	bool		ii_Concurrent;
-	bool		ii_Auxiliary;
 	bool		ii_BrokenHotChain;
 	bool		ii_Summarizing;
 	int			ii_ParallelWorkers;
