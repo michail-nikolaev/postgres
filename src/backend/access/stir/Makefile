@@ -1,18 +1,18 @@
 #-------------------------------------------------------------------------
 #
 # Makefile--
-#    Makefile for access/jam
+#    Makefile for access/stir
 #
 # IDENTIFICATION
-#    src/backend/access/jam/Makefile
+#    src/backend/access/stir/Makefile
 #
 #-------------------------------------------------------------------------
 
-subdir = src/backend/access/jam
+subdir = src/backend/access/stir
 top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global
 
 OBJS = \
-	jam.o
+	stir.o
 
 include $(top_srcdir)/src/backend/common.mk
