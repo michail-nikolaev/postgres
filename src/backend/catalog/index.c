@@ -1544,7 +1544,7 @@ index_concurrently_create_aux(Relation heapRelation, Oid mainIndexId,
 	 */
 	newInfo = makeIndexInfo(oldInfo->ii_NumIndexAttrs,
 							oldInfo->ii_NumIndexKeyAttrs,
-							JAM_AM_OID,
+							STIR_AM_OID,
 							indexExprs,
 							indexPreds,
 							false, /* aux index are not unique */
@@ -1572,7 +1572,7 @@ index_concurrently_create_aux(Relation heapRelation, Oid mainIndexId,
 
 	for (int i = 0; i < newInfo->ii_NumIndexAttrs; i++)
 	{
-		auxOpclassIds[i] = RECORD_JAM_OPS_OID;
+		auxOpclassIds[i] = RECORD_STIR_OPS_OID;
 		auxColoptions[i] = 0;
 	}
 
@@ -1584,7 +1584,7 @@ index_concurrently_create_aux(Relation heapRelation, Oid mainIndexId,
 							  InvalidRelFileNumber, /* relFileNumber */
 							  newInfo,
 							  indexColNames,
-							  JAM_AM_OID,
+							  STIR_AM_OID,
 							  tablespaceOid,
 							  indexRelation->rd_indcollation,
 							  auxOpclassIds,

@@ -1,18 +1,18 @@
 /*-------------------------------------------------------------------------
  *
- * jam.c
- *	  Implementation of just access method.
+ * stir.c
+ *	  Implementation of Short-Term Index Replacement.
  *
  * Portions Copyright (c) 2024-2024, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *	  src/backend/access/jam/jam.c
+ *	  src/backend/access/stir/stir.c
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
-#include "access/jam.h"
+#include "access/stir.h"
 #include "commands/vacuum.h"
 #include "utils/index_selfuncs.h"
 #include "catalog/pg_opclass.h"
@@ -32,17 +32,17 @@
 #include "utils/fmgrprotos.h"
 
 /*
- * Jam handler function: return IndexAmRoutine with access method parameters
+ * Stir handler function: return IndexAmRoutine with access method parameters
  * and callbacks.
  */
 Datum
-jamhandler(PG_FUNCTION_ARGS)
+stirhandler(PG_FUNCTION_ARGS)
 {
 	IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
-	amroutine->amstrategies = JAM_NSTRATEGIES;
-	amroutine->amsupport = JAM_NPROC;
-	amroutine->amoptsprocnum = JAM_OPTIONS_PROC;
+	amroutine->amstrategies = STIR_NSTRATEGIES;
+	amroutine->amsupport = STIR_NPROC;
+	amroutine->amoptsprocnum = STIR_OPTIONS_PROC;
 	amroutine->amcanorder = false;
 	amroutine->amcanorderbyop = false;
 	amroutine->amcanbackward = false;
@@ -62,24 +62,24 @@ jamhandler(PG_FUNCTION_ARGS)
 			VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_CLEANUP;
 	amroutine->amkeytype = InvalidOid;
 
-	amroutine->ambuild = jambuild;
-	amroutine->ambuildempty = jambuildempty;
-	amroutine->aminsert = jaminsert;
+	amroutine->ambuild = stirbuild;
+	amroutine->ambuildempty = stirbuildempty;
+	amroutine->aminsert = stirinsert;
 	amroutine->aminsertcleanup = NULL;
-	amroutine->ambulkdelete = jambulkdelete;
-	amroutine->amvacuumcleanup = jamvacuumcleanup;
+	amroutine->ambulkdelete = stirbulkdelete;
+	amroutine->amvacuumcleanup = stirvacuumcleanup;
 	amroutine->amcanreturn = NULL;
-	amroutine->amcostestimate = jamcostestimate;
-	amroutine->amoptions = jamoptions;
+	amroutine->amcostestimate = stircostestimate;
+	amroutine->amoptions = stiroptions;
 	amroutine->amproperty = NULL;
 	amroutine->ambuildphasename = NULL;
-	amroutine->amvalidate = jamvalidate;
+	amroutine->amvalidate = stirvalidate;
 	amroutine->amadjustmembers = NULL;
-	amroutine->ambeginscan = jambeginscan;
-	amroutine->amrescan = jamrescan;
+	amroutine->ambeginscan = stirbeginscan;
+	amroutine->amrescan = stirrescan;
 	amroutine->amgettuple = NULL;
 	amroutine->amgetbitmap = NULL;
-	amroutine->amendscan = jamendscan;
+	amroutine->amendscan = stirendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
 	amroutine->amestimateparallelscan = NULL;
@@ -90,7 +90,7 @@ jamhandler(PG_FUNCTION_ARGS)
 }
 
 bool
-jamvalidate(Oid opclassoid)
+stirvalidate(Oid opclassoid)
 {
 	bool result = true;
 	HeapTuple classtup;
@@ -130,39 +130,39 @@ jamvalidate(Oid opclassoid)
 		HeapTuple oprtup = &oprlist->members[i]->tuple;
 		Form_pg_amop oprform = (Form_pg_amop) GETSTRUCT(oprtup);
 
-		/* Check it's allowed strategy for jam */
+		/* Check it's allowed strategy for stir */
 		if (oprform->amopstrategy < 1 ||
-			oprform->amopstrategy > JAM_NSTRATEGIES)
+			oprform->amopstrategy > STIR_NSTRATEGIES)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							errmsg("jam opfamily %s contains operator %s with invalid strategy number %d",
+							errmsg("stir opfamily %s contains operator %s with invalid strategy number %d",
 								   opfamilyname,
 								   format_operator(oprform->amopopr),
 								   oprform->amopstrategy)));
 			result = false;
 		}
 
-		/* jam doesn't support ORDER BY operators */
+		/* stir doesn't support ORDER BY operators */
 		if (oprform->amoppurpose != AMOP_SEARCH ||
 			OidIsValid(oprform->amopsortfamily))
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							errmsg("jam opfamily %s contains invalid ORDER BY specification for operator %s",
+							errmsg("stir opfamily %s contains invalid ORDER BY specification for operator %s",
 								   opfamilyname,
 								   format_operator(oprform->amopopr))));
 			result = false;
 		}
 
-		/* Check operator signature --- same for all jam strategies */
+		/* Check operator signature --- same for all stir strategies */
 		if (!check_amop_signature(oprform->amopopr, BOOLOID,
 								  oprform->amoplefttype,
 								  oprform->amoprighttype))
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							errmsg("jam opfamily %s contains operator %s with wrong signature",
+							errmsg("stir opfamily %s contains operator %s with wrong signature",
 								   opfamilyname,
 								   format_operator(oprform->amopopr))));
 			result = false;
@@ -180,20 +180,20 @@ jamvalidate(Oid opclassoid)
 
 
 void
-JamFillMetapage(Relation index, Page metaPage, bool skipInserts)
+StirFillMetapage(Relation index, Page metaPage, bool skipInserts)
 {
-	JamMetaPageData *metadata;
+	StirMetaPageData *metadata;
 
-	JamInitPage(metaPage, JAM_META);
-	metadata = JamPageGetMeta(metaPage);
-	memset(metadata, 0, sizeof(JamMetaPageData));
-	metadata->magickNumber = JAM_MAGICK_NUMBER;
+	StirInitPage(metaPage, STIR_META);
+	metadata = StirPageGetMeta(metaPage);
+	memset(metadata, 0, sizeof(StirMetaPageData));
+	metadata->magickNumber = STIR_MAGICK_NUMBER;
 	metadata->skipInserts = skipInserts;
-	((PageHeader) metaPage)->pd_lower += sizeof(JamMetaPageData);
+	((PageHeader) metaPage)->pd_lower += sizeof(StirMetaPageData);
 }
 
 void
-JamInitMetapage(Relation index, ForkNumber forknum)
+StirInitMetapage(Relation index, ForkNumber forknum)
 {
 	Buffer metaBuffer;
 	Page metaPage;
@@ -201,60 +201,60 @@ JamInitMetapage(Relation index, ForkNumber forknum)
 
 	/*
 	 * Make a new page; since it is first page it should be associated with
-	 * block number 0 (JAM_METAPAGE_BLKNO).  No need to hold the extension
+	 * block number 0 (STIR_METAPAGE_BLKNO).  No need to hold the extension
 	 * lock because there cannot be concurrent inserters yet.
 	 */
 	metaBuffer = ReadBufferExtended(index, forknum, P_NEW, RBM_NORMAL, NULL);
 	LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
-	Assert(BufferGetBlockNumber(metaBuffer) == JAM_METAPAGE_BLKNO);
+	Assert(BufferGetBlockNumber(metaBuffer) == STIR_METAPAGE_BLKNO);
 
 	/* Initialize contents of meta page */
 	state = GenericXLogStart(index);
 	metaPage = GenericXLogRegisterBuffer(state, metaBuffer,
 										 GENERIC_XLOG_FULL_IMAGE);
-	JamFillMetapage(index, metaPage, forknum == INIT_FORKNUM);
+	StirFillMetapage(index, metaPage, forknum == INIT_FORKNUM);
 	GenericXLogFinish(state);
 
 	UnlockReleaseBuffer(metaBuffer);
 }
 
 /*
- * Initialize any page of a jam index.
+ * Initialize any page of a stir index.
  */
 void
-JamInitPage(Page page, uint16 flags)
+StirInitPage(Page page, uint16 flags)
 {
-	JamPageOpaque opaque;
+	StirPageOpaque opaque;
 
-	PageInit(page, BLCKSZ, sizeof(JamPageOpaqueData));
+	PageInit(page, BLCKSZ, sizeof(StirPageOpaqueData));
 
-	opaque = JamPageGetOpaque(page);
+	opaque = StirPageGetOpaque(page);
 	opaque->flags = flags;
-	opaque->jam_page_id = JAM_PAGE_ID;
+	opaque->stir_page_id = STIR_PAGE_ID;
 }
 
 static bool
-JamPageAddItem(Page page, JamTuple *tuple)
+StirPageAddItem(Page page, StirTuple *tuple)
 {
-	JamTuple *itup;
-	JamPageOpaque opaque;
+	StirTuple *itup;
+	StirPageOpaque opaque;
 	Pointer ptr;
 
 	/* We shouldn't be pointed to an invalid page */
 	Assert(!PageIsNew(page));
 
 	/* Does new tuple fit on the page? */
-	if (JamPageGetFreeSpace(state, page) < sizeof(JamTuple))
+	if (StirPageGetFreeSpace(state, page) < sizeof(StirTuple))
 		return false;
 
 	/* Copy new tuple to the end of page */
-	opaque = JamPageGetOpaque(page);
-	itup = JamPageGetTuple(page, opaque->maxoff + 1);
-	memcpy((Pointer) itup, (Pointer) tuple, sizeof(JamTuple));
+	opaque = StirPageGetOpaque(page);
+	itup = StirPageGetTuple(page, opaque->maxoff + 1);
+	memcpy((Pointer) itup, (Pointer) tuple, sizeof(StirTuple));
 
 	/* Adjust maxoff and pd_lower */
 	opaque->maxoff++;
-	ptr = (Pointer) JamPageGetTuple(page, opaque->maxoff + 1);
+	ptr = (Pointer) StirPageGetTuple(page, opaque->maxoff + 1);
 	((PageHeader) page)->pd_lower = ptr - page;
 
 	/* Assert we didn't overrun available space */
@@ -263,16 +263,16 @@ JamPageAddItem(Page page, JamTuple *tuple)
 }
 
 bool
-jaminsert(Relation index, Datum *values, bool *isnull,
+stirinsert(Relation index, Datum *values, bool *isnull,
 		  ItemPointer ht_ctid, Relation heapRel,
 		  IndexUniqueCheck checkUnique,
 		  bool indexUnchanged,
 		  struct IndexInfo *indexInfo)
 {
-	JamTuple *itup;
+	StirTuple *itup;
 	MemoryContext oldCtx;
 	MemoryContext insertCtx;
-	JamMetaPageData *metaData;
+	StirMetaPageData *metaData;
 	Buffer buffer,
 			metaBuffer;
 	Page page;
@@ -280,20 +280,20 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 	uint16 blkNo;
 
 	insertCtx = AllocSetContextCreate(CurrentMemoryContext,
-									  "Jam insert temporary context",
+									  "Stir insert temporary context",
 									  ALLOCSET_DEFAULT_SIZES);
 
 	oldCtx = MemoryContextSwitchTo(insertCtx);
 
-	itup = (JamTuple *) palloc0(sizeof(JamTuple));
+	itup = (StirTuple *) palloc0(sizeof(StirTuple));
 	itup->heapPtr = *ht_ctid;
 
-	metaBuffer = ReadBuffer(index, JAM_METAPAGE_BLKNO);
+	metaBuffer = ReadBuffer(index, STIR_METAPAGE_BLKNO);
 
 	for (;;)
 	{
 		LockBuffer(metaBuffer, BUFFER_LOCK_SHARE);
-		metaData = JamPageGetMeta(BufferGetPage(metaBuffer));
+		metaData = StirPageGetMeta(BufferGetPage(metaBuffer));
 		if (metaData->skipInserts)
 		{
 			UnlockReleaseBuffer(metaBuffer);
@@ -313,7 +313,7 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 
 			Assert(!PageIsNew(page));
 
-			if (JamPageAddItem(page, itup))
+			if (StirPageAddItem(page, itup))
 			{
 				/* Success!  Apply the change, clean up, and exit */
 				GenericXLogFinish(state);
@@ -332,7 +332,7 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 		LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
 
 		state = GenericXLogStart(index);
-		metaData = JamPageGetMeta(GenericXLogRegisterBuffer(state, metaBuffer, GENERIC_XLOG_FULL_IMAGE));
+		metaData = StirPageGetMeta(GenericXLogRegisterBuffer(state, metaBuffer, GENERIC_XLOG_FULL_IMAGE));
 		if (blkNo != metaData->lastBlkNo)
 		{
 			Assert(blkNo < metaData->lastBlkNo);
@@ -348,12 +348,12 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 									   EB_LOCK_FIRST);
 
 			page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
-			JamInitPage(page, 0);
+			StirInitPage(page, 0);
 
-			if (!JamPageAddItem(page, itup))
+			if (!StirPageAddItem(page, itup))
 			{
 				/* We shouldn't be here since we're inserting to an empty page */
-				elog(ERROR, "could not add new jam tuple to empty page");
+				elog(ERROR, "could not add new stir tuple to empty page");
 			}
 			metaData->lastBlkNo = BufferGetBlockNumber(buffer);
 			GenericXLogFinish(state);
@@ -369,29 +369,29 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 	}
 }
 
-IndexScanDesc jambeginscan(Relation r, int nkeys, int norderbys)
+IndexScanDesc stirbeginscan(Relation r, int nkeys, int norderbys)
 {
 	ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("\"%s\" is not a not implemented", __func__)));
 }
 
 void
-jamrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
+stirrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 		  ScanKey orderbys, int norderbys)
 {
 	ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("\"%s\" is not a not implemented", __func__)));
 }
 
-void jamendscan(IndexScanDesc scan)
+void stirendscan(IndexScanDesc scan)
 {
 	ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("\"%s\" is not a not implemented", __func__)));
 }
 
-IndexBuildResult *jambuild(Relation heap, Relation index,
+IndexBuildResult *stirbuild(Relation heap, Relation index,
 						   struct IndexInfo *indexInfo)
 {
 	IndexBuildResult *result;
 
-	JamInitMetapage(index, MAIN_FORKNUM);
+	StirInitMetapage(index, MAIN_FORKNUM);
 
 	result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
 	result->heap_tuples = 0;
@@ -399,12 +399,12 @@ IndexBuildResult *jambuild(Relation heap, Relation index,
 	return result;
 }
 
-void jambuildempty(Relation index)
+void stirbuildempty(Relation index)
 {
-	JamInitMetapage(index, INIT_FORKNUM);
+	StirInitMetapage(index, INIT_FORKNUM);
 }
 
-IndexBulkDeleteResult *jambulkdelete(IndexVacuumInfo *info,
+IndexBulkDeleteResult *stirbulkdelete(IndexVacuumInfo *info,
 									 IndexBulkDeleteResult *stats,
 									 IndexBulkDeleteCallback callback,
 									 void *callback_state)
@@ -416,7 +416,7 @@ IndexBulkDeleteResult *jambulkdelete(IndexVacuumInfo *info,
 
 	if (!info->validate_index)
 	{
-		JamMarkAsSkipInserts(index);
+		StirMarkAsSkipInserts(index);
 
 		ereport(WARNING, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				errmsg("\"%s\" is not a not implemented, seems like this index need to be dropped", __func__)));
@@ -431,9 +431,9 @@ IndexBulkDeleteResult *jambulkdelete(IndexVacuumInfo *info,
 	 * because TODO
 	 */
 	npages = RelationGetNumberOfBlocks(index);
-	for (blkno = JAM_HEAD_BLKNO; blkno < npages; blkno++)
+	for (blkno = STIR_HEAD_BLKNO; blkno < npages; blkno++)
 	{
-		JamTuple *itup, *itupEnd;
+		StirTuple *itup, *itupEnd;
 
 		vacuum_delay_point();
 
@@ -449,17 +449,17 @@ IndexBulkDeleteResult *jambulkdelete(IndexVacuumInfo *info,
 			continue;
 		}
 
-		itup = JamPageGetTuple(page, FirstOffsetNumber);
-		itupEnd = JamPageGetTuple(page, OffsetNumberNext(JamPageGetMaxOffset(page)));
+		itup = StirPageGetTuple(page, FirstOffsetNumber);
+		itupEnd = StirPageGetTuple(page, OffsetNumberNext(StirPageGetMaxOffset(page)));
 		while (itup < itupEnd)
 		{
 			/* Do we have to delete this tuple? */
 			if (callback(&itup->heapPtr, callback_state))
 			{
-				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("we never delete in jam")));
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("we never delete in stir")));
 			}
 
-			itup = JamPageGetNextTuple(itup);
+			itup = StirPageGetNextTuple(itup);
 		}
 
 		UnlockReleaseBuffer(buffer);
@@ -468,20 +468,20 @@ IndexBulkDeleteResult *jambulkdelete(IndexVacuumInfo *info,
 	return stats;
 }
 
-void JamMarkAsSkipInserts(Relation index)
+void StirMarkAsSkipInserts(Relation index)
 {
-	JamMetaPageData *metaData;
+	StirMetaPageData *metaData;
 	Buffer metaBuffer;
 	Page metaPage;
 	GenericXLogState *state;
 
-	metaBuffer = ReadBuffer(index, JAM_METAPAGE_BLKNO);
+	metaBuffer = ReadBuffer(index, STIR_METAPAGE_BLKNO);
 	LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
 
 	state = GenericXLogStart(index);
 	metaPage = GenericXLogRegisterBuffer(state, metaBuffer,
 										 GENERIC_XLOG_FULL_IMAGE);
-	metaData = JamPageGetMeta(metaPage);
+	metaData = StirPageGetMeta(metaPage);
 	if (!metaData->skipInserts)
 	{
 		metaData->skipInserts = true;
@@ -494,21 +494,21 @@ void JamMarkAsSkipInserts(Relation index)
 	UnlockReleaseBuffer(metaBuffer);
 }
 
-IndexBulkDeleteResult *jamvacuumcleanup(IndexVacuumInfo *info,
+IndexBulkDeleteResult *stirvacuumcleanup(IndexVacuumInfo *info,
 										IndexBulkDeleteResult *stats)
 {
-	JamMarkAsSkipInserts(info->index);
+	StirMarkAsSkipInserts(info->index);
 	ereport(WARNING, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			errmsg("\"%s\" is not a not implemented, seems like this index need to be dropped", __func__)));
 	return NULL;
 }
 
-bytea *jamoptions(Datum reloptions, bool validate)
+bytea *stiroptions(Datum reloptions, bool validate)
 {
 	return NULL;
 }
 
-void jamcostestimate(PlannerInfo *root, IndexPath *path,
+void stircostestimate(PlannerInfo *root, IndexPath *path,
 					 double loop_count, Cost *indexStartupCost,
 					 Cost *indexTotalCost, Selectivity *indexSelectivity,
 					 double *indexCorrelation, double *indexPages)

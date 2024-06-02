@@ -70,7 +70,7 @@ extern void gincostestimate(struct PlannerInfo *root,
 							Selectivity *indexSelectivity,
 							double *indexCorrelation,
 							double *indexPages);
-extern void jamcostestimate(struct PlannerInfo *root,
+extern void stircostestimate(struct PlannerInfo *root,
 							struct IndexPath *path,
 							double loop_count,
 							Cost *indexStartupCost,

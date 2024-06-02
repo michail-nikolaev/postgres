@@ -4971,8 +4971,8 @@ List of access methods
  hash   | Index
  heap   | Table
  heap2  | Table
- jam    | Index
  spgist | Index
+ stir   | Index
 (9 rows)
 
 \dA *
@@ -4986,8 +4986,8 @@ List of access methods
  hash   | Index
  heap   | Table
  heap2  | Table
- jam    | Index
  spgist | Index
+ stir   | Index
 (9 rows)
 
 \dA h*
@@ -5023,8 +5023,8 @@ List of access methods
  hash   | Index | hashhandler          | hash index access method
  heap   | Table | heap_tableam_handler | heap table access method
  heap2  | Table | heap_tableam_handler | 
- jam    | Index | jamhandler           | just access method
  spgist | Index | spghandler           | SP-GiST index access method
+ stir   | Index | stirhandler          | short term index replacement
 (9 rows)
 
 \dA+ *
@@ -5038,8 +5038,8 @@ List of access methods
  hash   | Index | hashhandler          | hash index access method
  heap   | Table | heap_tableam_handler | heap table access method
  heap2  | Table | heap_tableam_handler | 
- jam    | Index | jamhandler           | just access method
  spgist | Index | spghandler           | SP-GiST index access method
+ stir   | Index | stirhandler          | short term index replacement
 (9 rows)
 
 \dA+ h*

@@ -303,7 +303,7 @@
 { oid => '4225',
   opfmethod => 'hash', opfname => 'multirange_ops' },
 { oid => '5558',
-  opfmethod => 'jam', opfname => 'record_ops' },
+  opfmethod => 'stir', opfname => 'record_ops' },
 { oid => '6158',
   opfmethod => 'gist', opfname => 'multirange_ops' },
 

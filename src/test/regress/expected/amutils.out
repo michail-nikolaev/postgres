@@ -167,18 +167,18 @@ select amname, prop, pg_indexam_has_property(a.oid, prop) as p
  hash   | can_exclude   | t
  hash   | can_include   | f
  hash   | bogus         | 
- jam    | can_order     | f
- jam    | can_unique    | f
- jam    | can_multi_col | t
- jam    | can_exclude   | f
- jam    | can_include   | t
- jam    | bogus         | 
  spgist | can_order     | f
  spgist | can_unique    | f
  spgist | can_multi_col | f
  spgist | can_exclude   | t
  spgist | can_include   | t
  spgist | bogus         | 
+ stir   | can_order     | f
+ stir   | can_unique    | f
+ stir   | can_multi_col | t
+ stir   | can_exclude   | f
+ stir   | can_include   | t
+ stir   | bogus         | 
 (42 rows)
 
 --
