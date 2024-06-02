@@ -639,7 +639,6 @@ UpdateIndexRelation(Oid indexoid,
 	values[Anum_pg_index_indnkeyatts - 1] = Int16GetDatum(indexInfo->ii_NumIndexKeyAttrs);
 	values[Anum_pg_index_indisunique - 1] = BoolGetDatum(indexInfo->ii_Unique);
 	values[Anum_pg_index_indnullsnotdistinct - 1] = BoolGetDatum(indexInfo->ii_NullsNotDistinct);
-	values[Anum_pg_index_indauxiliary - 1] = BoolGetDatum(indexInfo->ii_Auxiliary);
 	values[Anum_pg_index_indisprimary - 1] = BoolGetDatum(primary);
 	values[Anum_pg_index_indisexclusion - 1] = BoolGetDatum(isexclusion);
 	values[Anum_pg_index_indimmediate - 1] = BoolGetDatum(immediate);
@@ -1394,8 +1393,7 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							oldInfo->ii_NullsNotDistinct,
 							false,	/* not ready for inserts */
 							true,
-							indexRelation->rd_indam->amsummarizing,
-							false);
+							indexRelation->rd_indam->amsummarizing);
 
 	/*
 	 * Extract the list of column names and the column numbers for the new
@@ -1553,8 +1551,7 @@ index_concurrently_create_aux(Relation heapRelation, Oid mainIndexId,
 							oldInfo->ii_NullsNotDistinct,
 							false,	/* not ready for inserts */
 							true,
-							false, /* aux are not summarizing */
-							true);
+							false /* aux are not summarizing */);
 
 	/*
 	 * Extract the list of column names and the column numbers for the new
@@ -1672,7 +1669,7 @@ index_concurrently_build(Oid heapRelationId,
 	}
 
 	/* Now build the index */
- 	index_build(heapRel, indexRelation, indexInfo, false, !indexInfo->ii_Auxiliary);
+ 	index_build(heapRel, indexRelation, indexInfo, false, true);
 
 	if (snapshot != InvalidSnapshot)
 	{
@@ -2586,8 +2583,7 @@ BuildIndexInfo(Relation index)
 					   indexStruct->indnullsnotdistinct,
 					   indexStruct->indisready,
 					   false,
-					   index->rd_indam->amsummarizing,
-					   indexStruct->indauxiliary);
+					   index->rd_indam->amsummarizing);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -2646,8 +2642,7 @@ BuildDummyIndexInfo(Relation index)
 					   indexStruct->indnullsnotdistinct,
 					   indexStruct->indisready,
 					   false,
-					   index->rd_indam->amsummarizing,
-					   indexStruct->indauxiliary);
+					   index->rd_indam->amsummarizing);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -2686,9 +2681,6 @@ CompareIndexInfo(const IndexInfo *info1, const IndexInfo *info2,
 	int			i;
 
 	if (info1->ii_Unique != info2->ii_Unique)
-		return false;
-
-	if (info1->ii_Auxiliary != info2->ii_Auxiliary)
 		return false;
 
 	if (info1->ii_NullsNotDistinct != info2->ii_NullsNotDistinct)
@@ -3541,7 +3533,6 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	/* mark build is concurrent just for consistency */
 	indexInfo->ii_Concurrent = true;
 	auxIndexInfo->ii_Concurrent = true;
-	auxIndexInfo->ii_Auxiliary = true;
 
 	/*
 	 * Scan the index and gather up all the TIDs into a tuplesort object.
@@ -3724,12 +3715,17 @@ index_set_state_flags(Oid indexId, IndexStateFlagsAction action)
 			Assert(!indexForm->indisvalid);
 			indexForm->indisready = true;
 			break;
+		case INDEX_DROP_CLEAR_READY:
+			Assert(indexForm->indislive);
+			Assert(indexForm->indisready);
+			Assert(!indexForm->indisvalid);
+			indexForm->indisready = false;
+			break;
 		case INDEX_CREATE_SET_VALID:
 			/* Set indisvalid during a CREATE INDEX CONCURRENTLY sequence */
 			Assert(indexForm->indislive);
 			Assert(indexForm->indisready);
 			Assert(!indexForm->indisvalid);
-			Assert(!indexForm->indauxiliary);
 			indexForm->indisvalid = true;
 			break;
 		case INDEX_DROP_CLEAR_VALID:
@@ -3765,10 +3761,6 @@ index_set_state_flags(Oid indexId, IndexStateFlagsAction action)
 			Assert(!indexForm->indisreplident);
 			indexForm->indisready = false;
 			indexForm->indislive = false;
-			break;
-		case INDEX_DROP_CLEAR_READY:
-			Assert(indexForm->indauxiliary);
-			indexForm->indisready = false;
 			break;
 	}
 

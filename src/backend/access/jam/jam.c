@@ -278,7 +278,6 @@ jaminsert(Relation index, Datum *values, bool *isnull,
 	Page page;
 	GenericXLogState *state;
 	uint16 blkNo;
-	Assert(indexInfo->ii_Auxiliary);
 
 	insertCtx = AllocSetContextCreate(CurrentMemoryContext,
 									  "Jam insert temporary context",
@@ -392,7 +391,6 @@ IndexBuildResult *jambuild(Relation heap, Relation index,
 {
 	IndexBuildResult *result;
 
-	Assert(indexInfo->ii_Auxiliary);
 	JamInitMetapage(index, MAIN_FORKNUM);
 
 	result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));

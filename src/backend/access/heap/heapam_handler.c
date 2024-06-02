@@ -1205,9 +1205,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 	instr_time		snapshotTime,
 					currentTime,
 					elapsed;
-
-	Assert(!indexInfo->ii_Auxiliary);
-
 	/*
 	 * sanity checks
 	 */
