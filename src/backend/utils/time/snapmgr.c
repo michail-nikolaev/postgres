@@ -1597,10 +1597,6 @@ DeleteAllExportedSnapshotFiles(void)
 bool
 ThereAreNoPriorRegisteredSnapshots(void)
 {
-	if (CatalogSnapshot != NULL)
-		return pairingheap_is_singular(&RegisteredSnapshots) ||
-		pairingheap_is_double(&RegisteredSnapshots);
-
 	return (pairingheap_is_empty(&RegisteredSnapshots) ||
 		pairingheap_is_singular(&RegisteredSnapshots));
 }
