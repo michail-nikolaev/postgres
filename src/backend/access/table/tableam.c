@@ -180,7 +180,7 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan)
 
 	if (pscan->phs_snapshot_invalid)
 	{
-		snapshot = GetActiveSnapshot();
+		snapshot = GetLatestSnapshot();
 	}
 	else if (!pscan->phs_snapshot_any)
 	{
