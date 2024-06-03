@@ -2438,12 +2438,12 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 
 	/* Everyone's had a chance to ask for space, so now create the DSM */
 	InitializeParallelDSM(pcxt);
+	if (resetsnapshots)
+		PopActiveSnapshot();
 
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (resetsnapshots)
-			PopActiveSnapshot();
 		if (IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
@@ -2531,7 +2531,10 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	buildstate->bs_leader = brinleader;
 
 	if (resetsnapshots)
+	{
 		WaitForParallelWorkersToAttach(pcxt, true);
+		UnregisterSnapshot(snapshot);
+	}
 
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
@@ -2565,13 +2568,9 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
-	if (brinleader->brinshared->resetsnapshots)
-	{
-		Assert(snapshot == InvalidSnapshot);
-		snapshot = GetActiveSnapshot();
-		PopActiveSnapshot();
-	}
-	if (IsMVCCSnapshot(snapshot))
+	Assert(!brinleader->brinshared->resetsnapshots || snapshot == InvalidSnapshot);
+	Assert(brinleader->brinshared->resetsnapshots || snapshot != InvalidSnapshot);
+	if (snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot))
 		UnregisterSnapshot(snapshot);
 	DestroyParallelContext(brinleader->pcxt);
 	ExitParallelMode();
@@ -2937,8 +2936,12 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	 */
 	sortmem = maintenance_work_mem / brinshared->scantuplesortstates;
 
+	if (brinshared->resetsnapshots)
+		PopActiveSnapshot();
 	_brin_parallel_scan_and_build(buildstate, brinshared, sharedsort,
 								  heapRel, indexRel, sortmem, false);
+	if (brinshared->resetsnapshots)
+		PushActiveSnapshot(GetLatestSnapshot());
 
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);

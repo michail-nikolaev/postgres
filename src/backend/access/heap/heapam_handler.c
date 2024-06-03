@@ -1223,7 +1223,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 	 */
 	Assert(!(anyvisible && checking_uniqueness));
 	Assert(!(anyvisible && reset_snapshots));
-	Assert(!reset_snapshots || ThereAreNoPriorRegisteredSnapshots());
+	Assert(!reset_snapshots || !HaveRegisteredOrActiveSnapshot());
 	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xid));
 
 	/*
@@ -1296,10 +1296,12 @@ heapam_index_build_range_scan(Relation heapRelation,
 		Assert(!IsBootstrapProcessingMode());
 		Assert(allow_sync);
 		snapshot = scan->rs_snapshot;
-		if (reset_snapshots && !HaveRegisteredSnapshot())
+		if (reset_snapshots)
 		{
 			snapshot = RegisterSnapshot(snapshot);
 			need_unregister_snapshot = true;
+			PushActiveSnapshot(snapshot);
+			need_pop_active_snapshot = true;
 		}
 	}
 	if (reset_snapshots)
@@ -1779,6 +1781,12 @@ heapam_index_build_range_scan(Relation heapRelation,
 	/* we can now forget our snapshot, if set and registered by us */
 	if (need_unregister_snapshot)
 		UnregisterSnapshot(snapshot);
+	if (reset_snapshots)
+	{
+		InvalidateCatalogSnapshotConditionally();
+		Assert(!TransactionIdIsValid(MyProc->xmin));
+		Assert(!TransactionIdIsValid(MyProc->xid));
+	}
 
 	ExecDropSingleTupleTableSlot(slot);
 
@@ -2006,6 +2014,9 @@ heapam_index_validate_scan(Relation table_rel,
 	{
 		PopActiveSnapshot();
 		UnregisterSnapshot(snapshot);
+		InvalidateCatalogSnapshot();
+		Assert(MyProc->xid == InvalidTransactionId);
+		Assert(MyProc->xmin == InvalidTransactionId);
 	}
 	return limitXmin;
 }

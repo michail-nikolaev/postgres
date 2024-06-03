@@ -1491,12 +1491,12 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, bool resetsnapsh
 
 	/* Everyone's had a chance to ask for space, so now create the DSM */
 	InitializeParallelDSM(pcxt);
+	if (resetsnapshots)
+		PopActiveSnapshot();
 
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (resetsnapshots)
-			PopActiveSnapshot();
 		if (IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
@@ -1591,6 +1591,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, bool resetsnapsh
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (resetsnapshots)
+			UnregisterSnapshot(snapshot);
 		_bt_end_parallel(btleader);
 		return;
 	}
@@ -1601,6 +1603,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, bool resetsnapsh
 	if (resetsnapshots)
 	{
 		WaitForParallelWorkersToAttach(pcxt, true);
+		UnregisterSnapshot(snapshot);
 	}
 
 	/* Join heap scan ourselves */
@@ -1634,14 +1637,10 @@ _bt_end_parallel(BTLeader *btleader)
 	for (i = 0; i < btleader->pcxt->nworkers_launched; i++)
 		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
 
-	if (btleader->btshared->resetsnapshots)
-	{
-		Assert(snapshot == InvalidSnapshot);
-		snapshot = GetActiveSnapshot();
-		PopActiveSnapshot();
-	}
 	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(snapshot))
+	Assert(!btleader->btshared->resetsnapshots || snapshot == InvalidSnapshot);
+	Assert(btleader->btshared->resetsnapshots || snapshot != InvalidSnapshot);
+	if (snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot))
 		UnregisterSnapshot(snapshot);
 	DestroyParallelContext(btleader->pcxt);
 	ExitParallelMode();
@@ -1847,8 +1846,12 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/* Perform sorting of spool, and possibly a spool2 */
 	sortmem = maintenance_work_mem / btshared->scantuplesortstates;
+	if (btshared->resetsnapshots)
+		PopActiveSnapshot();
 	_bt_parallel_scan_and_sort(btspool, btspool2, btshared, sharedsort,
 							   sharedsort2, sortmem, false);
+	if (btshared->resetsnapshots)
+		PushActiveSnapshot(GetLatestSnapshot());
 
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
