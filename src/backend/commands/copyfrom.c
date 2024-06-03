@@ -733,7 +733,11 @@ CopyFrom(CopyFromState cstate)
 		 * Tolerate one registration for the benefit of FirstXactSnapshot.
 		 * Scan-bearing queries generally create at least two registrations,
 		 * though relying on that is fragile, as is ignoring ActiveSnapshot.
+		 * Clear CatalogSnapshot to avoid counting its registration.  We'll
+		 * still detect ongoing catalog scans, each of which separately
+		 * registers the snapshot it uses.
 		 */
+		InvalidateCatalogSnapshot();
 		if (!ThereAreNoPriorRegisteredSnapshots() || !ThereAreNoReadyPortals())
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
