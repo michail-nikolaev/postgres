@@ -50,7 +50,8 @@ $psql_session->query_until(
 
 # Wait until the backend enters the timeout injection point. Will get an error
 # here if anything goes wrong.
-$node->wait_for_event('client backend', 'transaction-timeout');
+$node->wait_for_event('client backend',
+	'INJECTION_POINT(transaction-timeout)');
 
 my $log_offset = -s $node->logfile;
 
@@ -86,7 +87,7 @@ $psql_session->query_until(
 
 # Wait until the backend enters the timeout injection point.
 $node->wait_for_event('client backend',
-	'idle-in-transaction-session-timeout');
+	'INJECTION_POINT(idle-in-transaction-session-timeout)');
 
 $log_offset = -s $node->logfile;
 
@@ -116,7 +117,8 @@ $psql_session->query_until(
 ));
 
 # Wait until the backend enters the timeout injection point.
-$node->wait_for_event('client backend', 'idle-session-timeout');
+$node->wait_for_event('client backend',
+	'INJECTION_POINT(idle-session-timeout)');
 
 $log_offset = -s $node->logfile;
 

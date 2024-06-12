@@ -78,7 +78,8 @@ $node_primary->wait_for_replay_catchup($node_standby);
 
 # Wait until the checkpointer is in the middle of the restart point
 # processing.
-$node_standby->wait_for_event('checkpointer', 'create-restart-point');
+$node_standby->wait_for_event('checkpointer',
+	'INJECTION_POINT(create-restart-point)');
 
 # Check the logs that the restart point has started on standby.  This is
 # optional, but let's be sure.

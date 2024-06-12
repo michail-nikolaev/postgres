@@ -200,6 +200,7 @@ injection_notice(const char *name, const void *private_data)
 void
 injection_wait(const char *name, const void *private_data)
 {
+	char		event_name[NAMEDATALEN];
 	uint32		old_wait_counts = 0;
 	int			index = -1;
 	uint32		injection_wait_event = 0;
@@ -212,11 +213,11 @@ injection_wait(const char *name, const void *private_data)
 		return;
 
 	/*
-	 * Use the injection point name for this custom wait event.  Note that
-	 * this custom wait event name is not released, but we don't care much for
-	 * testing as this should be short-lived.
+	 * Note that this custom wait event name is not released, but we don't
+	 * care much for testing as this should be short-lived.
 	 */
-	injection_wait_event = WaitEventExtensionNew(name);
+	snprintf(event_name, sizeof(event_name), "INJECTION_POINT(%s)", name);
+	injection_wait_event = WaitEventExtensionNew(event_name);
 
 	/*
 	 * Find a free slot to wait for, and register this injection point's name.

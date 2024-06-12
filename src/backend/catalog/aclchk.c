@@ -75,6 +75,7 @@
 #include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
 #include "parser/parse_type.h"
+#include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/aclchk_internal.h"
 #include "utils/builtins.h"
@@ -1848,7 +1849,7 @@ ExecGrant_Relation(InternalGrant *istmt)
 		HeapTuple	tuple;
 		ListCell   *cell_colprivs;
 
-		tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relOid));
+		tuple = SearchSysCacheLocked1(RELOID, ObjectIdGetDatum(relOid));
 		if (!HeapTupleIsValid(tuple))
 			elog(ERROR, "cache lookup failed for relation %u", relOid);
 		pg_class_tuple = (Form_pg_class) GETSTRUCT(tuple);
@@ -2060,6 +2061,7 @@ ExecGrant_Relation(InternalGrant *istmt)
 										 values, nulls, replaces);
 
 			CatalogTupleUpdate(relation, &newtuple->t_self, newtuple);
+			UnlockTuple(relation, &tuple->t_self, InplaceUpdateTupleLock);
 
 			/* Update initial privileges for extensions */
 			recordExtensionInitPriv(relOid, RelationRelationId, 0,
@@ -2073,6 +2075,8 @@ ExecGrant_Relation(InternalGrant *istmt)
 
 			pfree(new_acl);
 		}
+		else
+			UnlockTuple(relation, &tuple->t_self, InplaceUpdateTupleLock);
 
 		/*
 		 * Handle column-level privileges, if any were specified or implied.
@@ -2186,7 +2190,7 @@ ExecGrant_common(InternalGrant *istmt, Oid classid, AclMode default_privs,
 		Oid		   *oldmembers;
 		Oid		   *newmembers;
 
-		tuple = SearchSysCache1(cacheid, ObjectIdGetDatum(objectid));
+		tuple = SearchSysCacheLocked1(cacheid, ObjectIdGetDatum(objectid));
 		if (!HeapTupleIsValid(tuple))
 			elog(ERROR, "cache lookup failed for %s %u", get_object_class_descr(classid), objectid);
 
@@ -2262,6 +2266,7 @@ ExecGrant_common(InternalGrant *istmt, Oid classid, AclMode default_privs,
 									 nulls, replaces);
 
 		CatalogTupleUpdate(relation, &newtuple->t_self, newtuple);
+		UnlockTuple(relation, &tuple->t_self, InplaceUpdateTupleLock);
 
 		/* Update initial privileges for extensions */
 		recordExtensionInitPriv(objectid, classid, 0, ownerId, new_acl);

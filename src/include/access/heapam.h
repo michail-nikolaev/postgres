@@ -336,7 +336,14 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 								 bool follow_updates,
 								 Buffer *buffer, struct TM_FailureData *tmfd);
 
-extern void heap_inplace_update(Relation relation, HeapTuple tuple);
+extern void heap_inplace_update_scan(Relation relation,
+									 Oid indexId,
+									 bool indexOK,
+									 Snapshot snapshot,
+									 int nkeys, const ScanKeyData *key,
+									 HeapTuple *oldtupcopy, void **state);
+extern void heap_inplace_update_finish(void *state, HeapTuple tuple);
+extern void heap_inplace_update_cancel(void *state);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  const struct VacuumCutoffs *cutoffs,
 									  HeapPageFreeze *pagefrz,
