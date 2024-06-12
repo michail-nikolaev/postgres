@@ -4217,6 +4217,7 @@ ResetRelRewrite(Oid myrelid)
 	Relation	relrelation;	/* for RELATION relation */
 	HeapTuple	reltup;
 	Form_pg_class relform;
+	ItemPointerData  otid;
 
 	/*
 	 * Find relation's pg_class tuple.
