@@ -587,6 +587,13 @@ ExecCheckIndexConstraints(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
 							 indexRelation->rd_index->indexrelid))
 			continue;
 
+		if (!indexRelation->rd_index->indisvalid)
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("ON CONFLICT does not support invalid indexes as arbiters"),
+							errtableconstraint(heapRelation,
+											   RelationGetRelationName(indexRelation))));
+
 		if (!indexRelation->rd_index->indimmediate)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
