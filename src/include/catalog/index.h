@@ -44,7 +44,7 @@ typedef struct ReindexParams
 #define REINDEXOPT_MISSING_OK 	0x04	/* skip missing relations */
 #define REINDEXOPT_CONCURRENTLY	0x08	/* concurrent mode */
 
-#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL		0	/* 500 ms */
+#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL	500	/* 500 ms */
 
 /* state info for validate_index bulkdelete callback */
 typedef struct ValidateIndexState

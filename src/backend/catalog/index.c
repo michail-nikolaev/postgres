@@ -2659,7 +2659,6 @@ ResetSnapshotsAllowed(const IndexInfo* indexInfo)
 {
 	return indexInfo->ii_Concurrent &&
 		   (indexInfo->ii_Predicate == NULL) &&
-		   (!indexInfo->ii_Unique) &&
 		   (indexInfo->ii_Expressions == NULL) && !TransactionIdIsValid(MyProc->xid);
 }
 
@@ -3626,7 +3625,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	 */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN);
-	limitXmin = TransactionIdOlder(limitXmin, table_index_validate_scan(heapRelation,
+	limitXmin = TransactionIdNewer(limitXmin, table_index_validate_scan(heapRelation,
 							  indexRelation,
 							  auxIndexRelation,
 							  indexInfo,

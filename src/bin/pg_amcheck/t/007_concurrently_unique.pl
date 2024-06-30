@@ -39,12 +39,13 @@ $node->init;
 $node->append_conf('postgresql.conf',
 	'lock_timeout = ' . (1000 * $PostgreSQL::Test::Utils::timeout_default));
 $node->append_conf('postgresql.conf', 'fsync = off');
+$node->append_conf('postgresql.conf', 'autovacuum = off');
 $node->start;
 $node->safe_psql('postgres', q(CREATE EXTENSION amcheck));
 $node->safe_psql('postgres', q(CREATE TABLE tbl(i int primary key,
 								c1 money default 0, c2 money default 0,
 								c3 money default 0, updated_at timestamp)));
-$node->safe_psql('postgres', q(CREATE INDEX idx ON tbl(i)));
+$node->safe_psql('postgres', q(CREATE INDEX idx ON tbl(i, updated_at)));
 
 my $builder = Test::More->builder;
 $builder->use_numbers(0);
@@ -57,56 +58,37 @@ if(!defined($pid = fork())) {
 	die "Cannot fork a child: $!";
 } elsif ($pid == 0) {
 
+	$node->psql('postgres', q(INSERT INTO tbl SELECT i,0,0,0,now() FROM generate_series(1, 1000) s(i);));
+
 	$node->pgbench(
-		'--no-vacuum --client=10 --transactions=10000',
+		'--no-vacuum --client=20 --transactions=50000',
 		0,
 		[qr{actually processed}],
 		[qr{^$}],
 		'concurrent INSERTs, UPDATES and RC',
 		{
-			'001_pgbench_concurrent_transaction_inserts' => q(
-				BEGIN;
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				COMMIT;
-			  ),
-			'002_pgbench_concurrent_transaction_inserts' => q(
-				BEGIN;
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				COMMIT;
-			  ),
 			# Ensure some HOT updates happen
-			'003_pgbench_concurrent_transaction_updates' => q(
+			'001_pgbench_concurrent_transaction_updates' => q(
 				BEGIN;
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
+				INSERT INTO tbl VALUES(random()*1000,0,0,0,now()) on conflict(i) do update set updated_at = now();
+				INSERT INTO tbl VALUES(random()*10000,0,0,0,now()) on conflict(i) do update set updated_at = now();
 				COMMIT;
-			  )
+			),
+# 			'002_pgbench_concurrent_transaction_updates' => q(
+# 				BEGIN;
+# 				INSERT INTO tbl VALUES(69,0,0,0,now()) on conflict(i) do update set updated_at = now();
+# 				COMMIT;
+# 			),
+# 			'003_pgbench_concurrent_transaction_updates' => q(
+# 				BEGIN;
+# 				INSERT INTO tbl VALUES(42,0,0,0,now()) on conflict(i) do update set updated_at = now();
+# 				COMMIT;
+# 			),
+# 			'004_pgbench_concurrent_transaction_updates' => q(
+# 				BEGIN;
+# 				INSERT INTO tbl VALUES(31337,0,0,0,now()) on conflict(i) do update set updated_at = now();
+# 				COMMIT;
+# 			),
 		});
 
 	if ($child->is_passing()) {
@@ -140,20 +122,9 @@ if(!defined($pid = fork())) {
 			$psql_timeout);
 
 		my ($result, $stdout, $stderr, $n, $stderr_saved);
-		$n = 0;
 
-		$node->psql('postgres', q(CREATE FUNCTION predicate_stable() RETURNS bool IMMUTABLE
-                                  LANGUAGE plpgsql AS $$
-                                  BEGIN
-                                    EXECUTE 'SELECT txid_current()';
-                                    RETURN true;
-                                  END; $$;));
+#		ok(send_query_and_wait(\%psql, q[SELECT pg_sleep(10);], qr/^.*$/m), 'SELECT');
 
-		$node->psql('postgres', q(CREATE FUNCTION predicate_const(integer) RETURNS bool IMMUTABLE
-                                  LANGUAGE plpgsql AS $$
-                                  BEGIN
-                                    RETURN MOD($1, 2) = 0;
-                                  END; $$;));
 		while (1)
 		{
 
@@ -164,52 +135,14 @@ if(!defined($pid = fork())) {
 			}
 			is($result, '0', 'ALTER TABLE is correct');
 
-			if (1)
-			{
-				($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT pg_sleep(0);REINDEX INDEX CONCURRENTLY idx;));
-				is($result, '0', 'REINDEX is correct');
-				#ok(send_query_and_wait(\%psql, q[REINDEX INDEX CONCURRENTLY idx;], qr/^REINDEX$/m), 'REINDEX');
-				if ($result) {
-					diag($stderr);
-				}
-				#sleep(rand() * 0.5);
-
-				($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT bt_index_parent_check('idx', heapallindexed => true, rootdescend => true, checkunique => true);));
-				is($result, '0', 'bt_index_check is correct');
-				if ($result)
-				{
-					diag($stderr);
-				} else {
-					diag('reindex:)' . $n++);
-				}
-			}
 
 			if (1)
 			{
-				my $variant = int(rand(6));
-				my $sql;
-				if ($variant == 0) {
-					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at););
-				} elsif ($variant == 1) {
-					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_stable(););
-				} elsif ($variant == 2) {
-					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE MOD(i, 2) = 0;);
-				} elsif ($variant == 3) {
-					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_const(i););
-				} elsif ($variant == 4) {
-					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(predicate_const(i)););
-				} elsif ($variant == 5) {
-					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, predicate_const(i), updated_at) WHERE predicate_const(i););
-				} elsif ($variant == 5) {
-					$sql = q(CREATE UNIQUE INDEX CONCURRENTLY idx_2 ON tbl(i););
-				} else { diag("wrong variant"); }
+				my $sql = q(CREATE UNIQUE INDEX CONCURRENTLY idx_2 ON tbl(i););
 
 				($result, $stdout, $stderr) = $node->psql('postgres', $sql);
 				is($result, '0', 'CREATE INDEX is correct');
 				$stderr_saved = $stderr;
-				#ok(send_query_and_wait(\%psql, q[CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_stable();], qr/^CREATE INDEX$/m), 'CREATE INDEX');
-
-				#sleep(rand() * 0.5);
 
 				($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT bt_index_parent_check('idx_2', heapallindexed => true, rootdescend => true, checkunique => true);));
 				is($result, '0', 'bt_index_check for new index is correct');
