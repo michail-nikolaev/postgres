@@ -367,6 +367,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	BTSpool    *btspool = (BTSpool *) palloc0(sizeof(BTSpool));
 	SortCoordinate coordinate = NULL;
 	double		reltuples = 0;
+	bool 		reset_snapshots;
 
 	/*
 	 * We size the sort area as maintenance_work_mem rather than work_mem to
@@ -386,10 +387,12 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 								 PROGRESS_BTREE_PHASE_INDEXBUILD_TABLESCAN);
 
+	reset_snapshots = ResetSnapshotsAllowed(indexInfo);
+
 	/* Attempt to launch parallel worker scan when required */
 	if (indexInfo->ii_ParallelWorkers > 0)
 		_bt_begin_parallel(buildstate, indexInfo->ii_Concurrent,
-						   ResetSnapshotsAllowed(indexInfo),
+						   reset_snapshots,
 						   indexInfo->ii_ParallelWorkers);
 
 	/*
@@ -429,6 +432,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	buildstate->spool->sortstate =
 		tuplesort_begin_index_btree(heap, index, buildstate->isunique,
 									buildstate->nulls_not_distinct,
+									reset_snapshots,
 									maintenance_work_mem, coordinate,
 									TUPLESORT_NONE);
 
@@ -468,7 +472,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 		 * full, so we give it only work_mem
 		 */
 		buildstate->spool2->sortstate =
-			tuplesort_begin_index_btree(heap, index, false, false, work_mem,
+			tuplesort_begin_index_btree(heap, index, false, false, false, work_mem,
 										coordinate2, TUPLESORT_NONE);
 	}
 
@@ -1905,6 +1909,7 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 													 btspool->index,
 													 btspool->isunique,
 													 btspool->nulls_not_distinct,
+													 btshared->resetsnapshots,
 													 sortmem, coordinate,
 													 TUPLESORT_NONE);
 
@@ -1927,7 +1932,8 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 		coordinate2->nParticipants = -1;
 		coordinate2->sharedsort = sharedsort2;
 		btspool2->sortstate =
-			tuplesort_begin_index_btree(btspool->heap, btspool->index, false, false,
+			tuplesort_begin_index_btree(btspool->heap, btspool->index,
+										false, false, false,
 										Min(sortmem, work_mem), coordinate2,
 										false);
 	}

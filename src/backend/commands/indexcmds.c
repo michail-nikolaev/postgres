@@ -1663,6 +1663,7 @@ DefineIndex(Oid tableId,
 		if (safe_index)
 			set_indexsafe_procflags();
 
+		WaitForLockers(heaplocktag, ShareLock, true);
 		index_concurrently_build(tableId, auxIndexRelationId);
 
 		CommitTransactionCommand();
@@ -3980,6 +3981,13 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 
+	{
+		StartTransactionCommand();
+		set_indexsafe_procflags();
+		WaitForLockersMultiple(lockTags, ShareLock, true);
+		CommitTransactionCommand();
+	}
+
 	foreach(lc, newIndexIds)
 	{
 		ReindexIndexInfo *newidx = lfirst(lc);
@@ -4193,7 +4201,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 * valid and the old one as not valid.
 		 */
 		index_concurrently_swap(newidx->indexId, oldidx->indexId, oldName);
-		index_set_state_flags(newidx->auxIndexId, INDEX_DROP_CLEAR_VALID);
 
 		/*
 		 * Invalidate the relcache for the table, so that after this commit

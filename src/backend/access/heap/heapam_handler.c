@@ -1822,12 +1822,10 @@ heapam_index_validate_scan(Relation table_rel,
 	/* state variables for the merge */
 	ItemPointer 	indexcursor = NULL,
 					auxindexcursor = NULL,
-					prev_auxindexcursor = NULL,
 					prev_indexcursor = NULL;
 	ItemPointerData decoded,
 					auxdecoded,
 					prev_decoded,
-					prev_auxdecoded,
 					fetched;
 	bool			tuplesort_empty = false,
 					auxtuplesort_empty = false;
@@ -1867,10 +1865,8 @@ heapam_index_validate_scan(Relation table_rel,
 	ItemPointerSetInvalid(&decoded);
 	ItemPointerSetInvalid(&prev_decoded);
 	ItemPointerSetInvalid(&auxdecoded);
-	ItemPointerSetInvalid(&prev_auxdecoded);
 	ItemPointerSetInvalid(&fetched);
 
-	prev_auxindexcursor = &prev_auxdecoded;
 	prev_indexcursor = &prev_decoded;
 
 	while (!auxtuplesort_empty)
@@ -1893,7 +1889,7 @@ heapam_index_validate_scan(Relation table_rel,
 
 				snapshot = RegisterSnapshot(GetLatestSnapshot());
 				PushActiveSnapshot(snapshot);
-				limitXmin = TransactionIdOlder(limitXmin, snapshot->xmin);
+				limitXmin = TransactionIdNewer(limitXmin, snapshot->xmin);
 				INSTR_TIME_SET_CURRENT(snapshotTime);
 			}
 		}
@@ -1901,7 +1897,6 @@ heapam_index_validate_scan(Relation table_rel,
 		{
 			Datum ts_val;
 			bool ts_isnull;
-			prev_auxdecoded = auxdecoded;
 			auxtuplesort_empty = !tuplesort_getdatum(aux_state->tuplesort, true,
 													 false, &ts_val, &ts_isnull,
 													 NULL);
@@ -1910,13 +1905,6 @@ heapam_index_validate_scan(Relation table_rel,
 			{
 				itemptr_decode(&auxdecoded, DatumGetInt64(ts_val));
 				auxindexcursor = &auxdecoded;
-				if (ItemPointerCompare(prev_auxindexcursor, auxindexcursor) == 0)
-				{
-					elog(DEBUG5, "skipping duplicate tid in auxiliary index snapshot: (%u,%u)",
-								ItemPointerGetBlockNumber(auxindexcursor),
-								ItemPointerGetOffsetNumber(auxindexcursor));
-					continue;
-				}
 			}
 			else
 			{
