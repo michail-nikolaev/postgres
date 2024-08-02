@@ -183,6 +183,8 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 	IndexScanDesc scan;
 	SnapshotData snap;
 	TransactionId xwait;
+	TransactionId maxXmax,
+				  latestCompletedXid;
 	Relation	idxrel;
 	bool		found;
 	TypeCacheEntry **eq = NULL;
@@ -193,7 +195,7 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 
 	isIdxSafeToSkipDuplicates = (GetRelationIdentityOrPK(rel) == idxoid);
 
-	InitDirtySnapshot(snap);
+	InitDirtySnapshot(snap, &maxXmax);
 
 	/* Build scan key. */
 	skey_attoff = build_replindex_scan_key(skey, rel, idxrel, searchslot);
@@ -203,6 +205,12 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 
 retry:
 	found = false;
+	/*
+	 * Each time we retry - remember last completed transaction before start
+ 	 * of the scan. Aso reset maxXmax.
+ 	 */
+	maxXmax = InvalidTransactionId;
+	latestCompletedXid = XidFromFullTransactionId(ReadLastCompletedFullTransactionId());
 
 	index_rescan(scan, skey, skey_attoff, NULL, 0);
 
@@ -240,6 +248,20 @@ retry:
 		/* Found our tuple and it's not locked */
 		found = true;
 		break;
+	}
+
+	/*
+	 * Check for the case when index scan fetched records before some other
+	 * transaction deleted tuple and inserted a new one.
+	 */
+	if (!found && TransactionIdIsValid(maxXmax) && !TransactionIdIsCurrentTransactionId(maxXmax))
+	{
+		/*
+		 * If we have skipped some tuple because it was deleted, but deletion happened after
+		 * start of the index scan - retry to be sure.
+		 */
+		if (TransactionIdPrecedes(latestCompletedXid, maxXmax))
+			goto retry;
 	}
 
 	/* Found tuple, try to lock it in the lockmode. */
@@ -391,7 +413,7 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 	eq = palloc0(sizeof(*eq) * outslot->tts_tupleDescriptor->natts);
 
 	/* Start a heap scan. */
-	InitDirtySnapshot(snap);
+	InitDirtySnapshot(snap, NULL);
 	scan = table_beginscan(rel, &snap, 0, NULL);
 	scanslot = table_slot_create(rel, NULL);
 
