@@ -9,7 +9,7 @@ PGFILEDESC = "injection_points - facility for injection points"
 REGRESS = injection_points
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
-ISOLATION = inplace
+ISOLATION = inplace dirty_index_scan
 
 # The injection points are cluster-wide, so disable installcheck
 NO_INSTALLCHECK = 1
