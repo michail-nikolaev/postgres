@@ -42,6 +42,11 @@ tests += {
   'isolation': {
     'specs': [
       'inplace',
+      'reindex_concurrently_upsert',
+      'index_concurrently_upsert',
+      'reindex_concurrently_upsert_partitioned',
+      'reindex_concurrently_upsert_on_constraint',
+      'index_concurrently_upsert_predicate',
     ],
   },
   'tap': {
