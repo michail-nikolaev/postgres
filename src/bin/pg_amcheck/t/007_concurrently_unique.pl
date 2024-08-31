@@ -40,9 +40,11 @@ $node->append_conf('postgresql.conf',
 	'lock_timeout = ' . (1000 * $PostgreSQL::Test::Utils::timeout_default));
 $node->append_conf('postgresql.conf', 'fsync = off');
 $node->append_conf('postgresql.conf', 'autovacuum = off');
+$node->append_conf('postgresql.conf', 'maintenance_work_mem = 128MB');
+$node->append_conf('postgresql.conf', 'shared_buffers = 256MB');
 $node->start;
 $node->safe_psql('postgres', q(CREATE EXTENSION amcheck));
-$node->safe_psql('postgres', q(CREATE TABLE tbl(i int primary key,
+$node->safe_psql('postgres', q(CREATE UNLOGGED TABLE tbl(i int primary key,
 								c1 money default 0, c2 money default 0,
 								c3 money default 0, updated_at timestamp)));
 $node->safe_psql('postgres', q(CREATE INDEX idx ON tbl(i, updated_at)));
@@ -58,10 +60,11 @@ if(!defined($pid = fork())) {
 	die "Cannot fork a child: $!";
 } elsif ($pid == 0) {
 
-	$node->psql('postgres', q(INSERT INTO tbl SELECT i,0,0,0,now() FROM generate_series(1, 1000) s(i);));
+	# $node->psql('postgres', q(INSERT INTO tbl SELECT i,0,0,0,now() FROM generate_series(1, 1000) s(i);));
+	# while [ $? -eq 0 ]; do make -C src/bin/pg_amcheck/ check PROVE_TESTS='t/007_*' ; done
 
 	$node->pgbench(
-		'--no-vacuum --client=20 --transactions=50000',
+		'--no-vacuum --client=40 --exit-on-abort --transactions=10000',
 		0,
 		[qr{actually processed}],
 		[qr{^$}],
@@ -69,26 +72,17 @@ if(!defined($pid = fork())) {
 		{
 			# Ensure some HOT updates happen
 			'001_pgbench_concurrent_transaction_updates' => q(
-				BEGIN;
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now()) on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now()) on conflict(i) do update set updated_at = now();
-				COMMIT;
+				INSERT INTO tbl VALUES(random()*1000,0,0,0,now()) on conflict(i) do update set updated_at = date_trunc('seconds', now());
 			),
-# 			'002_pgbench_concurrent_transaction_updates' => q(
-# 				BEGIN;
-# 				INSERT INTO tbl VALUES(69,0,0,0,now()) on conflict(i) do update set updated_at = now();
-# 				COMMIT;
-# 			),
-# 			'003_pgbench_concurrent_transaction_updates' => q(
-# 				BEGIN;
-# 				INSERT INTO tbl VALUES(42,0,0,0,now()) on conflict(i) do update set updated_at = now();
-# 				COMMIT;
-# 			),
-# 			'004_pgbench_concurrent_transaction_updates' => q(
-# 				BEGIN;
-# 				INSERT INTO tbl VALUES(31337,0,0,0,now()) on conflict(i) do update set updated_at = now();
-# 				COMMIT;
-# 			),
+			'002_pgbench_concurrent_transaction_updates' => q(
+				INSERT INTO tbl VALUES(random()*100,0,0,0,now()) on conflict(i)  do update set updated_at = date_trunc('seconds', now());
+			),
+			'003_pgbench_concurrent_transaction_updates' => q(
+				INSERT INTO tbl VALUES(random()*10000,0,0,0,now()) on conflict(i)  do update set updated_at = date_trunc('seconds', now());
+			),
+			'004_pgbench_concurrent_transaction_updates' => q(
+				INSERT INTO tbl VALUES(random()*100000,0,0,0,now()) on conflict(i)  do update set updated_at = date_trunc('seconds', now());
+			),
 		});
 
 	if ($child->is_passing()) {
@@ -129,16 +123,16 @@ if(!defined($pid = fork())) {
 		{
 
 			if (int(rand(2)) == 0) {
-				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=0);));
-			} else {
 				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=4);));
+			} else {
+				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=0);));
 			}
 			is($result, '0', 'ALTER TABLE is correct');
 
 
 			if (1)
 			{
-				my $sql = q(CREATE UNIQUE INDEX CONCURRENTLY idx_2 ON tbl(i););
+				my $sql = q(select pg_sleep(0); CREATE UNIQUE INDEX CONCURRENTLY idx_2 ON tbl(i););
 
 				($result, $stdout, $stderr) = $node->psql('postgres', $sql);
 				is($result, '0', 'CREATE INDEX is correct');
@@ -150,16 +144,18 @@ if(!defined($pid = fork())) {
 				{
 					diag($stderr);
 					diag($stderr_saved);
+					BAIL_OUT($stderr);
 				} else {
 					diag('create:)' . $n++);
 				}
 
-				if (1)
+				if (0)
 				{
 					($result, $stdout, $stderr) = $node->psql('postgres', q(REINDEX INDEX CONCURRENTLY idx_2;));
 					is($result, '0', 'REINDEX 2 is correct');
 					if ($result) {
 						diag($stderr);
+						BAIL_OUT($stderr);
 					}
 
 					($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT bt_index_parent_check('idx_2', heapallindexed => true, rootdescend => true, checkunique => true);));
@@ -167,6 +163,7 @@ if(!defined($pid = fork())) {
 					if ($result)
 					{
 						diag($stderr);
+						BAIL_OUT($stderr);
 					} else {
 						diag('reindex2:)' . $n++);
 					}

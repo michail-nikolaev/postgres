@@ -1538,7 +1538,7 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 		Datum		values[INDEX_MAX_KEYS];
 		bool		isnull[INDEX_MAX_KEYS];
 		char	   *key_desc;
-		bool		uniqueCheckFail;
+		bool		uniqueCheckFail = true;
 
 		/*
 		 * Some rather brain-dead implementations of qsort (such as the one in
@@ -1547,20 +1547,30 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 		 * does not.
 		 */
 		Assert(tuple1 != tuple2);
-		uniqueCheckFail = true;
 
+		/* This is fail-fast check, see _bt_load for details. */
 		if (arg->uniqueDeadIgnored)
 		{
-			bool    			tuple1Alive,
-								tuple2Alive;
+			bool    			any_tuple_dead,
+								call_again = false,
+								ignored;
 
 			TupleTableSlot 		*slot = MakeSingleTupleTableSlot(RelationGetDescr(arg->index.heapRel),
 																   &TTSOpsBufferHeapTuple);
+			ItemPointerData tid = tuple1->t_tid;
 
-			tuple1Alive = table_tuple_fetch_row_version(arg->index.heapRel, &tuple1->t_tid, SnapshotSelf, slot);
-			tuple2Alive = table_tuple_fetch_row_version(arg->index.heapRel, &tuple2->t_tid, SnapshotSelf, slot);
+			IndexFetchTableData *fetch = table_index_fetch_begin(arg->index.heapRel);
+			any_tuple_dead = !table_index_fetch_tuple(fetch, &tid, SnapshotSelf, slot, &call_again, &ignored);
 
-			if (!tuple1Alive || !tuple2Alive)
+			if (!any_tuple_dead)
+			{
+				call_again = false;
+				tid = tuple2->t_tid;
+				any_tuple_dead = !table_index_fetch_tuple(fetch, &tuple2->t_tid, SnapshotSelf, slot, &call_again,
+														  &ignored);
+			}
+
+			if (any_tuple_dead)
 			{
 				elog(DEBUG5, "skipping duplicate values because some of them are dead: (%u,%u) vs (%u,%u)",
 					 ItemPointerGetBlockNumber(&tuple1->t_tid),
@@ -1571,6 +1581,7 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 				uniqueCheckFail = false;
 			}
 			ExecDropSingleTupleTableSlot(slot);
+			table_index_fetch_end(fetch);
 		}
 		if (uniqueCheckFail)
 		{
