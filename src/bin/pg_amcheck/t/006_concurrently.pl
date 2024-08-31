@@ -171,6 +171,7 @@ if(!defined($pid = fork())) {
 				#ok(send_query_and_wait(\%psql, q[REINDEX INDEX CONCURRENTLY idx;], qr/^REINDEX$/m), 'REINDEX');
 				if ($result) {
 					diag($stderr);
+					BAIL_OUT($stderr);
 				}
 				#sleep(rand() * 0.5);
 
@@ -179,6 +180,7 @@ if(!defined($pid = fork())) {
 				if ($result)
 				{
 					diag($stderr);
+					BAIL_OUT($stderr);
 				} else {
 					diag('reindex:)' . $n++);
 				}
@@ -217,6 +219,7 @@ if(!defined($pid = fork())) {
 				{
 					diag($stderr);
 					diag($stderr_saved);
+					BAIL_OUT($stderr);
 				} else {
 					diag('create:)' . $n++);
 				}
@@ -227,6 +230,7 @@ if(!defined($pid = fork())) {
 					is($result, '0', 'REINDEX 2 is correct');
 					if ($result) {
 						diag($stderr);
+						BAIL_OUT($stderr);
 					}
 
 					($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT bt_index_parent_check('idx_2', heapallindexed => true, rootdescend => true, checkunique => true);));
@@ -234,6 +238,7 @@ if(!defined($pid = fork())) {
 					if ($result)
 					{
 						diag($stderr);
+						BAIL_OUT($stderr);
 					} else {
 						diag('reindex2:)' . $n++);
 					}
