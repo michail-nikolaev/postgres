@@ -149,7 +149,7 @@ if(!defined($pid = fork())) {
 					diag('create:)' . $n++);
 				}
 
-				if (0)
+				if (1)
 				{
 					($result, $stdout, $stderr) = $node->psql('postgres', q(REINDEX INDEX CONCURRENTLY idx_2;));
 					is($result, '0', 'REINDEX 2 is correct');

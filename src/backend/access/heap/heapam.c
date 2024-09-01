@@ -574,6 +574,19 @@ heap_prepare_pagescan(TableScanDesc sscan)
 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 }
 
+static inline void
+heap_reset_scan_snapshot(TableScanDesc sscan)
+{
+	UnregisterSnapshot(sscan->rs_snapshot);
+	sscan->rs_snapshot = InvalidSnapshot;
+
+	InvalidateCatalogSnapshotConditionally(); // TODO: remove?
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	Assert(!TransactionIdIsValid(MyProc->xid));
+
+	sscan->rs_snapshot = RegisterSnapshot(GetLatestSnapshot());
+}
+
 /*
  * heap_fetch_next_buffer - read and pin the next block from MAIN_FORKNUM.
  *
@@ -590,6 +603,11 @@ heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
 	{
 		ReleaseBuffer(scan->rs_cbuf);
 		scan->rs_cbuf = InvalidBuffer;
+	}
+
+	if (unlikely(scan->rs_base.rs_flags & SO_RESET_SNAPSHOT) & likely(scan->rs_inited))
+	{
+		heap_reset_scan_snapshot((TableScanDesc) scan);
 	}
 
 	/*
@@ -1241,6 +1259,9 @@ heap_endscan(TableScanDesc sscan)
 	if (scan->rs_parallelworkerdata != NULL)
 		pfree(scan->rs_parallelworkerdata);
 
+	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+		Assert(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT);
+
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
 
@@ -1324,12 +1345,6 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot,
 							 scan->rs_cbuf);
 	return true;
-}
-
-void
-heap_setscansnapshot(TableScanDesc sscan, Snapshot snapshot)
-{
-	sscan->rs_snapshot = snapshot;
 }
 
 void

@@ -70,6 +70,7 @@ typedef enum ScanOptions
 	 * needed. If table data may be needed, set SO_NEED_TUPLES.
 	 */
 	SO_NEED_TUPLES = 1 << 10,
+	SO_RESET_SNAPSHOT = 1 << 11,
 }			ScanOptions;
 
 /*
@@ -945,7 +946,8 @@ extern TableScanDesc table_beginscan_catalog(Relation relation, int nkeys,
 static inline TableScanDesc
 table_beginscan_strat(Relation rel, Snapshot snapshot,
 					  int nkeys, struct ScanKeyData *key,
-					  bool allow_strat, bool allow_sync)
+					  bool allow_strat, bool allow_sync,
+					  bool reset_snapshot)
 {
 	uint32		flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
 
@@ -953,6 +955,8 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 		flags |= SO_ALLOW_STRAT;
 	if (allow_sync)
 		flags |= SO_ALLOW_SYNC;
+	if (reset_snapshot)
+		flags |= (SO_RESET_SNAPSHOT | SO_TEMP_SNAPSHOT);
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
