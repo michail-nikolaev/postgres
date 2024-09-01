@@ -1742,7 +1742,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 		UnregisterSnapshot(snapshot);
 	if (reset_snapshots)
 	{
-		InvalidateCatalogSnapshotConditionally();
 		Assert(!TransactionIdIsValid(MyProc->xmin));
 		Assert(!TransactionIdIsValid(MyProc->xid));
 	}
@@ -1842,7 +1841,6 @@ heapam_index_validate_scan(Relation table_rel,
 				PopActiveSnapshot();
 				UnregisterSnapshot(snapshot);
 
-				InvalidateCatalogSnapshotConditionally();
 				Assert(!TransactionIdIsValid(MyProc->xmin));
 				Assert(!TransactionIdIsValid(MyProc->xid));
 

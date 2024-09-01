@@ -1643,8 +1643,6 @@ index_concurrently_build(Oid heapRelationId,
 
 	indexRelation = index_open(indexRelationId, RowExclusiveLock);
 
-	InvalidateCatalogSnapshotConditionally();
-
 	Assert(!TransactionIdIsValid(MyProc->xmin));
 	Assert(!TransactionIdIsValid(MyProc->xid));
 

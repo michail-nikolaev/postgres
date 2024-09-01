@@ -580,7 +580,6 @@ heap_reset_scan_snapshot(TableScanDesc sscan)
 	UnregisterSnapshot(sscan->rs_snapshot);
 	sscan->rs_snapshot = InvalidSnapshot;
 
-	InvalidateCatalogSnapshotConditionally(); // TODO: remove?
 	Assert(!TransactionIdIsValid(MyProc->xmin));
 	Assert(!TransactionIdIsValid(MyProc->xid));
 
