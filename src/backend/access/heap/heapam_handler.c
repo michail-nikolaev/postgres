@@ -1193,14 +1193,10 @@ heapam_index_build_range_scan(Relation heapRelation,
 	ExprContext *econtext;
 	Snapshot	snapshot;
 	bool		need_unregister_snapshot = false;
-	bool		need_pop_active_snapshot = false;
 	TransactionId OldestXmin;
 	BlockNumber previous_blkno = InvalidBlockNumber;
 	BlockNumber root_blkno = InvalidBlockNumber;
 	OffsetNumber root_offsets[MaxHeapTuplesPerPage];
-	instr_time		snapshotTime,
-					currentTime,
-					elapsed;
 	/*
 	 * sanity checks
 	 */
@@ -1219,8 +1215,8 @@ heapam_index_build_range_scan(Relation heapRelation,
 	 */
 	Assert(!(anyvisible && checking_uniqueness));
 	Assert(!(anyvisible && reset_snapshots));
-	Assert(!reset_snapshots || !HaveRegisteredOrActiveSnapshot());
-	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xid));
+	Assert(!reset_snapshots || !HaveRegisteredOrActiveSnapshot() || scan);
+	Assert(!reset_snapshots || !TransactionIdIsValid(MyProc->xid) || scan);
 
 	/*
 	 * Need an EState for evaluation of index expressions and partial-index
@@ -1260,12 +1256,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 		if (!TransactionIdIsValid(OldestXmin))
 		{
 			snapshot = RegisterSnapshot(GetTransactionSnapshot());
-			need_unregister_snapshot = true;
-			if (reset_snapshots)
-			{
-				PushActiveSnapshot(snapshot);
-				need_pop_active_snapshot = true;
-			}
+			need_unregister_snapshot = !reset_snapshots;
 		}
 		else
 		{
@@ -1278,7 +1269,8 @@ heapam_index_build_range_scan(Relation heapRelation,
 									 0, /* number of keys */
 									 NULL,	/* scan key */
 									 true,	/* buffer access strategy OK */
-									 allow_sync);	/* syncscan OK? */
+									 allow_sync,	/* syncscan OK? */
+									 reset_snapshots);
 	}
 	else
 	{
@@ -1292,16 +1284,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 		Assert(!IsBootstrapProcessingMode());
 		Assert(allow_sync);
 		snapshot = scan->rs_snapshot;
-		if (reset_snapshots)
-		{
-			snapshot = RegisterSnapshot(snapshot);
-			need_unregister_snapshot = true;
-			PushActiveSnapshot(snapshot);
-			need_pop_active_snapshot = true;
-		}
 	}
-	if (reset_snapshots)
-		INSTR_TIME_SET_CURRENT(snapshotTime);
 
 	hscan = (HeapScanDesc) scan;
 
@@ -1355,28 +1338,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 		bool		tupleIsAlive;
 
 		CHECK_FOR_INTERRUPTS();
-
-		if (reset_snapshots)
-		{
-			INSTR_TIME_SET_CURRENT(currentTime);
-			elapsed = currentTime;
-			INSTR_TIME_SUBTRACT(elapsed, snapshotTime);
-			if (INSTR_TIME_GET_MILLISEC(elapsed) >= VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL)
-			{
-				PopActiveSnapshot();
-				UnregisterSnapshot(snapshot);
-
-				InvalidateCatalogSnapshotConditionally();
-				Assert(!TransactionIdIsValid(MyProc->xmin));
-				Assert(!TransactionIdIsValid(MyProc->xid));
-
-				snapshot = RegisterSnapshot(GetLatestSnapshot());
-				PushActiveSnapshot(snapshot);
-				heap_setscansnapshot(scan, snapshot);
-
-				INSTR_TIME_SET_CURRENT(snapshotTime);
-			}
-		}
 
 		/* Report scan progress, if asked to. */
 		if (progress)
@@ -1772,8 +1733,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 	table_endscan(scan);
 
-	if (need_pop_active_snapshot)
-		PopActiveSnapshot();
 	/* we can now forget our snapshot, if set and registered by us */
 	if (need_unregister_snapshot)
 		UnregisterSnapshot(snapshot);
