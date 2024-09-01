@@ -1807,7 +1807,7 @@ DefineIndex(Oid tableId,
 		set_indexsafe_procflags();
 
 	/* We should now definitely not be advertising any xmin. */
-	Assert(MyProc->xmin == InvalidTransactionId);
+	Assert(MyProc->xmin == InvalidTransactionId && MyProc->catalogXmin == InvalidTransactionId);
 
 	/*
 	 * The index is now valid in the sense that it contains all currently
@@ -4561,7 +4561,8 @@ set_indexsafe_procflags(void)
 	 * otherwise, concurrent processes could see an Xmin that moves backwards.
 	 */
 	Assert(MyProc->xid == InvalidTransactionId &&
-		   MyProc->xmin == InvalidTransactionId);
+		   MyProc->xmin == InvalidTransactionId &&
+		   MyProc->catalogXmin == InvalidTransactionId);
 
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 	MyProc->statusFlags |= PROC_IN_SAFE_IC;

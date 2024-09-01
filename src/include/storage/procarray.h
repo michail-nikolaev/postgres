@@ -45,6 +45,7 @@ extern int	GetMaxSnapshotXidCount(void);
 extern int	GetMaxSnapshotSubxidCount(void);
 
 extern Snapshot GetSnapshotData(Snapshot snapshot);
+extern Snapshot GetCatalogSnapshotData(Snapshot snapshot);
 
 extern bool ProcArrayInstallImportedXmin(TransactionId xmin,
 										 VirtualTransactionId *sourcevxid);
