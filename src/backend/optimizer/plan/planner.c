@@ -6863,12 +6863,6 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 		goto done;
 	}
 
-	if (snapshot != InvalidSnapshot)
-	{
-		PopActiveSnapshot();
-		UnregisterSnapshot(snapshot);
-	}
-
 	/*
 	 * If parallel_workers storage parameter is set for the table, accept that
 	 * as the number of parallel worker processes to launch (though still cap
@@ -6911,6 +6905,12 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 		parallel_workers--;
 
 done:
+	if (snapshot != InvalidSnapshot)
+	{
+		PopActiveSnapshot();
+		UnregisterSnapshot(snapshot);
+	}
+
 	index_close(index, NoLock);
 	table_close(heap, NoLock);
 

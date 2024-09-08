@@ -273,7 +273,6 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 		/* Scan the table, adding all tuples to the tuplesort */
 		reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
-										   ResetSnapshotsAllowed(indexInfo),
 										   gistSortedBuildCallback,
 										   (void *) &buildstate, NULL);
 
@@ -313,7 +312,6 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 		/* Scan the table, inserting all the tuples to the index. */
 		reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
-										   ResetSnapshotsAllowed(indexInfo),
 										   gistBuildCallback,
 										   (void *) &buildstate, NULL);
 

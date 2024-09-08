@@ -158,7 +158,7 @@ if(!defined($pid = fork())) {
 		{
 
 			if (int(rand(2)) == 0) {
-				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=0);));
+				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=1);));
 			} else {
 				($result, $stdout, $stderr) = $node->psql('postgres', q(ALTER TABLE tbl SET (parallel_workers=4);));
 			}
@@ -166,14 +166,13 @@ if(!defined($pid = fork())) {
 
 			if (1)
 			{
-				($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT pg_sleep(0);REINDEX INDEX CONCURRENTLY idx;));
+				($result, $stdout, $stderr) = $node->psql('postgres', q(REINDEX INDEX CONCURRENTLY idx;));
 				is($result, '0', 'REINDEX is correct');
-				#ok(send_query_and_wait(\%psql, q[REINDEX INDEX CONCURRENTLY idx;], qr/^REINDEX$/m), 'REINDEX');
+
 				if ($result) {
 					diag($stderr);
 					BAIL_OUT($stderr);
 				}
-				#sleep(rand() * 0.5);
 
 				($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT bt_index_parent_check('idx', heapallindexed => true, rootdescend => true, checkunique => true);));
 				is($result, '0', 'bt_index_check is correct');
@@ -188,7 +187,7 @@ if(!defined($pid = fork())) {
 
 			if (1)
 			{
-				my $variant = int(rand(6));
+				my $variant = int(rand(7));
 				my $sql;
 				if ($variant == 0) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at););
@@ -202,16 +201,14 @@ if(!defined($pid = fork())) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(predicate_const(i)););
 				} elsif ($variant == 5) {
 					$sql = q(CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, predicate_const(i), updated_at) WHERE predicate_const(i););
-				} elsif ($variant == 5) {
+				} elsif ($variant == 6) {
 					$sql = q(CREATE UNIQUE INDEX CONCURRENTLY idx_2 ON tbl(i););
 				} else { diag("wrong variant"); }
 
+				diag($sql);
 				($result, $stdout, $stderr) = $node->psql('postgres', $sql);
 				is($result, '0', 'CREATE INDEX is correct');
 				$stderr_saved = $stderr;
-				#ok(send_query_and_wait(\%psql, q[CREATE INDEX CONCURRENTLY idx_2 ON tbl(i, updated_at) WHERE predicate_stable();], qr/^CREATE INDEX$/m), 'CREATE INDEX');
-
-				#sleep(rand() * 0.5);
 
 				($result, $stdout, $stderr) = $node->psql('postgres', q(SELECT bt_index_parent_check('idx_2', heapallindexed => true, rootdescend => true, checkunique => true);));
 				is($result, '0', 'bt_index_check for new index is correct');

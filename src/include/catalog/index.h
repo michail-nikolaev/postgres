@@ -44,7 +44,7 @@ typedef struct ReindexParams
 #define REINDEXOPT_MISSING_OK 	0x04	/* skip missing relations */
 #define REINDEXOPT_CONCURRENTLY	0x08	/* concurrent mode */
 
-#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL	500	/* 500 ms */
+#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL	50	/* 50 ms */
 
 /* state info for validate_index bulkdelete callback */
 typedef struct ValidateIndexState
@@ -134,8 +134,6 @@ extern IndexInfo *BuildIndexInfo(Relation index);
 
 extern IndexInfo *BuildDummyIndexInfo(Relation index);
 
-extern bool ResetSnapshotsAllowed(const IndexInfo* indexInfo);
-
 extern bool CompareIndexInfo(const IndexInfo *info1, const IndexInfo *info2,
 							 const Oid *collations1, const Oid *collations2,
 							 const Oid *opfamilies1, const Oid *opfamilies2,
@@ -155,7 +153,7 @@ extern void index_build(Relation heapRelation,
 						bool isreindex,
 						bool parallel);
 
-extern TransactionId validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex);
+extern TransactionId validate_index(Oid heapId, Oid indexId, Oid auxIndexId);
 
 extern void index_set_state_flags(Oid indexId, IndexStateFlagsAction action);
 

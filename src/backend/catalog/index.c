@@ -1552,7 +1552,7 @@ index_concurrently_create_aux(Relation heapRelation, Oid mainIndexId,
 							oldInfo->ii_NullsNotDistinct,
 							false,	/* not ready for inserts */
 							true,
-							false /* aux are not summarizing */);
+							false); /* aux are not summarizing */
 
 	/*
 	 * Extract the list of column names and the column numbers for the new
@@ -1660,21 +1660,14 @@ index_concurrently_build(Oid heapRelationId,
 	indexInfo->ii_Concurrent = true;
 	indexInfo->ii_BrokenHotChain = false;
 
-	if (ResetSnapshotsAllowed(indexInfo))
-	{
-		PopActiveSnapshot();
-		UnregisterSnapshot(snapshot);
-		snapshot = InvalidSnapshot;
-	}
+	PopActiveSnapshot();
+	UnregisterSnapshot(snapshot);
+	snapshot = InvalidSnapshot;
 
 	/* Now build the index */
  	index_build(heapRel, indexRelation, indexInfo, false, true);
 
-	if (snapshot != InvalidSnapshot)
-	{
-		UnregisterSnapshot(snapshot);
-		PopActiveSnapshot();
-	}
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	/* Roll back any GUC changes executed by index functions */
  	AtEOXact_GUC(false, save_nestlevel);
@@ -2652,14 +2645,6 @@ BuildDummyIndexInfo(Relation index)
 	return ii;
 }
 
-bool
-ResetSnapshotsAllowed(const IndexInfo* indexInfo)
-{
-	return indexInfo->ii_Concurrent &&
-		   (indexInfo->ii_Predicate == NULL) &&
-		   (indexInfo->ii_Expressions == NULL) && !TransactionIdIsValid(MyProc->xid);
-}
-
 /*
  * CompareIndexInfo
  *		Return whether the properties of two indexes (in different tables)
@@ -3453,7 +3438,7 @@ IndexCheckExclusion(Relation heapRelation,
  * add yet more locking issues.
  */
 TransactionId
-validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
+validate_index(Oid heapId, Oid indexId, Oid auxIndexId)
 {
 	Relation	heapRelation,
 			indexRelation,
@@ -3565,14 +3550,13 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	(void) index_bulk_delete(&auxivinfo, NULL,
 							 validate_index_callback, (void *) &auxState);
 
-	if (safeIndex)
-	{
-		PopActiveSnapshot();
-		UnregisterSnapshot(snapshot);
+	PopActiveSnapshot();
+	UnregisterSnapshot(snapshot);
 
-		snapshot = RegisterSnapshot(GetLatestSnapshot());
-		PushActiveSnapshot(snapshot);
-	}
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	PushActiveSnapshot(snapshot);
 
 
 	state.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
@@ -3612,12 +3596,14 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	 * limitXmin for GetCurrentVirtualXIDs().
  	*/
 	limitXmin = snapshot->xmin;
-	if (safeIndex)
-	{
-		PopActiveSnapshot();
-		UnregisterSnapshot(snapshot);
-		snapshot = InvalidSnapshot;
-	}
+
+
+	PopActiveSnapshot();
+	UnregisterSnapshot(snapshot);
+	snapshot = InvalidSnapshot;
+
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+
 
 	/*
 	 * Now scan the heap and "merge" it with the index
@@ -3632,12 +3618,6 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 							  snapshot, /* may be invalid */
 							  &state,
 							  &auxState));
-
-	if (snapshot != InvalidSnapshot)
-	{
-		PopActiveSnapshot();
-		UnregisterSnapshot(snapshot);
-	}
 
 	/* Done with tuplesort object */
 	tuplesort_end(state.tuplesort);
@@ -3663,6 +3643,7 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, bool safeIndex)
 	table_close(heapRelation, NoLock);
 
 	Assert(!HaveRegisteredOrActiveSnapshot());
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 	return limitXmin;
 }
 

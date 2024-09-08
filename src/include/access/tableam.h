@@ -24,6 +24,7 @@
 #include "storage/read_stream.h"
 #include "utils/rel.h"
 #include "utils/snapshot.h"
+#include "utils/injection_point.h"
 
 
 #define DEFAULT_TABLE_ACCESS_METHOD	"heap"
@@ -697,7 +698,6 @@ typedef struct TableAmRoutine
 										   bool allow_sync,
 										   bool anyvisible,
 										   bool progress,
-										   bool reset_snapshots,
 										   BlockNumber start_blockno,
 										   BlockNumber numblocks,
 										   IndexBuildCallback callback,
@@ -946,7 +946,10 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 	if (allow_sync)
 		flags |= SO_ALLOW_SYNC;
 	if (reset_snapshot)
+	{
+		INJECTION_POINT("table_beginscan_strat_reset_snapshots");
 		flags |= (SO_RESET_SNAPSHOT | SO_TEMP_SNAPSHOT);
+	}
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
@@ -1785,7 +1788,6 @@ table_index_build_scan(Relation table_rel,
 					   struct IndexInfo *index_info,
 					   bool allow_sync,
 					   bool progress,
-					   bool reset_snapshots,
 					   IndexBuildCallback callback,
 					   void *callback_state,
 					   TableScanDesc scan)
@@ -1796,7 +1798,6 @@ table_index_build_scan(Relation table_rel,
 														 allow_sync,
 														 false,
 														 progress,
-														 reset_snapshots,
 														 0,
 														 InvalidBlockNumber,
 														 callback,
@@ -1821,7 +1822,6 @@ table_index_build_range_scan(Relation table_rel,
 							 bool allow_sync,
 							 bool anyvisible,
 							 bool progress,
-							 bool reset_snapshots,
 							 BlockNumber start_blockno,
 							 BlockNumber numblocks,
 							 IndexBuildCallback callback,
@@ -1834,7 +1834,6 @@ table_index_build_range_scan(Relation table_rel,
 														 allow_sync,
 														 anyvisible,
 														 progress,
-														 reset_snapshots,
 														 start_blockno,
 														 numblocks,
 														 callback,

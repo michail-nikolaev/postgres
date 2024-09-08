@@ -172,7 +172,6 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	/* do the heap scan */
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
-									   ResetSnapshotsAllowed(indexInfo),
 									   hashbuildCallback,
 									   (void *) &buildstate, NULL);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL,

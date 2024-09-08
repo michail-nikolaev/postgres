@@ -578,13 +578,19 @@ heap_prepare_pagescan(TableScanDesc sscan)
 static inline void
 heap_reset_scan_snapshot(TableScanDesc sscan)
 {
+	Assert(ActiveSnapshotSet());
+	PopActiveSnapshot();
 	UnregisterSnapshot(sscan->rs_snapshot);
 	sscan->rs_snapshot = InvalidSnapshot;
 
 	Assert(!TransactionIdIsValid(MyProc->xmin));
-	Assert(!TransactionIdIsValid(MyProc->xid));
+#if USE_INJECTION_POINTS
+	if (!TransactionIdIsValid(MyProc->xid))
+		INJECTION_POINT("heap_reset_scan_snapshot_effective");
+#endif
 
 	sscan->rs_snapshot = RegisterSnapshot(GetLatestSnapshot());
+	PushActiveSnapshot(sscan->rs_snapshot);
 }
 
 /*
@@ -1260,7 +1266,11 @@ heap_endscan(TableScanDesc sscan)
 		pfree(scan->rs_parallelworkerdata);
 
 	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+	{
 		Assert(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT);
+		Assert(ActiveSnapshotSet());
+		PopActiveSnapshot();
+	}
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
