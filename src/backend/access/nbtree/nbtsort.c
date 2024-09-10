@@ -1966,7 +1966,7 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	TableScanDesc scan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
-	Snapshot snapshot;
+	Snapshot snapshot = InvalidSnapshot;
 
 	/* Initialize local tuplesort coordination state */
 	coordinate = palloc0(sizeof(SortCoordinateData));
@@ -2026,10 +2026,11 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 		PushActiveSnapshot(snapshot);
 	}
 	indexInfo = BuildIndexInfo(btspool->index);
-	if (btshared->isconcurrent)
+	if (snapshot != InvalidSnapshot)
 	{
 		PopActiveSnapshot();
 		UnregisterSnapshot(snapshot);
+		snapshot = InvalidSnapshot;
 	}
 	Assert(!btshared->isconcurrent || !TransactionIdIsValid(MyProc->xmin));
 

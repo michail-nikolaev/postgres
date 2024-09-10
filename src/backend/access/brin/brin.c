@@ -2817,7 +2817,7 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 	TableScanDesc scan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
-	Snapshot	snapshot;
+	Snapshot	snapshot = InvalidSnapshot;
 
 	/* Initialize local tuplesort coordination state */
 	coordinate = palloc0(sizeof(SortCoordinateData));
@@ -2838,10 +2838,11 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 	}
 	/* Join parallel scan */
 	indexInfo = BuildIndexInfo(index);
-	if (brinshared->isconcurrent)
+	if (snapshot != InvalidSnapshot)
 	{
 		PopActiveSnapshot();
 		UnregisterSnapshot(snapshot);
+		snapshot = InvalidSnapshot;
 	}
 	Assert(!brinshared->isconcurrent || !TransactionIdIsValid(MyProc->xmin));
 	indexInfo->ii_Concurrent = brinshared->isconcurrent;
