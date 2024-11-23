@@ -118,6 +118,7 @@
 #include "utils/multirangetypes.h"
 #include "utils/rangetypes.h"
 #include "utils/snapmgr.h"
+#include "utils/injection_point.h"
 
 /* waitMode argument to check_exclusion_or_unique_constraint() */
 typedef enum
@@ -780,7 +781,9 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
 	/*
 	 * Search the tuples that are in the index for any violations, including
 	 * tuples that aren't visible yet.
-	 */
+	 * Snapshot dirty may miss some tuples in the case of parallel updates,
+	 * but it is acceptable here.
+	*/
 	InitDirtySnapshot(DirtySnapshot);
 
 	for (i = 0; i < indnkeyatts; i++)
@@ -950,6 +953,8 @@ retry:
 		INJECTION_POINT("check-exclusion-or-unique-constraint-no-conflict", NULL);
 #endif
 
+	if (!conflict)
+		INJECTION_POINT("check_exclusion_or_unique_constraint_no_conflict", NULL);
 	return !conflict;
 }
 
