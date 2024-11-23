@@ -44,6 +44,7 @@ tests += {
     'specs': [
       'basic',
       'inplace',
+      'dirty_index_scan',
     ],
   },
   'tap': {
