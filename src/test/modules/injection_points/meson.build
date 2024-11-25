@@ -44,6 +44,7 @@ tests += {
     'specs': [
       'basic',
       'inplace',
+      'index_concurrently_upsert',
     ],
   },
   'tap': {
