@@ -45,6 +45,8 @@ tests += {
       'basic',
       'inplace',
     ],
+    # The injection points are cluster-wide, so disable installcheck
+    'runningcheck': false,
   },
   'tap': {
     'env': {
@@ -53,5 +55,7 @@ tests += {
     'tests': [
       't/001_stats.pl',
     ],
+    # The injection points are cluster-wide, so disable installcheck
+    'runningcheck': false,
   },
 }
