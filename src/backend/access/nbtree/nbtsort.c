@@ -1410,6 +1410,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	bool		leaderparticipates = true;
+	bool		need_pop_active_snapshot = true;
 	int			querylen;
 
 #ifdef DISABLE_LEADER_PARTICIPATION
@@ -1435,9 +1436,16 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	 * live according to that.
 	 */
 	if (!isconcurrent)
+	{
+		Assert(ActiveSnapshotSet());
 		snapshot = SnapshotAny;
+		need_pop_active_snapshot = false;
+	}
 	else
+	{
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+		PushActiveSnapshot(snapshot);
+	}
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BTREE_SHARED workspace, and
@@ -1491,6 +1499,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		if (IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
@@ -1585,6 +1595,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		_bt_end_parallel(btleader);
 		return;
 	}
@@ -1601,6 +1613,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	 * sure that the failure-to-start case will not hang forever.
 	 */
 	WaitForParallelWorkersToAttach(pcxt);
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 }
 
 /*
