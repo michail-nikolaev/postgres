@@ -44,7 +44,16 @@ tests += {
     'specs': [
       'basic',
       'inplace',
+      'reindex_concurrently_upsert',
+      'index_concurrently_upsert',
+      'reindex_concurrently_upsert_partitioned',
+      'reindex_concurrently_upsert_on_constraint',
+      'index_concurrently_upsert_predicate',
     ],
+    # The injection points are cluster-wide, so disable installcheck
+    'runningcheck': false,
+    # We waiting for all snapshots, so, avoid parallel test executions
+    'runningcheck-parallel': false,
   },
   'tap': {
     'env': {
@@ -53,5 +62,7 @@ tests += {
     'tests': [
       't/001_stats.pl',
     ],
+    # The injection points are cluster-wide, so disable installcheck
+    'runningcheck': false,
   },
 }

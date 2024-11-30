@@ -43,6 +43,7 @@ tests += {
     'tests': [
       't/001_pgbench_with_server.pl',
       't/002_pgbench_no_server.pl',
+      't/003_pgbench_nested_ifs.pl',
     ],
   },
 }
