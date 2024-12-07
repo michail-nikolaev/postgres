@@ -100,8 +100,6 @@ static bool _bt_check_rowcompare(ScanKey skey,
 								 ScanDirection dir, bool *continuescan);
 static void _bt_checkkeys_look_ahead(IndexScanDesc scan, BTReadPageState *pstate,
 									 int tupnatts, TupleDesc tupdesc);
-static int	_bt_keep_natts(Relation rel, IndexTuple lastleft,
-						   IndexTuple firstright, BTScanInsert itup_key);
 
 
 /*
@@ -4684,7 +4682,7 @@ _bt_truncate(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 	Assert(!BTreeTupleIsPivot(lastleft) && !BTreeTupleIsPivot(firstright));
 
 	/* Determine how many attributes must be kept in truncated tuple */
-	keepnatts = _bt_keep_natts(rel, lastleft, firstright, itup_key);
+	keepnatts = _bt_keep_natts(rel, lastleft, firstright, itup_key, NULL);
 
 #ifdef DEBUG_NO_TRUNCATE
 	/* Force truncation to be ineffective for testing purposes */
@@ -4802,17 +4800,24 @@ _bt_truncate(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 /*
  * _bt_keep_natts - how many key attributes to keep when truncating.
  *
+ * This is exported to be used as comparison function during concurrent
+ * unique index build in case _bt_keep_natts_fast is not suitable because
+ * collation is not "allequalimage"/deduplication-safe.
+ *
  * Caller provides two tuples that enclose a split point.  Caller's insertion
  * scankey is used to compare the tuples; the scankey's argument values are
  * not considered here.
+ *
+ * hasnulls value set to true in case of any null column in any tuple.
  *
  * This can return a number of attributes that is one greater than the
  * number of key attributes for the index relation.  This indicates that the
  * caller must use a heap TID as a unique-ifier in new pivot tuple.
  */
-static int
+int
 _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
-			   BTScanInsert itup_key)
+			   BTScanInsert itup_key,
+			   bool *hasnulls)
 {
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
 	TupleDesc	itupdesc = RelationGetDescr(rel);
@@ -4838,6 +4843,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 
 		datum1 = index_getattr(lastleft, attnum, itupdesc, &isNull1);
 		datum2 = index_getattr(firstright, attnum, itupdesc, &isNull2);
+		if (hasnulls)
+			(*hasnulls) |= (isNull1 || isNull2);
 
 		if (isNull1 != isNull2)
 			break;
@@ -4857,7 +4864,7 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 	 * expected in an allequalimage index.
 	 */
 	Assert(!itup_key->allequalimage ||
-		   keepnatts == _bt_keep_natts_fast(rel, lastleft, firstright));
+		   keepnatts == _bt_keep_natts_fast(rel, lastleft, firstright, NULL));
 
 	return keepnatts;
 }
@@ -4868,7 +4875,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
  * This is exported so that a candidate split point can have its effect on
  * suffix truncation inexpensively evaluated ahead of time when finding a
  * split location.  A naive bitwise approach to datum comparisons is used to
- * save cycles.
+ * save cycles. Also, it may be used as comparison function during concurrent
+ * build of unique index.
  *
  * The approach taken here usually provides the same answer as _bt_keep_natts
  * will (for the same pair of tuples from a heapkeyspace index), since the
@@ -4876,6 +4884,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
  * unless they're bitwise equal after detoasting.  When an index only has
  * "equal image" columns, routine is guaranteed to give the same result as
  * _bt_keep_natts would.
+ *
+ * hasnulls value set to true in case of any null column in any tuple.
  *
  * Callers can rely on the fact that attributes considered equal here are
  * definitely also equal according to _bt_keep_natts, even when the index uses
@@ -4885,7 +4895,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
  * more balanced split point.
  */
 int
-_bt_keep_natts_fast(Relation rel, IndexTuple lastleft, IndexTuple firstright)
+_bt_keep_natts_fast(Relation rel, IndexTuple lastleft, IndexTuple firstright,
+					bool *hasnulls)
 {
 	TupleDesc	itupdesc = RelationGetDescr(rel);
 	int			keysz = IndexRelationGetNumberOfKeyAttributes(rel);
@@ -4902,6 +4913,8 @@ _bt_keep_natts_fast(Relation rel, IndexTuple lastleft, IndexTuple firstright)
 
 		datum1 = index_getattr(lastleft, attnum, itupdesc, &isNull1);
 		datum2 = index_getattr(firstright, attnum, itupdesc, &isNull2);
+		if (hasnulls)
+			*hasnulls |= (isNull1 | isNull2);
 		att = TupleDescCompactAttr(itupdesc, attnum - 1);
 
 		if (isNull1 != isNull2)
