@@ -65,7 +65,7 @@ if(!defined($pid = fork())) {
 } elsif ($pid == 0) {
 
 	$node->pgbench(
-		'--no-vacuum --client=20 --transactions=1000',
+		'--no-vacuum --client=50 --transactions=1000',
 		0,
 		[qr{actually processed}],
 		[qr{^$}],
