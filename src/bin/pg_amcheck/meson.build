@@ -28,8 +28,7 @@ tests += {
       't/003_check.pl',
       't/004_verify_heapam.pl',
       't/005_opclass_damage.pl',
-      't/006_concurrently_1.pl',
-      't/007_concurrently_2.pl',
+      't/006_concurrently.pl',
     ],
   },
 }

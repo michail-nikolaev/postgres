@@ -42,16 +42,14 @@ my $psql_timeout = IPC::Run::timer($PostgreSQL::Test::Utils::timeout_default);
 # Test set-up
 #
 my ($node, $result);
-$node = PostgreSQL::Test::Cluster->new('RC_test_1');
+$node = PostgreSQL::Test::Cluster->new('RC_test_2');
 $node->init;
 $node->append_conf('postgresql.conf',
 	'lock_timeout = ' . (1000 * $PostgreSQL::Test::Utils::timeout_default));
 $node->append_conf('postgresql.conf', 'fsync = off');
 $node->start;
 $node->safe_psql('postgres', q(CREATE EXTENSION amcheck));
-$node->safe_psql('postgres', q(CREATE UNLOGGED TABLE tbl(i int primary key,
-								c1 money default 0, c2 money default 0,
-								c3 money default 0, updated_at timestamp)));
+$node->safe_psql('postgres', q(CREATE TABLE tbl(i int primary key, updated_at timestamp)));
 
 my $builder = Test::More->builder;
 $builder->use_numbers(0);
@@ -64,54 +62,22 @@ if(!defined($pid = fork())) {
 	die "Cannot fork a child: $!";
 } elsif ($pid == 0) {
 
+ 	$node->psql('postgres', q(INSERT INTO tbl SELECT i,now() FROM generate_series(1, 10000) s(i);));
 	$node->pgbench(
-		'--no-vacuum --client=50 --transactions=1000',
+		'--no-vacuum --client=60 --transactions=1000',
 		0,
 		[qr{actually processed}],
 		[qr{^$}],
 		'concurrent INSERTs, UPDATES and RC',
 		{
-			'001_pgbench_concurrent_transaction_inserts' => q(
+			'001_pgbench_concurrent_transaction_updates' => q(
 				BEGIN;
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*10000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				COMMIT;
-			  ),
-			'002_pgbench_concurrent_transaction_inserts' => q(
-				BEGIN;
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*100000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				COMMIT;
-			  ),
-			# Ensure some HOT updates happen
-			'003_pgbench_concurrent_transaction_updates' => q(
-				BEGIN;
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
-				INSERT INTO tbl VALUES(random()*1000,0,0,0,now())
-					on conflict(i) do update set updated_at = now();
+						UPDATE tbl SET updated_at = now() WHERE i = floor(random()*10000);
+						UPDATE tbl SET updated_at = now() WHERE i = floor(random()*10000);
+						UPDATE tbl SET updated_at = now() WHERE i = floor(random()*10000);
+						UPDATE tbl SET updated_at = now() WHERE i = floor(random()*10000);
+						UPDATE tbl SET updated_at = now() WHERE i = floor(random()*10000);
+						UPDATE tbl SET updated_at = now() WHERE i = floor(random()*10000);
 				COMMIT;
 			  )
 		});
