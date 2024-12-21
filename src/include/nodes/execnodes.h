@@ -155,8 +155,8 @@ typedef struct ExprState
  *		entries for a particular index.  Used for both index_build and
  *		retail creation of index entries.
  *
- * ii_Concurrent, ii_BrokenHotChain, and ii_ParallelWorkers are used only
- * during index build; they're conventionally zeroed otherwise.
+ * ii_Concurrent, ii_BrokenHotChain, ii_Auxiliary and ii_ParallelWorkers
+ * are used only during index build; they're conventionally zeroed otherwise
  * ----------------
  */
 typedef struct IndexInfo
@@ -216,7 +216,8 @@ typedef struct IndexInfo
 	bool		ii_WithoutOverlaps;
 	/* # of workers requested (excludes leader) */
 	int			ii_ParallelWorkers;
-
+	/* is auxiliary for concurrent index build? */
+	bool		ii_Auxiliary;
 	/* Oid of index AM */
 	Oid			ii_Am;
 	/* private cache area for index AM */
