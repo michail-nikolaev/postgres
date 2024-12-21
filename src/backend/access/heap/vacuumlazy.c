@@ -3121,6 +3121,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	ivinfo.message_level = DEBUG2;
 	ivinfo.num_heap_tuples = reltuples;
 	ivinfo.strategy = vacrel->bstrategy;
+	ivinfo.validate_index = false;
 
 	/*
 	 * Update error traceback information.
@@ -3172,6 +3173,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 
 	ivinfo.num_heap_tuples = reltuples;
 	ivinfo.strategy = vacrel->bstrategy;
+	ivinfo.validate_index = false;
 
 	/*
 	 * Update error traceback information.
