@@ -172,12 +172,13 @@ typedef struct ExprState
  *		BrokenHotChain		did we detect any broken HOT chains?
  *		Summarizing			is it a summarizing index?
  *		ParallelWorkers		# of workers requested (excludes leader)
+ *		Auxiliary			# index-helper for concurrent build?
  *		Am					Oid of index AM
  *		AmCache				private cache area for index AM
  *		Context				memory context holding this IndexInfo
  *
- * ii_Concurrent, ii_BrokenHotChain, and ii_ParallelWorkers are used only
- * during index build; they're conventionally zeroed otherwise.
+ * ii_Concurrent, ii_BrokenHotChain, ii_Auxiliary and ii_ParallelWorkers
+ * are used only during index build; they're conventionally zeroed otherwise.
  * ----------------
  */
 typedef struct IndexInfo
@@ -206,6 +207,7 @@ typedef struct IndexInfo
 	bool		ii_Summarizing;
 	bool		ii_WithoutOverlaps;
 	int			ii_ParallelWorkers;
+	bool		ii_Auxiliary;
 	Oid			ii_Am;
 	void	   *ii_AmCache;
 	MemoryContext ii_Context;
