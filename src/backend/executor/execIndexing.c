@@ -440,11 +440,14 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 		 * There's definitely going to be an index_insert() call for this
 		 * index.  If we're being called as part of an UPDATE statement,
 		 * consider if the 'indexUnchanged' = true hint should be passed.
+		 *
+		 * In case of auxiliary index always pass false as optimisation.
 		 */
-		indexUnchanged = update && index_unchanged_by_update(resultRelInfo,
-															 estate,
-															 indexInfo,
-															 indexRelation);
+		indexUnchanged = update && likely(!indexInfo->ii_Auxiliary) &&
+									index_unchanged_by_update(resultRelInfo,
+															  estate,
+															  indexInfo,
+															  indexRelation);
 
 		satisfiesConstraint =
 			index_insert(indexRelation, /* index relation */
