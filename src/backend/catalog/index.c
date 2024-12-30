@@ -2934,6 +2934,17 @@ FormIndexDatum(IndexInfo *indexInfo,
 	ListCell   *indexpr_item;
 	int			i;
 
+	/* Auxiliary index does not need any values to be computed */
+	if (unlikely(indexInfo->ii_Auxiliary))
+	{
+		for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
+		{
+			values[i] = PointerGetDatum(NULL);
+			isnull[i] = true;
+		}
+		return;
+	}
+
 	if (indexInfo->ii_Expressions != NIL &&
 		indexInfo->ii_ExpressionsState == NIL)
 	{
