@@ -115,7 +115,6 @@ static bool ReindexRelationConcurrently(const ReindexStmt *stmt,
 										Oid relationOid,
 										const ReindexParams *params);
 static void update_relispartition(Oid relationId, bool newval);
-static inline void set_indexsafe_procflags(void);
 
 /*
  * callback argument type for RangeVarCallbackForReindexIndex()
@@ -418,10 +417,7 @@ CompareOpclassOptions(const Datum *opts1, const Datum *opts2, int natts)
  * lazy VACUUMs, because they won't be fazed by missing index entries
  * either.  (Manual ANALYZEs, however, can't be excluded because they
  * might be within transactions that are going to do arbitrary operations
- * later.)  Processes running CREATE INDEX CONCURRENTLY or REINDEX CONCURRENTLY
- * on indexes that are neither expressional nor partial are also safe to
- * ignore, since we know that those processes won't examine any data
- * outside the table they're indexing.
+ * later.)
  *
  * Also, GetCurrentVirtualXIDs never reports our own vxid, so we need not
  * check for that.
@@ -442,8 +438,7 @@ WaitForOlderSnapshots(TransactionId limitXmin, bool progress)
 	VirtualTransactionId *old_snapshots;
 
 	old_snapshots = GetCurrentVirtualXIDs(limitXmin, true, false,
-										  PROC_IS_AUTOVACUUM | PROC_IN_VACUUM
-										  | PROC_IN_SAFE_IC,
+										  PROC_IS_AUTOVACUUM | PROC_IN_VACUUM,
 										  &n_old_snapshots);
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, n_old_snapshots);
@@ -463,8 +458,7 @@ WaitForOlderSnapshots(TransactionId limitXmin, bool progress)
 
 			newer_snapshots = GetCurrentVirtualXIDs(limitXmin,
 													true, false,
-													PROC_IS_AUTOVACUUM | PROC_IN_VACUUM
-													| PROC_IN_SAFE_IC,
+													PROC_IS_AUTOVACUUM | PROC_IN_VACUUM,
 													&n_newer_snapshots);
 			for (j = i; j < n_old_snapshots; j++)
 			{
@@ -578,7 +572,6 @@ DefineIndex(Oid tableId,
 	amoptions_function amoptions;
 	bool		exclusion;
 	bool		partitioned;
-	bool		safe_index;
 	Datum		reloptions;
 	int16	   *coloptions;
 	IndexInfo  *indexInfo;
@@ -1181,10 +1174,6 @@ DefineIndex(Oid tableId,
 		}
 	}
 
-	/* Is index safe for others to ignore?  See set_indexsafe_procflags() */
-	safe_index = indexInfo->ii_Expressions == NIL &&
-		indexInfo->ii_Predicate == NIL;
-
 	/*
 	 * Report index creation if appropriate (delay this till after most of the
 	 * error checks)
@@ -1671,10 +1660,6 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
-
 	/*
 	 * The index is now visible, so we can report the OID.  While on it,
 	 * include the report for the beginning of phase 2.
@@ -1729,9 +1714,6 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 							 PROGRESS_CREATEIDX_PHASE_WAIT_2);
 	/*
@@ -1761,10 +1743,6 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
-
 	/*
 	 * Phase 3 of concurrent index build
 	 *
@@ -1790,9 +1768,7 @@ DefineIndex(Oid tableId,
 
 	CommitTransactionCommand();
 	StartTransactionCommand();
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
+
 	/*
 	 * Merge content of auxiliary and target indexes - insert any missing index entries.
 	 */
@@ -1809,9 +1785,6 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
 
 	/* We should now definitely not be advertising any xmin. */
 	Assert(MyProc->xmin == InvalidTransactionId);
@@ -1852,10 +1825,6 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
-
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 							 PROGRESS_CREATEIDX_PHASE_WAIT_5);
 	/* Now wait for all transaction to see auxiliary as "non-ready for inserts" */
@@ -1875,10 +1844,6 @@ DefineIndex(Oid tableId,
 
 	CommitTransactionCommand();
 	StartTransactionCommand();
-
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 							 PROGRESS_CREATEIDX_PHASE_WAIT_6);
@@ -3619,7 +3584,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		Oid			auxIndexId;
 		Oid			tableId;
 		Oid			amId;
-		bool		safe;		/* for set_indexsafe_procflags */
 	} ReindexIndexInfo;
 	List	   *heapRelationIds = NIL;
 	List	   *indexIds = NIL;
@@ -3991,17 +3955,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		save_nestlevel = NewGUCNestLevel();
 		RestrictSearchPath();
 
-		/* determine safety of this index for set_indexsafe_procflags */
-		idx->safe = (RelationGetIndexExpressions(indexRel) == NIL &&
-					 RelationGetIndexPredicate(indexRel) == NIL);
-
-#ifdef USE_INJECTION_POINTS
-		if (idx->safe)
-			INJECTION_POINT("reindex-conc-index-safe");
-		else
-			INJECTION_POINT("reindex-conc-index-not-safe");
-#endif
-
 		idx->tableId = RelationGetRelid(heapRel);
 		idx->amId = indexRel->rd_rel->relam;
 
@@ -4061,7 +4014,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		newidx = palloc_object(ReindexIndexInfo);
 		newidx->indexId = newIndexId;
 		newidx->auxIndexId = auxIndexId;
-		newidx->safe = idx->safe;
 		newidx->tableId = idx->tableId;
 		newidx->amId = idx->amId;
 
@@ -4155,11 +4107,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	StartTransactionCommand();
 
 	/*
-	 * Because we don't take a snapshot in this transaction, there's no need
-	 * to set the PROC_IN_SAFE_IC flag here.
-	 */
-
-	/*
 	 * Phase 2 of REINDEX CONCURRENTLY
 	 *
 	 * Build the new indexes in a separate transaction for each index to avoid
@@ -4189,10 +4136,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Tell concurrent indexing to ignore us, if index qualifies */
-		if (newidx->safe)
-			set_indexsafe_procflags();
-
 		/* Build auxiliary index, it is fast - without any actual heap scan, just an empty index. */
 		index_concurrently_build(newidx->tableId, newidx->auxIndexId);
 
@@ -4200,11 +4143,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	}
 
 	StartTransactionCommand();
-
-	/*
-	 * Because we don't take a snapshot in this transaction, there's no need
-	 * to set the PROC_IN_SAFE_IC flag here.
-	 */
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
@@ -4230,10 +4168,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Tell concurrent indexing to ignore us, if index qualifies */
-		if (newidx->safe)
-			set_indexsafe_procflags();
-
 		/*
 		 * Update progress for the index to build, with the correct parent
 		 * table involved.
@@ -4252,11 +4186,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	}
 
 	StartTransactionCommand();
-
-	/*
-	 * Because we don't take a snapshot or Xid in this transaction, there's no
-	 * need to set the PROC_IN_SAFE_IC flag here.
-	 */
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_3);
@@ -4277,10 +4206,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 * session-level locks are cleaned up on abort.
 		 */
 		CHECK_FOR_INTERRUPTS();
-
-		/* Tell concurrent indexing to ignore us, if index qualifies */
-		if (newidx->safe)
-			set_indexsafe_procflags();
 
 		/*
 		 * Updating pg_index might involve TOAST table access, so ensure we
@@ -4314,10 +4239,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Tell concurrent indexing to ignore us, if index qualifies */
-		if (newidx->safe)
-			set_indexsafe_procflags();
-
 		/*
 		 * Update progress for the index to build, with the correct parent
 		 * table involved.
@@ -4345,9 +4266,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 * interesting tuples.  But since it might not contain tuples deleted
 		 * just before the latest snap was taken, we have to wait out any
 		 * transactions that might have older snapshots.
-		 *
-		 * Because we don't take a snapshot or Xid in this transaction,
-		 * there's no need to set the PROC_IN_SAFE_IC flag here.
 		 */
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 									 PROGRESS_CREATEIDX_PHASE_WAIT_4);
@@ -4368,13 +4286,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 */
 	INJECTION_POINT("reindex_relation_concurrently_before_swap");
 	StartTransactionCommand();
-
-	/*
-	 * Because this transaction only does catalog manipulations and doesn't do
-	 * any index operations, we can set the PROC_IN_SAFE_IC flag here
-	 * unconditionally.
-	 */
-	set_indexsafe_procflags();
 
 	forboth(lc, indexIds, lc2, newIndexIds)
 	{
@@ -4430,12 +4341,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	/* Commit this transaction and make index swaps visible */
 	CommitTransactionCommand();
 	StartTransactionCommand();
-
-	/*
-	 * While we could set PROC_IN_SAFE_IC if all indexes qualified, there's no
-	 * real need for that, because we only acquire an Xid after the wait is
-	 * done, and that lasts for a very short period.
-	 */
 
 	/*
 	 * Phase 5 of REINDEX CONCURRENTLY
@@ -4497,12 +4402,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	/* Commit this transaction to make the updates visible. */
 	CommitTransactionCommand();
 	StartTransactionCommand();
-
-	/*
-	 * While we could set PROC_IN_SAFE_IC if all indexes qualified, there's no
-	 * real need for that, because we only acquire an Xid after the wait is
-	 * done, and that lasts for a very short period.
-	 */
 
 	/*
 	 * Phase 6 of REINDEX CONCURRENTLY
@@ -4763,36 +4662,3 @@ update_relispartition(Oid relationId, bool newval)
 	table_close(classRel, RowExclusiveLock);
 }
 
-/*
- * Set the PROC_IN_SAFE_IC flag in MyProc->statusFlags.
- *
- * When doing concurrent index builds, we can set this flag
- * to tell other processes concurrently running CREATE
- * INDEX CONCURRENTLY or REINDEX CONCURRENTLY to ignore us when
- * doing their waits for concurrent snapshots.  On one hand it
- * avoids pointlessly waiting for a process that's not interesting
- * anyway; but more importantly it avoids deadlocks in some cases.
- *
- * This can be done safely only for indexes that don't execute any
- * expressions that could access other tables, so index must not be
- * expressional nor partial.  Caller is responsible for only calling
- * this routine when that assumption holds true.
- *
- * (The flag is reset automatically at transaction end, so it must be
- * set for each transaction.)
- */
-static inline void
-set_indexsafe_procflags(void)
-{
-	/*
-	 * This should only be called before installing xid or xmin in MyProc;
-	 * otherwise, concurrent processes could see an Xmin that moves backwards.
-	 */
-	Assert(MyProc->xid == InvalidTransactionId &&
-		   MyProc->xmin == InvalidTransactionId);
-
-	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags |= PROC_IN_SAFE_IC;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-	LWLockRelease(ProcArrayLock);
-}

@@ -11,7 +11,7 @@ EXTENSION = injection_points
 DATA = injection_points--1.0.sql
 PGFILEDESC = "injection_points - facility for injection points"
 
-REGRESS = injection_points hashagg reindex_conc cic_reset_snapshots
+REGRESS = injection_points hashagg cic_reset_snapshots
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
 ISOLATION = basic inplace syscache-update-pruned
