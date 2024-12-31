@@ -25,6 +25,7 @@ typedef enum
 {
 	INDEX_CREATE_SET_READY,
 	INDEX_CREATE_SET_VALID,
+	INDEX_DROP_CLEAR_READY,
 	INDEX_DROP_CLEAR_VALID,
 	INDEX_DROP_SET_DEAD,
 } IndexStateFlagsAction;
@@ -65,6 +66,7 @@ extern void index_check_primary_key(Relation heapRel,
 #define	INDEX_CREATE_IF_NOT_EXISTS			(1 << 4)
 #define	INDEX_CREATE_PARTITIONED			(1 << 5)
 #define INDEX_CREATE_INVALID				(1 << 6)
+#define INDEX_CREATE_AUXILIARY				(1 << 7)
 
 extern Oid	index_create(Relation heapRelation,
 						 const char *indexRelationName,
@@ -99,6 +101,11 @@ extern Oid	index_concurrently_create_copy(Relation heapRelation,
 										   Oid oldIndexId,
 										   Oid tablespaceOid,
 										   const char *newName);
+
+extern Oid	index_concurrently_create_aux(Relation heapRelation,
+										  Oid mainIndexId,
+										  Oid tablespaceOid,
+										  const char *newName);
 
 extern void index_concurrently_build(Oid heapRelationId,
 									 Oid indexRelationId);
@@ -145,7 +152,7 @@ extern void index_build(Relation heapRelation,
 						bool isreindex,
 						bool parallel);
 
-extern void validate_index(Oid heapId, Oid indexId, Snapshot snapshot);
+extern void validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot);
 
 extern void index_set_state_flags(Oid indexId, IndexStateFlagsAction action);
 
