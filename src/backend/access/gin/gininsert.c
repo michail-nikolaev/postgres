@@ -2110,11 +2110,9 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	int			sortmem;
 
 	/*
-	 * The only possible status flag that can be set to the parallel worker is
-	 * PROC_IN_SAFE_IC.
+	 * There are no possible status flag that can be set to the parallel worker.
 	 */
-	Assert((MyProc->statusFlags == 0) ||
-		   (MyProc->statusFlags == PROC_IN_SAFE_IC));
+	Assert(MyProc->statusFlags == 0);
 
 	/* Set debug_query_string for individual workers first */
 	sharedquery = shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT, true);
