@@ -69,6 +69,7 @@
 #include "utils/datum.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/injection_point.h"
 
 
 typedef struct MTTargetRelLookup
@@ -1178,6 +1179,7 @@ ExecInsert(ModifyTableContext *context,
 					return NULL;
 				}
 			}
+			INJECTION_POINT("exec_insert_before_insert_speculative");
 
 			/*
 			 * Before we start insertion proper, acquire our "speculative

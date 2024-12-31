@@ -49,6 +49,7 @@ tests += {
       't/003_cic_2pc.pl',
       't/004_verify_nbtree_unique.pl',
       't/005_pitr.pl',
+      't/006_cic_bt_index_parent_check.pl',
     ],
   },
 }
