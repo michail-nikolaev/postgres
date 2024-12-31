@@ -1036,6 +1036,63 @@ get_index_constraint(Oid indexId)
 }
 
 /*
+ * get_auxiliary_index
+ *		Given the OID of an index, return the OID of its auxiliary
+ *		index, or InvalidOid if there is no auxiliary index.
+ */
+Oid
+get_auxiliary_index(Oid indexId)
+{
+	Oid			auxiliaryIndexOid = InvalidOid;
+	Relation	depRel;
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	HeapTuple	tup;
+
+	/* Search the dependency table for the index */
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(indexId));
+	ScanKeyInit(&key[2],
+				Anum_pg_depend_refobjsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(0));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 3, key);
+
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_depend deprec = (Form_pg_depend) GETSTRUCT(tup);
+
+		/*
+		 * We assume any AUTO dependency on index with rel_kind
+		 * of RELKIND_INDEX is that we are looking for.
+		 */
+		if (deprec->classid == RelationRelationId &&
+			(deprec->deptype == DEPENDENCY_AUTO) &&
+			get_rel_relkind(deprec->objid) == RELKIND_INDEX)
+		{
+			auxiliaryIndexOid = deprec->objid;
+			break;
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	return auxiliaryIndexOid;
+}
+
+/*
  * get_index_ref_constraints
  *		Given the OID of an index, return the OID of all foreign key
  *		constraints which reference the index.

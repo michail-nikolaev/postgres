@@ -688,6 +688,8 @@ UpdateIndexRelation(Oid indexoid,
  *		parent index; otherwise InvalidOid.
  * parentConstraintId: if creating a constraint on a partition, the OID
  *		of the constraint in the parent; otherwise InvalidOid.
+ * auxiliaryForIndexId: if creating auxiliary index, the OID of the main
+ *		index; otherwise InvalidOid.
  * relFileNumber: normally, pass InvalidRelFileNumber to get new storage.
  *		May be nonzero to attach an existing valid build.
  * indexInfo: same info executor uses to insert into the index
@@ -734,6 +736,7 @@ index_create(Relation heapRelation,
 			 Oid indexRelationId,
 			 Oid parentIndexRelid,
 			 Oid parentConstraintId,
+			 Oid auxiliaryForIndexId,
 			 RelFileNumber relFileNumber,
 			 IndexInfo *indexInfo,
 			 const List *indexColNames,
@@ -776,6 +779,8 @@ index_create(Relation heapRelation,
 		   ((flags & INDEX_CREATE_ADD_CONSTRAINT) != 0));
 	/* partitioned indexes must never be "built" by themselves */
 	Assert(!partitioned || (flags & INDEX_CREATE_SKIP_BUILD));
+	/* auxiliaryForIndexId and INDEX_CREATE_AUXILIARY are required both or neither */
+	Assert(OidIsValid(auxiliaryForIndexId) == auxiliary);
 
 	relkind = partitioned ? RELKIND_PARTITIONED_INDEX : RELKIND_INDEX;
 	is_exclusion = (indexInfo->ii_ExclusionOps != NULL);
@@ -1177,6 +1182,15 @@ index_create(Relation heapRelation,
 			recordDependencyOn(&myself, &referenced, DEPENDENCY_PARTITION_SEC);
 		}
 
+		/*
+		 * Record dependency on the main index in case of auxiliary index.
+		 */
+		if (OidIsValid(auxiliaryForIndexId))
+		{
+			ObjectAddressSet(referenced, RelationRelationId, auxiliaryForIndexId);
+			recordDependencyOn(&myself, &referenced, DEPENDENCY_AUTO);
+		}
+
 		/* placeholder for normal dependencies */
 		addrs = new_object_addresses();
 
@@ -1459,6 +1473,7 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							  InvalidOid,	/* indexRelationId */
 							  InvalidOid,	/* parentIndexRelid */
 							  InvalidOid,	/* parentConstraintId */
+							  InvalidOid,	/* auxiliaryForIndexId */
 							  InvalidRelFileNumber, /* relFileNumber */
 							  newInfo,
 							  indexColNames,
@@ -1609,6 +1624,7 @@ index_concurrently_create_aux(Relation heapRelation, Oid mainIndexId,
 							  InvalidOid,    /* indexRelationId */
 							  InvalidOid,    /* parentIndexRelid */
 							  InvalidOid,    /* parentConstraintId */
+							  mainIndexId,   /* auxiliaryForIndexId */
 							  InvalidRelFileNumber, /* relFileNumber */
 							  newInfo,
 							  indexColNames,
@@ -3862,6 +3878,7 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 				heapRelation;
 	Oid			heapId;
 	Oid			save_userid;
+	Oid			junkAuxIndexId;
 	int			save_sec_context;
 	int			save_nestlevel;
 	IndexInfo  *indexInfo;
@@ -3916,6 +3933,19 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 		pgstat_progress_start_command(PROGRESS_COMMAND_CREATE_INDEX,
 									  heapId);
 		pgstat_progress_update_multi_param(2, progress_cols, progress_vals);
+	}
+
+	/* Check for the auxiliary index for that index, it needs to dropped */
+	junkAuxIndexId = get_auxiliary_index(indexId);
+	if (OidIsValid(junkAuxIndexId))
+	{
+		ObjectAddress object;
+		object.classId = RelationRelationId;
+		object.objectId = junkAuxIndexId;
+		object.objectSubId = 0;
+		performDeletion(&object, DROP_RESTRICT,
+								 PERFORM_DELETION_INTERNAL |
+								 PERFORM_DELETION_QUIETLY);
 	}
 
 	/*
@@ -4206,7 +4236,8 @@ reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
 {
 	Relation	rel;
 	Oid			toast_relid;
-	List	   *indexIds;
+	List	   *indexIds,
+			   *auxIndexIds = NIL;
 	char		persistence;
 	bool		result = false;
 	ListCell   *indexId;
@@ -4295,13 +4326,30 @@ reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
 	else
 		persistence = rel->rd_rel->relpersistence;
 
+	foreach(indexId, indexIds)
+	{
+		Oid			indexOid = lfirst_oid(indexId);
+		Oid			indexAm = get_rel_relam(indexOid);
+
+		/* All STIR indexes are auxiliary indexes */
+		if (indexAm == STIR_AM_OID)
+		{
+			if (flags & REINDEX_REL_SUPPRESS_INDEX_USE)
+				RemoveReindexPending(indexOid);
+			auxIndexIds = lappend_oid(auxIndexIds, indexOid);
+		}
+	}
+
 	/* Reindex all the indexes. */
 	i = 1;
 	foreach(indexId, indexIds)
 	{
 		Oid			indexOid = lfirst_oid(indexId);
 		Oid			indexNamespaceId = get_rel_namespace(indexOid);
-		Oid			indexAm = get_rel_relam(indexOid);
+
+		/* Auxiliary indexes are going to be dropped during main index rebuild */
+		if (list_member_oid(auxIndexIds, indexOid))
+			continue;
 
 		/*
 		 * Skip any invalid indexes on a TOAST table.  These can only be
@@ -4322,18 +4370,6 @@ reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
 			 * as it is skipped here due to the hard failure that would happen
 			 * in reindex_index(), should we try to process it.
 			 */
-			if (flags & REINDEX_REL_SUPPRESS_INDEX_USE)
-				RemoveReindexPending(indexOid);
-			continue;
-		}
-
-		if (indexAm == STIR_AM_OID)
-		{
-			ereport(WARNING,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("skipping reindex of auxiliary index \"%s.%s\"",
-							get_namespace_name(indexNamespaceId),
-							get_rel_name(indexOid))));
 			if (flags & REINDEX_REL_SUPPRESS_INDEX_USE)
 				RemoveReindexPending(indexOid);
 			continue;
