@@ -42,6 +42,8 @@
 #define HEAP_PAGE_PRUNE_MARK_UNUSED_NOW		(1 << 0)
 #define HEAP_PAGE_PRUNE_FREEZE				(1 << 1)
 
+#define SO_RESET_SNAPSHOT_EACH_N_PAGE		4096
+
 typedef struct BulkInsertStateData *BulkInsertState;
 struct TupleTableSlot;
 struct VacuumCutoffs;
