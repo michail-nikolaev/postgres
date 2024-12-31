@@ -51,6 +51,7 @@
 #include "utils/datum.h"
 #include "utils/inval.h"
 #include "utils/spccache.h"
+#include "utils/injection_point.h"
 
 
 static HeapTuple heap_prepare_insert(Relation relation, HeapTuple tup,
@@ -569,6 +570,36 @@ heap_prepare_pagescan(TableScanDesc sscan)
 }
 
 /*
+ * Reset the active snapshot during a scan.
+ * This ensures the xmin horizon can advance while maintaining safe tuple visibility.
+ * Note: No other snapshot should be active during this operation.
+ */
+static inline void
+heap_reset_scan_snapshot(TableScanDesc sscan)
+{
+	/* Make sure no other snapshot was set as active. */
+	Assert(GetActiveSnapshot() == sscan->rs_snapshot);
+	/* And make sure active snapshot is not registered. */
+	Assert(GetActiveSnapshot()->regd_count == 0);
+	PopActiveSnapshot();
+
+	sscan->rs_snapshot = InvalidSnapshot; /* just ot be tidy */
+	Assert(!HaveRegisteredOrActiveSnapshot());
+	InvalidateCatalogSnapshot();
+
+	/* Goal of snapshot reset is to allow horizon to advance. */
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+#if USE_INJECTION_POINTS
+	/* In some cases it is still not possible due xid assign. */
+	if (!TransactionIdIsValid(MyProc->xid))
+		INJECTION_POINT("heap_reset_scan_snapshot_effective");
+#endif
+
+	PushActiveSnapshot(GetLatestSnapshot());
+	sscan->rs_snapshot = GetActiveSnapshot();
+}
+
+/*
  * heap_fetch_next_buffer - read and pin the next block from MAIN_FORKNUM.
  *
  * Read the next block of the scan relation from the read stream and save it
@@ -609,7 +640,13 @@ heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
 
 	scan->rs_cbuf = read_stream_next_buffer(scan->rs_read_stream, NULL);
 	if (BufferIsValid(scan->rs_cbuf))
+	{
 		scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
+#define SO_RESET_SNAPSHOT_EACH_N_PAGE 64
+		if ((scan->rs_base.rs_flags & SO_RESET_SNAPSHOT) &&
+			(scan->rs_cblock % SO_RESET_SNAPSHOT_EACH_N_PAGE == 0))
+			heap_reset_scan_snapshot((TableScanDesc) scan);
+	}
 }
 
 /*
@@ -1235,6 +1272,15 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_parallelworkerdata != NULL)
 		pfree(scan->rs_parallelworkerdata);
+
+	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+	{
+		Assert(!(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT));
+		/* Make sure no other snapshot was set as active. */
+		Assert(GetActiveSnapshot() == sscan->rs_snapshot);
+		/* And make sure snapshot is not registered. */
+		Assert(GetActiveSnapshot()->regd_count == 0);
+	}
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);

@@ -21,6 +21,7 @@
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -375,6 +376,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	buildstate.accum.ginstate = &buildstate.ginstate;
 	ginInitBA(&buildstate.accum);
 
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 	/*
 	 * Do the heap scan.  We disallow sync scan here because dataPlaceToPage
 	 * prefers to receive tuples in TID order.
@@ -423,6 +425,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	result->heap_tuples = reltuples;
 	result->index_tuples = buildstate.indtuples;
 
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 	return result;
 }
 

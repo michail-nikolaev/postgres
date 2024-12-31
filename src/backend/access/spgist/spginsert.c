@@ -24,6 +24,7 @@
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
 #include "storage/bulk_write.h"
+#include "storage/proc.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -143,6 +144,7 @@ spgbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	result = (IndexBuildResult *) palloc0(sizeof(IndexBuildResult));
 	result->heap_tuples = reltuples;
 	result->index_tuples = buildstate.indtuples;
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 
 	return result;
 }

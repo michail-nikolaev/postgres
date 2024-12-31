@@ -43,6 +43,7 @@
 #include "optimizer/optimizer.h"
 #include "storage/bufmgr.h"
 #include "storage/bulk_write.h"
+#include "storage/proc.h"
 
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -259,6 +260,7 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	buildstate.indtuples = 0;
 	buildstate.indtuplesSize = 0;
 
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 	if (buildstate.buildMode == GIST_SORTED_BUILD)
 	{
 		/*
@@ -350,6 +352,7 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	result->heap_tuples = reltuples;
 	result->index_tuples = (double) buildstate.indtuples;
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 
 	return result;
 }
