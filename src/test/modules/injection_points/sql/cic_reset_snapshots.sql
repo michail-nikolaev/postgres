@@ -4,6 +4,7 @@ SELECT injection_points_set_local();
 SELECT injection_points_attach('heap_reset_scan_snapshot_effective', 'notice');
 SELECT injection_points_attach('table_beginscan_strat_reset_snapshots', 'notice');
 SELECT injection_points_attach('table_parallelscan_initialize', 'notice');
+SELECT injection_points_attach('heapam_index_validate_scan_no_xid', 'notice');
 
 CREATE SCHEMA cic_reset_snap;
 CREATE TABLE cic_reset_snap.tbl(i int primary key, j int);

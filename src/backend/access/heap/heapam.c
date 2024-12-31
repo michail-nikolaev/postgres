@@ -642,7 +642,7 @@ heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
 	if (BufferIsValid(scan->rs_cbuf))
 	{
 		scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
-#define SO_RESET_SNAPSHOT_EACH_N_PAGE 64
+#define SO_RESET_SNAPSHOT_EACH_N_PAGE 1024
 		if ((scan->rs_base.rs_flags & SO_RESET_SNAPSHOT) &&
 			(scan->rs_cblock % SO_RESET_SNAPSHOT_EACH_N_PAGE == 0))
 			heap_reset_scan_snapshot((TableScanDesc) scan);
