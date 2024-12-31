@@ -190,14 +190,16 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 			 * Add target TID to pending list if the redirection could have
 			 * happened since VACUUM started.  (If xid is invalid, assume it
 			 * must have happened before VACUUM started, since REINDEX
-			 * CONCURRENTLY locks out VACUUM.)
+			 * CONCURRENTLY locks out VACUUM, if myXmin is invalid it is
+			 * validation scan.)
 			 *
 			 * Note: we could make a tighter test by seeing if the xid is
 			 * "running" according to the active snapshot; but snapmgr.c
 			 * doesn't currently export a suitable API, and it's not entirely
 			 * clear that a tighter test is worth the cycles anyway.
 			 */
-			if (TransactionIdFollowsOrEquals(dt->xid, bds->myXmin))
+			if (!TransactionIdIsValid(bds->myXmin) ||
+					TransactionIdFollowsOrEquals(dt->xid, bds->myXmin))
 				spgAddPendingTID(bds, &dt->pointer);
 		}
 		else
@@ -811,7 +813,6 @@ spgvacuumscan(spgBulkDeleteState *bds)
 	/* Finish setting up spgBulkDeleteState */
 	initSpGistState(&bds->spgstate, index);
 	bds->pendingList = NULL;
-	bds->myXmin = GetActiveSnapshot()->xmin;
 	bds->lastFilledBlock = SPGIST_LAST_FIXED_BLKNO;
 
 	/*
@@ -925,6 +926,10 @@ spgbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	bds.stats = stats;
 	bds.callback = callback;
 	bds.callback_state = callback_state;
+	if (info->validate_index)
+		bds.myXmin = InvalidTransactionId;
+	else
+		bds.myXmin = GetActiveSnapshot()->xmin;
 
 	spgvacuumscan(&bds);
 
@@ -965,6 +970,7 @@ spgvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 		bds.stats = stats;
 		bds.callback = dummy_callback;
 		bds.callback_state = NULL;
+		bds.myXmin = GetActiveSnapshot()->xmin;
 
 		spgvacuumscan(&bds);
 	}

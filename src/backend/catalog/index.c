@@ -3477,8 +3477,9 @@ IndexCheckExclusion(Relation heapRelation,
  * insert their new tuples into it. At the same moment we clear "indisready" for
  * auxiliary index, since it is no more required.
  *
- * We then take a new reference snapshot, any tuples that are valid according
- * to this snap, but are not in the index, must be added to the index.
+ * We then take a new snapshot, any tuples that are valid according
+ * to this snap, but are not in the index, must be added to the index. In
+ * order to propagate xmin we reset that snapshot every few so often.
  * (Any tuples committed live after the snap will be inserted into the
  * index by their originating transaction.  Any tuples committed dead before
  * the snap need not be indexed, because we will wait out all transactions
@@ -3491,7 +3492,7 @@ IndexCheckExclusion(Relation heapRelation,
  * TIDs of both auxiliary and target indexes, and doing a "merge join" against
  * the TID lists to see which tuples from auxiliary index are missing from the
  * target index.  Thus we will ensure that all tuples valid according to the
- * reference snapshot are in the index. Notice we need to do bulkdelete in the
+ * latest snapshot are in the index. Notice we need to do bulkdelete in the
  * particular order: auxiliary first, target last.
  *
  * Building a unique index this way is tricky: we might try to insert a
@@ -3607,8 +3608,14 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId)
 										   NULL, TUPLESORT_NONE);
 	auxState.htups = auxState.itups = auxState.tups_inserted = 0;
 
+	/* tuplesort_begin_datum may require catalog snapshot */
+	InvalidateCatalogSnapshot();
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+
 	(void) index_bulk_delete(&auxivinfo, NULL,
 							 validate_index_callback, &auxState);
+
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	state.tuplesort = tuplesort_begin_datum(INT8OID, Int8LessOperator,
 											InvalidOid, false,
@@ -3616,9 +3623,13 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId)
 											NULL, TUPLESORT_NONE);
 	state.htups = state.itups = state.tups_inserted = 0;
 
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+
 	/* ambulkdelete updates progress metrics */
 	(void) index_bulk_delete(&ivinfo, NULL,
 							 validate_index_callback, &state);
+
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	/* Execute the sort */
 	{
@@ -3636,8 +3647,6 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId)
 	}
 	tuplesort_performsort(state.tuplesort);
 	tuplesort_performsort(auxState.tuplesort);
-
-	InvalidateCatalogSnapshot();
 	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	/*

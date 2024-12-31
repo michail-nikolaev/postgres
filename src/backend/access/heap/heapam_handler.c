@@ -1804,27 +1804,35 @@ heapam_index_validate_scan(Relation heapRelation,
 					fetched;
 	bool			tuplesort_empty = false,
 					auxtuplesort_empty = false;
+	instr_time		snapshotTime,
+					currentTime;
 
 	Assert(!HaveRegisteredOrActiveSnapshot());
 	Assert(!TransactionIdIsValid(MyProc->xmin));
 
+#define VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL	1000
 	/*
-	 * Now take the "reference snapshot" that will be used by to filter candidate
-	 * tuples.  Beware!  There might still be snapshots in
-	 * use that treat some transaction as in-progress that our reference
-	 * snapshot treats as committed.  If such a recently-committed transaction
-	 * deleted tuples in the table, we will not include them in the index; yet
-	 * those transactions which see the deleting one as still-in-progress will
-	 * expect such tuples to be there once we mark the index as valid.
+	 * Now take the first snapshot that will be used by to filter candidate
+	 * tuples. We are going to replace it by newer snapshot every so often
+	 * to propagate horizon.
+	 *
+	 * Beware!  There might still be snapshots in use that treat some transaction
+	 * as in-progress that our temporary snapshot treats as committed.
+	 *
+	 * If such a recently-committed transaction deleted tuples in the table,
+	 * we will not include them in the index; yet those transactions which
+	 * see the deleting one as still-in-progress will expect such tuples to
+	 * be there once we mark the index as valid.
 	 *
 	 * We solve this by waiting for all endangered transactions to exit before
-	 * we mark the index as valid.
+	 * we mark the index as valid, for that reason limitX is supported.
 	 *
 	 * We also set ActiveSnapshot to this snap, since functions in indexes may
 	 * need a snapshot.
 	 */
-	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
 	PushActiveSnapshot(snapshot);
+	INSTR_TIME_SET_CURRENT(snapshotTime);
 	limitXmin = snapshot->xmin;
 
 	/*
@@ -1864,6 +1872,23 @@ heapam_index_validate_scan(Relation heapRelation,
 		Datum		ts_val;
 		bool		ts_isnull;
 		CHECK_FOR_INTERRUPTS();
+
+		INSTR_TIME_SET_CURRENT(currentTime);
+		INSTR_TIME_SUBTRACT(currentTime, snapshotTime);
+		if (INSTR_TIME_GET_MILLISEC(currentTime) >= VALIDATE_INDEX_SNAPSHOT_RESET_INTERVAL)
+		{
+			PopActiveSnapshot();
+			UnregisterSnapshot(snapshot);
+			/* to make sure we propagate xmin */
+			InvalidateCatalogSnapshot();
+			Assert(!TransactionIdIsValid(MyProc->xmin));
+
+			snapshot = RegisterSnapshot(GetLatestSnapshot());
+			PushActiveSnapshot(snapshot);
+			/* xmin should not go backwards, but just for the case*/
+			limitXmin = TransactionIdNewer(limitXmin, snapshot->xmin);
+			INSTR_TIME_SET_CURRENT(snapshotTime);
+		}
 
 		/*
 		* Attempt to fetch the next TID from the auxiliary sort. If it's
@@ -2007,7 +2032,7 @@ heapam_index_validate_scan(Relation heapRelation,
 	heapam_index_fetch_end(fetch);
 
 	/*
-	 * Drop the reference snapshot.  We must do this before waiting out other
+	 * Drop the latest snapshot.  We must do this before waiting out other
 	 * snapshot holders, else we will deadlock against other processes also
 	 * doing CREATE INDEX CONCURRENTLY, which would see our snapshot as one
 	 * they must wait for.
