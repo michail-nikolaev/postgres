@@ -25,6 +25,7 @@
 #include "storage/read_stream.h"
 #include "utils/rel.h"
 #include "utils/snapshot.h"
+#include "utils/injection_point.h"
 
 
 #define DEFAULT_TABLE_ACCESS_METHOD	"heap"
@@ -63,6 +64,17 @@ typedef enum ScanOptions
 
 	/* unregister snapshot at scan end? */
 	SO_TEMP_SNAPSHOT = 1 << 9,
+	/*
+	 * Reset scan and catalog snapshot every so often? If so, each
+	 * SO_RESET_SNAPSHOT_EACH_N_PAGE pages active snapshot is popped,
+	 * catalog snapshot invalidated, latest snapshot pushed as active.
+	 *
+	 * At the end of the scan snapshot is not popped.
+	 * Goal of such mode is keep xmin propagating horizon forward.
+	 *
+	 * see heap_reset_scan_snapshot for details.
+	 */
+	SO_RESET_SNAPSHOT = 1 << 10,
 }			ScanOptions;
 
 /*
@@ -899,7 +911,8 @@ extern TableScanDesc table_beginscan_catalog(Relation relation, int nkeys,
 static inline TableScanDesc
 table_beginscan_strat(Relation rel, Snapshot snapshot,
 					  int nkeys, ScanKeyData *key,
-					  bool allow_strat, bool allow_sync)
+					  bool allow_strat, bool allow_sync,
+					  bool reset_snapshot)
 {
 	uint32		flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
 
@@ -907,6 +920,15 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 		flags |= SO_ALLOW_STRAT;
 	if (allow_sync)
 		flags |= SO_ALLOW_SYNC;
+	if (reset_snapshot)
+	{
+		INJECTION_POINT("table_beginscan_strat_reset_snapshots", NULL);
+		/* Active snapshot is required on start. */
+		Assert(GetActiveSnapshot() == snapshot);
+		/* Active snapshot should not be registered to keep xmin propagating. */
+		Assert(GetActiveSnapshot()->regd_count == 0);
+		flags |= (SO_RESET_SNAPSHOT);
+	}
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
@@ -1739,6 +1761,10 @@ table_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
  * very hard to detect whether they're really incompatible with the chain tip.
  * This only really makes sense for heap AM, it might need to be generalized
  * for other AMs later.
+ *
+ * In case of non-unique index and non-parallel concurrent build
+ * SO_RESET_SNAPSHOT is applied for the scan. That leads for changing snapshots
+ * on the fly to allow xmin horizon propagate.
  */
 static inline double
 table_index_build_scan(Relation table_rel,
