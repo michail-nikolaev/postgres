@@ -132,7 +132,6 @@ typedef struct GinLeader
 	 */
 	GinBuildShared *ginshared;
 	Sharedsort *sharedsort;
-	Snapshot	snapshot;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 } GinLeader;
@@ -180,7 +179,7 @@ typedef struct
 static void _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 								bool isconcurrent, int request);
 static void _gin_end_parallel(GinLeader *ginleader, GinBuildState *state);
-static Size _gin_parallel_estimate_shared(Relation heap, Snapshot snapshot);
+static Size _gin_parallel_estimate_shared(Relation heap);
 static double _gin_parallel_heapscan(GinBuildState *state);
 static double _gin_parallel_merge(GinBuildState *state);
 static void _gin_leader_participate_as_worker(GinBuildState *buildstate,
@@ -721,7 +720,6 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		reltuples = _gin_parallel_merge(state);
 
 		_gin_end_parallel(state->bs_leader, state);
-		Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 	}
 	else						/* no parallel index build */
 	{
@@ -745,7 +743,6 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 						   list, nlist, &buildstate.buildStats);
 		}
 		MemoryContextSwitchTo(oldCtx);
-		Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 	}
 
 	MemoryContextDelete(buildstate.funcCtx);
@@ -775,6 +772,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	result->heap_tuples = reltuples;
 	result->index_tuples = buildstate.indtuples;
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 
 	return result;
 }
@@ -909,7 +907,6 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 {
 	ParallelContext *pcxt;
 	int			scantuplesortstates;
-	Snapshot	snapshot;
 	Size		estginshared;
 	Size		estsort;
 	GinBuildShared *ginshared;
@@ -939,25 +936,25 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	 * Prepare for scan of the base relation.  In a normal index build, we use
 	 * SnapshotAny because we must retrieve all tuples and do our own time
 	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
-	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
+	 * concurrent build, we take a regular MVCC snapshot and push it as active.
+	 * Later we index whatever's live according to that snapshot while that
+	 * snapshot is reset periodically.
 	 */
 	if (!isconcurrent)
 	{
 		Assert(ActiveSnapshotSet());
-		snapshot = SnapshotAny;
 		need_pop_active_snapshot = false;
 	}
 	else
 	{
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+		Assert(!ActiveSnapshotSet());
 		PushActiveSnapshot(GetTransactionSnapshot());
 	}
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_GIN_SHARED workspace.
 	 */
-	estginshared = _gin_parallel_estimate_shared(heap, snapshot);
+	estginshared = _gin_parallel_estimate_shared(heap);
 	shm_toc_estimate_chunk(&pcxt->estimator, estginshared);
 	estsort = tuplesort_estimate_shared(scantuplesortstates);
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
@@ -997,8 +994,6 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	{
 		if (need_pop_active_snapshot)
 			PopActiveSnapshot();
-		if (IsMVCCSnapshot(snapshot))
-			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
 		return;
@@ -1022,7 +1017,8 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 
 	table_parallelscan_initialize(heap,
 								  ParallelTableScanFromGinBuildShared(ginshared),
-								  snapshot);
+								  isconcurrent ? InvalidSnapshot : SnapshotAny,
+								  isconcurrent);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -1064,7 +1060,6 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 		ginleader->nparticipanttuplesorts++;
 	ginleader->ginshared = ginshared;
 	ginleader->sharedsort = sharedsort;
-	ginleader->snapshot = snapshot;
 	ginleader->walusage = walusage;
 	ginleader->bufferusage = bufferusage;
 
@@ -1080,6 +1075,13 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/* Save leader state now that it's clear build will be parallel */
 	buildstate->bs_leader = ginleader;
 
+	/*
+	 * In case of concurrent build snapshots are going to be reset periodically.
+	 * We need to wait until all workers imported initial snapshot.
+	 */
+	if (isconcurrent)
+		WaitForParallelWorkersToAttach(pcxt, true);
+
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
 		_gin_leader_participate_as_worker(buildstate, heap, index);
@@ -1088,7 +1090,8 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
 	 */
-	WaitForParallelWorkersToAttach(pcxt);
+	if (!isconcurrent)
+		WaitForParallelWorkersToAttach(pcxt, false);
 	if (need_pop_active_snapshot)
 		PopActiveSnapshot();
 }
@@ -1111,9 +1114,6 @@ _gin_end_parallel(GinLeader *ginleader, GinBuildState *state)
 	for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
 		InstrAccumParallelQuery(&ginleader->bufferusage[i], &ginleader->walusage[i]);
 
-	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(ginleader->snapshot))
-		UnregisterSnapshot(ginleader->snapshot);
 	DestroyParallelContext(ginleader->pcxt);
 	ExitParallelMode();
 }
@@ -1794,14 +1794,14 @@ _gin_parallel_merge(GinBuildState *state)
 
 /*
  * Returns size of shared memory required to store state for a parallel
- * gin index build based on the snapshot its parallel scan will use.
+ * gin index build.
  */
 static Size
-_gin_parallel_estimate_shared(Relation heap, Snapshot snapshot)
+_gin_parallel_estimate_shared(Relation heap)
 {
 	/* c.f. shm_toc_allocate as to why BUFFERALIGN is used */
 	return add_size(BUFFERALIGN(sizeof(GinBuildShared)),
-					table_parallelscan_estimate(heap, snapshot));
+					table_parallelscan_estimate(heap, InvalidSnapshot));
 }
 
 /*
@@ -1824,6 +1824,7 @@ _gin_leader_participate_as_worker(GinBuildState *buildstate, Relation heap, Rela
 	_gin_parallel_scan_and_build(buildstate, ginleader->ginshared,
 								 ginleader->sharedsort, heap, index,
 								 sortmem, true);
+	Assert(!ginleader->ginshared->isconcurrent || !TransactionIdIsValid(MyProc->xid));
 }
 
 /*
@@ -2183,6 +2184,13 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	_gin_parallel_scan_and_build(&buildstate, ginshared, sharedsort,
 								 heapRel, indexRel, sortmem, false);
+	if (ginshared->isconcurrent)
+	{
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+		Assert(!TransactionIdIsValid(MyProc->xid));
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
