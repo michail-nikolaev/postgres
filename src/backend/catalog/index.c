@@ -1532,7 +1532,7 @@ index_concurrently_build(Oid heapRelationId,
 
 	/* Invalidate catalog snapshot just for assert */
 	InvalidateCatalogSnapshot();
-	Assert((indexInfo->ii_ParallelWorkers || indexInfo->ii_Unique) || !TransactionIdIsValid(MyProc->xmin));
+	Assert(indexInfo->ii_Unique || !TransactionIdIsValid(MyProc->xmin));
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
