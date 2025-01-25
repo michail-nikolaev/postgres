@@ -1,16 +1,19 @@
 /*-------------------------------------------------------------------------
  *
  * tuplestore.c
- *	  Generalized routines for temporary tuple storage.
+ *	  Generalized routines for temporary storage of tuples and Datums.
  *
- * This module handles temporary storage of tuples for purposes such
- * as Materialize nodes, hashjoin batch files, etc.  It is essentially
- * a dumbed-down version of tuplesort.c; it does no sorting of tuples
- * but can only store and regurgitate a sequence of tuples.  However,
- * because no sort is required, it is allowed to start reading the sequence
- * before it has all been written.  This is particularly useful for cursors,
- * because it allows random access within the already-scanned portion of
- * a query without having to process the underlying scan to completion.
+ * This module handles temporary storage of either tuples or single
+ * Datum values for purposes such as Materialize nodes, hashjoin batch
+ * files, etc. It is essentially a dumbed-down version of tuplesort.c;
+ * it does no sorting of tuples but can only store and regurgitate a sequence
+ * of tuples.  However, because no sort is required, it is allowed to start
+ * reading the sequence before it has all been written.
+ *
+ * This is particularly useful for cursors, because it allows random access
+ * within the already-scanned portion of a query without having to process
+ * the underlying scan to completion.
+ *
  * Also, it is possible to support multiple independent read pointers.
  *
  * A temporary file is used to handle the data if it exceeds the
@@ -61,6 +64,8 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "storage/buffile.h"
+#include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
@@ -115,15 +120,14 @@ struct Tuplestorestate
 	BufFile    *myfile;			/* underlying file, or NULL if none */
 	MemoryContext context;		/* memory context for holding tuples */
 	ResourceOwner resowner;		/* resowner for holding temp files */
+	Oid			datumType;		/* InvalidOid or oid of Datum's to be stored */
+	int16		datumTypeLen;	/* typelen of that Datum */
+	bool		datumTypeByVal; /* by-value of that atum */
 
 	/*
 	 * These function pointers decouple the routines that must know what kind
 	 * of tuple we are handling from the routines that don't need to know it.
 	 * They are set up by the tuplestore_begin_xxx routines.
-	 *
-	 * (Although tuplestore.c currently only supports heap tuples, I've copied
-	 * this part of tuplesort.c so that extension to other kinds of objects
-	 * will be easy if it's ever needed.)
 	 *
 	 * Function to copy a supplied input tuple into palloc'd space. (NB: we
 	 * assume that a single pfree() is enough to release the tuple later, so
@@ -143,11 +147,17 @@ struct Tuplestorestate
 
 	/*
 	 * Function to read a stored tuple from tape back into memory. 'len' is
-	 * the already-read length of the stored tuple.  Create and return a
-	 * palloc'd copy, and decrease state->availMem by the amount of memory
-	 * space consumed.
+	 * the already-known (read of constant) length of the stored tuple.
+	 * Create and return a palloc'd copy, and decrease state->availMem by the
+	 * amount of memory space consumed.
 	 */
 	void	   *(*readtup) (Tuplestorestate *state, unsigned int len);
+
+	/*
+	 * Function to get lengh of tuple from tape. Used to provide 'len' argument
+	 * for readtup (see above).
+	 */
+	unsigned int(*lentup)(Tuplestorestate *state, bool eofOK);
 
 	/*
 	 * This array holds pointers to tuples in memory if we are in state INMEM.
@@ -185,6 +195,7 @@ struct Tuplestorestate
 #define COPYTUP(state,tup)	((*(state)->copytup) (state, tup))
 #define WRITETUP(state,tup) ((*(state)->writetup) (state, tup))
 #define READTUP(state,len)	((*(state)->readtup) (state, len))
+#define LENTUP(state,eofOK)	((*(state)->lentup) (state, eofOK))
 #define LACKMEM(state)		((state)->availMem < 0)
 #define USEMEM(state,amt)	((state)->availMem -= (amt))
 #define FREEMEM(state,amt)	((state)->availMem += (amt))
@@ -193,9 +204,9 @@ struct Tuplestorestate
  *
  * NOTES about on-tape representation of tuples:
  *
- * We require the first "unsigned int" of a stored tuple to be the total size
- * on-tape of the tuple, including itself (so it is never zero).
- * The remainder of the stored tuple
+ * In case of tuples we use first "unsigned int" of a stored tuple
+ * to be the total size on-tape of the tuple, including itself
+ * (so it is never zero). The remainder of the stored tuple
  * may or may not match the in-memory representation of the tuple ---
  * any conversion needed is the job of the writetup and readtup routines.
  *
@@ -206,10 +217,13 @@ struct Tuplestorestate
  * state->backward is not set, the write/read routines may omit the extra
  * length word.
  *
+ * In case of Datum with constant lenght both "unsigned int" are ommitted.
+ *
  * writetup is expected to write both length words as well as the tuple
  * data.  When readtup is called, the tape is positioned just after the
- * front length word; readtup must read the tuple data and advance past
- * the back length word (if present).
+ * front length word (if it not ommitted like in case of contant-size Datum);
+ * readtup must read the tuple data and advance past the back length word
+ * (if present).
  *
  * The write/read routines can make use of the tuple description data
  * stored in the Tuplestorestate record, if needed. They are also expected
@@ -241,11 +255,16 @@ static Tuplestorestate *tuplestore_begin_common(int eflags,
 static void tuplestore_puttuple_common(Tuplestorestate *state, void *tuple);
 static void dumptuples(Tuplestorestate *state);
 static void tuplestore_updatemax(Tuplestorestate *state);
-static unsigned int getlen(Tuplestorestate *state, bool eofOK);
+
+static unsigned int lentup_heap(Tuplestorestate *state, bool eofOK);
 static void *copytup_heap(Tuplestorestate *state, void *tup);
 static void writetup_heap(Tuplestorestate *state, void *tup);
 static void *readtup_heap(Tuplestorestate *state, unsigned int len);
 
+static unsigned int lentup_datum(Tuplestorestate *state, bool eofOK);
+static void *copytup_datum(Tuplestorestate *state, void *datum);
+static void writetup_datum(Tuplestorestate *state, void *datum);
+static void *readtup_datum(Tuplestorestate *state, unsigned int len);
 
 /*
  *		tuplestore_begin_xxx
@@ -268,6 +287,12 @@ tuplestore_begin_common(int eflags, bool interXact, int maxKBytes)
 	state->allowedMem = maxKBytes * (int64) 1024;
 	state->availMem = state->allowedMem;
 	state->myfile = NULL;
+	/*
+	 * Set Datum related data to invalid by default.
+	 */
+	state->datumType = InvalidOid;
+	state->datumTypeLen =  0;
+	state->datumTypeByVal = false;
 
 	/*
 	 * The palloc/pfree pattern for tuple memory is in a FIFO pattern.  A
@@ -345,6 +370,36 @@ tuplestore_begin_heap(bool randomAccess, bool interXact, int maxKBytes)
 	state->copytup = copytup_heap;
 	state->writetup = writetup_heap;
 	state->readtup = readtup_heap;
+	state->lentup = lentup_heap;
+
+	return state;
+}
+
+/*
+ * The same as tuplestore_begin_heap but create store for Datum values.
+ */
+Tuplestorestate *
+tuplestore_begin_datum(Oid datumType, bool randomAccess, bool interXact, int maxKBytes)
+{
+	Tuplestorestate *state;
+	int			eflags;
+
+	/*
+	 * This interpretation of the meaning of randomAccess is compatible with
+	 * the pre-8.3 behavior of tuplestores.
+	 */
+	eflags = randomAccess ?
+		(EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND) :
+		(EXEC_FLAG_REWIND);
+
+	state = tuplestore_begin_common(eflags, interXact, maxKBytes);
+	state->datumType = datumType;
+	get_typlenbyval(state->datumType, &state->datumTypeLen, &state->datumTypeByVal);
+
+	state->copytup = copytup_datum;
+	state->writetup = writetup_datum;
+	state->readtup = readtup_datum;
+	state->lentup = lentup_datum;
 
 	return state;
 }
@@ -443,16 +498,19 @@ tuplestore_clear(Tuplestorestate *state)
 	{
 		int64		availMem = state->availMem;
 
-		/*
-		 * Below, we reset the memory context for storing tuples.  To save
-		 * from having to always call GetMemoryChunkSpace() on all stored
-		 * tuples, we adjust the availMem to forget all the tuples and just
-		 * recall USEMEM for the space used by the memtuples array.  Here we
-		 * just Assert that's correct and the memory tracking hasn't gone
-		 * wrong anywhere.
-		 */
-		for (i = state->memtupdeleted; i < state->memtupcount; i++)
-			availMem += GetMemoryChunkSpace(state->memtuples[i]);
+		if (!state->datumTypeByVal)
+		{
+			/*
+			 * Below, we reset the memory context for storing tuples.  To save
+			 * from having to always call GetMemoryChunkSpace() on all stored
+			 * tuples, we adjust the availMem to forget all the tuples and just
+			 * recall USEMEM for the space used by the memtuples array.  Here we
+			 * just Assert that's correct and the memory tracking hasn't gone
+			 * wrong anywhere.
+			 */
+			for (i = state->memtupdeleted; i < state->memtupcount; i++)
+				availMem += GetMemoryChunkSpace(state->memtuples[i]);
+		}
 
 		availMem += GetMemoryChunkSpace(state->memtuples);
 
@@ -777,6 +835,25 @@ tuplestore_puttuple(Tuplestorestate *state, HeapTuple tuple)
 }
 
 /*
+ * Like tuplestore_puttupleslot but for single Datum.
+ */
+void
+tuplestore_putdatum(Tuplestorestate *state, Datum datum)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(state->context);
+
+	/*
+	 * Copy the Datum.  (Must do this even in WRITEFILE case.  Note that
+	 * COPYTUP includes USEMEM, so we needn't do that here.)
+	 */
+	datum = PointerGetDatum(COPYTUP(state, DatumGetPointer(datum)));
+
+	tuplestore_puttuple_common(state, DatumGetPointer(datum));
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
  * Similar to tuplestore_puttuple(), but work from values + nulls arrays.
  * This avoids an extra tuple-construction operation.
  */
@@ -1027,10 +1104,10 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 			/* FALLTHROUGH */
 
 		case TSS_READFILE:
-			*should_free = true;
+			*should_free = !state->datumTypeByVal;
 			if (forward)
 			{
-				if ((tuplen = getlen(state, true)) != 0)
+				if ((tuplen = LENTUP(state, true)) != 0)
 				{
 					tup = READTUP(state, tuplen);
 					return tup;
@@ -1059,7 +1136,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 				Assert(!state->truncated);
 				return NULL;
 			}
-			tuplen = getlen(state, false);
+			tuplen = LENTUP(state, false);
 
 			if (readptr->eof_reached)
 			{
@@ -1090,7 +1167,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 					Assert(!state->truncated);
 					return NULL;
 				}
-				tuplen = getlen(state, false);
+				tuplen = LENTUP(state, false);
 			}
 
 			/*
@@ -1148,6 +1225,25 @@ tuplestore_gettupleslot(Tuplestorestate *state, bool forward,
 	else
 	{
 		ExecClearTuple(slot);
+		return false;
+	}
+}
+
+extern bool tuplestore_getdatum(Tuplestorestate *state, bool forward,
+								bool *should_free, Datum *result)
+{
+	Datum datum;
+	*should_free = false;
+
+	datum = (Datum) tuplestore_gettuple(state, forward, should_free);
+	if (datum)
+	{
+		*result =datum;
+		return true;
+	}
+	else
+	{
+		*result = PointerGetDatum(NULL);
 		return false;
 	}
 }
@@ -1460,8 +1556,11 @@ tuplestore_trim(Tuplestorestate *state)
 	/* Release no-longer-needed tuples */
 	for (i = state->memtupdeleted; i < nremove; i++)
 	{
-		FREEMEM(state, GetMemoryChunkSpace(state->memtuples[i]));
-		pfree(state->memtuples[i]);
+		if (!state->datumTypeByVal)
+		{
+			FREEMEM(state, GetMemoryChunkSpace(state->memtuples[i]));
+			pfree(state->memtuples[i]);
+		}
 		state->memtuples[i] = NULL;
 	}
 	state->memtupdeleted = nremove;
@@ -1556,13 +1655,18 @@ tuplestore_in_memory(Tuplestorestate *state)
 	return (state->status == TSS_INMEM);
 }
 
-
 /*
- * Tape interface routines
+ * Routines specialized for HeapTuple case
+ *
+ * The stored form is actually a MinimalTuple, but for largely historical
+ * reasons we allow COPYTUP to work from a HeapTuple.
+ *
+ * Since MinimalTuple already has length in its first word, we don't need
+ * to write that separately.
  */
 
 static unsigned int
-getlen(Tuplestorestate *state, bool eofOK)
+lentup_heap(Tuplestorestate *state, bool eofOK)
 {
 	unsigned int len;
 	size_t		nbytes;
@@ -1573,17 +1677,6 @@ getlen(Tuplestorestate *state, bool eofOK)
 	else
 		return len;
 }
-
-
-/*
- * Routines specialized for HeapTuple case
- *
- * The stored form is actually a MinimalTuple, but for largely historical
- * reasons we allow COPYTUP to work from a HeapTuple.
- *
- * Since MinimalTuple already has length in its first word, we don't need
- * to write that separately.
- */
 
 static void *
 copytup_heap(Tuplestorestate *state, void *tup)
@@ -1630,4 +1723,99 @@ readtup_heap(Tuplestorestate *state, unsigned int len)
 	if (state->backward)		/* need trailing length word? */
 		BufFileReadExact(state->myfile, &tuplen, sizeof(tuplen));
 	return tuple;
+}
+
+/*
+ * Routines specialized for Datum case.
+ *
+ * Handles both fixed and variable-length Datums efficiently:
+ * - Fixed-length: stores raw bytes without length prefix
+ * - Variable-length: includes length prefix (and suffix if backward scan)
+ * - By-value types handled inline without extra copying
+ */
+
+static unsigned int
+lentup_datum(Tuplestorestate *state, bool eofOK)
+{
+	unsigned int len;
+	size_t		nbytes;
+
+	Assert(state->datumType != InvalidOid);
+
+	if (state->datumTypeLen > 0)
+		return state->datumTypeLen;
+
+	nbytes = BufFileReadMaybeEOF(state->myfile, &len, sizeof(len), eofOK);
+	if (nbytes == 0)
+		return 0;
+	else
+		return len;
+}
+
+static void *
+copytup_datum(Tuplestorestate *state, void* datum)
+{
+	Assert(state->datumType != InvalidOid);
+	if (state->datumTypeByVal)
+		return DatumGetPointer(PointerGetDatum(datum));
+	else
+	{
+		Datum d = datumCopy(PointerGetDatum(datum), state->datumTypeByVal, state->datumTypeLen);
+		USEMEM(state, GetMemoryChunkSpace(DatumGetPointer(d)));
+		return DatumGetPointer(d);
+	}
+}
+
+static void
+writetup_datum(Tuplestorestate *state, void* datum)
+{
+	Assert(state->datumType != InvalidOid);
+	if (state->datumTypeByVal)
+	{
+		Assert(state->datumTypeLen > 0);
+		BufFileWrite(state->myfile, datum, state->datumTypeLen);
+	}
+	else
+	{
+		Size size = state->datumTypeLen;
+		if (state->datumTypeLen < 0)
+		{
+			BufFileWrite(state->myfile, &size, sizeof(size));
+			size = datumGetSize(PointerGetDatum(datum), state->datumTypeByVal, state->datumTypeLen);
+		}
+
+		BufFileWrite(state->myfile, datum, size);
+
+		/* need trailing length word? */
+		if (state->backward && state->datumTypeLen < 0)
+			BufFileWrite(state->myfile, &size, sizeof(size));
+
+		FREEMEM(state, GetMemoryChunkSpace(datum));
+		pfree(datum);
+	}
+}
+
+static void*
+readtup_datum(Tuplestorestate *state, unsigned int len)
+{
+	Assert(state->datumType != InvalidOid);
+	if (state->datumTypeByVal)
+	{
+		Datum datum = PointerGetDatum(NULL);
+		Assert(state->datumTypeLen > 0);
+		Assert(len == state->datumTypeLen);
+		BufFileReadExact(state->myfile, &datum, state->datumTypeLen);
+		return DatumGetPointer(datum);
+	}
+	else
+	{
+		Datum *datums = palloc(len);
+		BufFileReadExact(state->myfile, &datums, len);
+
+		/* need trailing length word? */
+		if (state->backward && state->datumTypeLen < 0)
+			BufFileReadExact(state->myfile, &len, sizeof(len));
+
+		return DatumGetPointer(*datums);
+	}
 }
