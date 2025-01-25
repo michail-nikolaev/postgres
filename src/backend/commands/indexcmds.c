@@ -4343,7 +4343,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/*
 		 * The index is now valid in the sense that it contains all currently
 		 * interesting tuples.  But since it might not contain tuples deleted
-		 * just before the reference snap was taken, we have to wait out any
+		 * just before the latest snap was taken, we have to wait out any
 		 * transactions that might have older snapshots.
 		 *
 		 * Because we don't take a snapshot or Xid in this transaction,

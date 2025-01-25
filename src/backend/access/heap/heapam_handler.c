@@ -1795,8 +1795,8 @@ heapam_index_build_range_scan(Relation heapRelation,
  */
 static int
 heapam_index_validate_tuplesort_difference(Tuplesortstate  *main,
-										   Tuplesortstate  *aux,
-										   Tuplestorestate *store)
+									  Tuplesortstate  *aux,
+									  Tuplestorestate *store)
 {
 	int				num = 0;
 	/* state variables for the merge */
@@ -2052,7 +2052,8 @@ heapam_index_validate_scan(Relation heapRelation,
 	ExprContext		*econtext;
 	BufferAccessStrategy bstrategy = GetAccessStrategy(BAS_BULKREAD);
 
-	int				num_to_check;
+	int				num_to_check,
+					page_read_counter = 1; /* set to 1 to skip snapshot resert at start */
 	Tuplestorestate *tuples_for_check;
 	ValidateIndexScanState callback_private_data;
 
@@ -2063,9 +2064,35 @@ heapam_index_validate_scan(Relation heapRelation,
 	/* Use 10% of memory for tuple store. */
 	int		store_work_mem_part = maintenance_work_mem / 10;
 
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	tuples_for_check =  tuplestore_begin_datum(INT8OID, false, false, store_work_mem_part);
+
+	PopActiveSnapshot();
+	InvalidateCatalogSnapshot();
+
+	Assert(!HaveRegisteredOrActiveSnapshot());
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+
 	/*
-	 * Now take the snapshot that will be used by to filter candidate
-	 * tuples.
+	 * sanity checks
+	 */
+	Assert(OidIsValid(indexRelation->rd_rel->relam));
+
+	num_to_check = heapam_index_validate_tuplesort_difference(state->tuplesort,
+															  auxState->tuplesort,
+															  tuples_for_check);
+
+	/* It is our responsibility to sloe tuple sort as fast as we can */
+	tuplesort_end(state->tuplesort);
+	tuplesort_end(auxState->tuplesort);
+
+	state->tuplesort = auxState->tuplesort = NULL;
+
+	/*
+	 * Now take the first snapshot that will be used by to filter candidate
+	 * tuples. We are going to replace it by newer snapshot every so often
+	 * to propagate horizon.
 	 *
 	 * Beware!  There might still be snapshots in use that treat some transaction
 	 * as in-progress that our temporary snapshot treats as committed.
@@ -2081,32 +2108,9 @@ heapam_index_validate_scan(Relation heapRelation,
 	 * We also set ActiveSnapshot to this snap, since functions in indexes may
 	 * need a snapshot.
 	 */
-	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
 	PushActiveSnapshot(snapshot);
 	limitXmin = snapshot->xmin;
-
-	/*
-	 * Encode TIDs as int8 values for the sort, rather than directly sorting
-	 * item pointers.  This can be significantly faster, primarily because TID
-	 * is a pass-by-reference type on all platforms, whereas int8 is
-	 * pass-by-value on most platforms.
-	 */
-	tuples_for_check =  tuplestore_begin_datum(INT8OID, false, false, store_work_mem_part);
-
-	/*
-	 * sanity checks
-	 */
-	Assert(OidIsValid(indexRelation->rd_rel->relam));
-
-	num_to_check = heapam_index_validate_tuplesort_difference(state->tuplesort,
-														 auxState->tuplesort,
-														 tuples_for_check);
-
-	/* It is our responsibility to sloe tuple sort as fast as we can */
-	tuplesort_end(state->tuplesort);
-	tuplesort_end(auxState->tuplesort);
-
-	state->tuplesort = auxState->tuplesort = NULL;
 
 	estate = CreateExecutorState();
 	econtext = GetPerTupleExprContext(estate);
@@ -2145,6 +2149,7 @@ heapam_index_validate_scan(Relation heapRelation,
 
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		block_number = BufferGetBlockNumber(buf);
+		page_read_counter++;
 
 		i = 0;
 		while ((off = tuples[i]) != InvalidOffsetNumber)
@@ -2199,6 +2204,20 @@ heapam_index_validate_scan(Relation heapRelation,
 		}
 
 		ReleaseBuffer(buf);
+
+		if (page_read_counter % SO_RESET_SNAPSHOT_EACH_N_PAGE == 0)
+		{
+			PopActiveSnapshot();
+			UnregisterSnapshot(snapshot);
+			/* to make sure we propagate xmin */
+			InvalidateCatalogSnapshot();
+			Assert(!TransactionIdIsValid(MyProc->xmin));
+
+			snapshot = RegisterSnapshot(GetLatestSnapshot());
+			PushActiveSnapshot(snapshot);
+			/* xmin should not go backwards, but just for the case*/
+			limitXmin = TransactionIdNewer(limitXmin, snapshot->xmin);
+		}
 	}
 
 	ExecDropSingleTupleTableSlot(slot);
