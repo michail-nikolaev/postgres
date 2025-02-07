@@ -110,6 +110,7 @@ gistbeginscan(Relation r, int nkeys, int norderbys)
 	so->numKilled = 0;
 	so->curBlkno = InvalidBlockNumber;
 	so->curPageLSN = InvalidXLogRecPtr;
+	so->pagePin = InvalidBuffer;
 
 	scan->opaque = so;
 
@@ -151,18 +152,73 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 		Assert(so->queueCxt == so->giststate->scanCxt);
 		first_time = true;
 	}
-	else if (so->queueCxt == so->giststate->scanCxt)
-	{
-		/* second time through */
-		so->queueCxt = AllocSetContextCreate(so->giststate->scanCxt,
-											 "GiST queue context",
-											 ALLOCSET_DEFAULT_SIZES);
-		first_time = false;
-	}
 	else
 	{
-		/* third or later time through */
-		MemoryContextReset(so->queueCxt);
+		/*
+		 * In the first scan of a query we allocate IOS items in the scan
+		 * context, which is never reset. To not leak this memory, we
+		 * manually free the queue entries.
+		 */
+		const bool freequeue = so->queueCxt == so->giststate->scanCxt;
+		/*
+		 * Index-only scans require that vacuum can't clean up entries that
+		 * we're still planning to return, so we hold a pin on the buffer until
+		 * we're past the returned item (1 pin count for every index tuple).
+		 * When rescan is called, however, we need to clean up the pins that
+		 * we still hold, lest we leak them and lose a buffer entry to that
+		 * page.
+		 */
+		const bool unpinqueue = scan->xs_want_itup;
+
+		if (freequeue || unpinqueue)
+		{
+			while (!pairingheap_is_empty(so->queue))
+			{
+				pairingheap_node *node;
+				GISTSearchItem *item;
+
+				node = pairingheap_remove_first(so->queue);
+				item = pairingheap_container(GISTSearchItem, phNode, node);
+
+				/*
+				 * If we need to unpin a buffer for IOS' heap items, do so
+				 * now.
+				 */
+				if (unpinqueue && item->blkno == InvalidBlockNumber)
+				{
+					Assert(BufferIsValid(item->data.heap.buffer));
+					ReleaseBuffer(item->data.heap.buffer);
+				}
+
+				/*
+				 * item->data.heap.recontup is stored in the separate memory
+				 * context so->pageDataCxt, which is always reset; so we don't
+				 * need to free that.
+				 * "item" itself is allocated into the queue context, which is
+				 * generally reset in rescan.
+				 * However, only in the first scan, we allocate these items
+				 * into the main scan context, which isn't reset; so we must
+				 * free these items, or else we'd leak the memory for the
+				 * duration of the query.
+				 */
+				if (freequeue)
+					pfree(item);
+			}
+		}
+
+		if (so->queueCxt == so->giststate->scanCxt)
+		{
+			/* second time through */
+			so->queueCxt = AllocSetContextCreate(so->giststate->scanCxt,
+												 "GiST queue context",
+												 ALLOCSET_DEFAULT_SIZES);
+		}
+		else
+		{
+			/* third or later time through */
+			MemoryContextReset(so->queueCxt);
+		}
+
 		first_time = false;
 	}
 
@@ -341,12 +397,51 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 
 	/* any previous xs_hitup will have been pfree'd in context resets above */
 	scan->xs_hitup = NULL;
+
+	if (scan->xs_want_itup)
+	{
+		if (BufferIsValid(so->pagePin))
+		{
+			ReleaseBuffer(so->pagePin);
+			so->pagePin = InvalidBuffer;
+		}
+	}
 }
 
 void
 gistendscan(IndexScanDesc scan)
 {
 	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
+
+	if (scan->xs_want_itup)
+	{
+		if (BufferIsValid(so->pagePin))
+		{
+			ReleaseBuffer(so->pagePin);
+			so->pagePin = InvalidBuffer;
+		}
+
+		/* unpin any leftover buffers */
+		while (!pairingheap_is_empty(so->queue))
+		{
+			pairingheap_node *node;
+			GISTSearchItem *item;
+
+			/*
+			 * Note: unlike gistrescan, there is no need to actually free the
+			 * items here, as that's handled by memory context reset in the
+			 * call to freeGISTstate() below.
+			 */
+			node = pairingheap_remove_first(so->queue);
+			item = pairingheap_container(GISTSearchItem, phNode, node);
+
+			if (item->blkno == InvalidBlockNumber)
+			{
+				Assert(BufferIsValid(item->data.heap.buffer));
+				ReleaseBuffer(item->data.heap.buffer);
+			}
+		}
+	}
 
 	/*
 	 * freeGISTstate is enough to clean up everything made by gistbeginscan,

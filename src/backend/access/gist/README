@@ -287,6 +287,22 @@ would complicate the insertion algorithm. So when an insertion sees a page
 with F_FOLLOW_RIGHT set, it immediately tries to bring the split that
 crashed in the middle to completion by adding the downlink in the parent.
 
+Index-only scans and VACUUM
+---------------------------
+
+Index-only scans require that any tuple returned by the index scan has not
+been removed from the index by a call to ambulkdelete through VACUUM.
+To ensure this invariant, bulkdelete now requires a buffer cleanup lock, and
+every Index-only scan (IOS) will keep a pin on each page that it is returning
+tuples from.  For ordered scans, we keep one pin for each matching leaf tuple,
+for unordered scans we just keep an additional pin while we're still working
+on the page's tuples.  This ensures that pages seen by the scan won't be
+cleaned up until after the tuples have been returned.
+
+These longer pin lifetimes can cause buffer exhaustion with messages like "no
+unpinned buffers available" when the index has many pages that have similar
+ordering; but future work can figure out how to best work that out.
+
 Buffering build algorithm
 -------------------------
 

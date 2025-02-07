@@ -395,6 +395,7 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 	}
 
 	so->nPageData = so->curPageData = 0;
+	Assert(so->pagePin == InvalidBuffer);
 	scan->xs_hitup = NULL;		/* might point into pageDataCxt */
 	if (so->pageDataCxt)
 		MemoryContextReset(so->pageDataCxt);
@@ -460,6 +461,7 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 			so->pageData[so->nPageData].heapPtr = it->t_tid;
 			so->pageData[so->nPageData].recheck = recheck;
 			so->pageData[so->nPageData].offnum = i;
+			so->pageData[so->nPageData].buffer = InvalidBuffer;
 
 			/*
 			 * In an index-only scan, also fetch the data from the tuple.  The
@@ -471,6 +473,16 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 				so->pageData[so->nPageData].recontup =
 					gistFetchTuple(giststate, r, it);
 				MemoryContextSwitchTo(oldcxt);
+
+				/*
+				 * Only maintain a single additional buffer pin for unordered
+				 * IOS scans; as we have all data already in one place.
+				 */
+				if (so->nPageData == 0)
+				{
+					so->pagePin = buffer;
+					IncrBufferRefCount(buffer);
+				}
 			}
 			so->nPageData++;
 		}
@@ -501,7 +513,11 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 				 * In an index-only scan, also fetch the data from the tuple.
 				 */
 				if (scan->xs_want_itup)
+				{
 					item->data.heap.recontup = gistFetchTuple(giststate, r, it);
+					item->data.heap.buffer = buffer;
+					IncrBufferRefCount(buffer);
+				}
 			}
 			else
 			{
@@ -567,6 +583,10 @@ getNextNearest(IndexScanDesc scan)
 		/* free previously returned tuple */
 		pfree(scan->xs_hitup);
 		scan->xs_hitup = NULL;
+
+		Assert(BufferIsValid(so->pagePin));
+		ReleaseBuffer(so->pagePin);
+		so->pagePin = InvalidBuffer;
 	}
 
 	do
@@ -588,7 +608,11 @@ getNextNearest(IndexScanDesc scan)
 
 			/* in an index-only scan, also return the reconstructed tuple. */
 			if (scan->xs_want_itup)
+			{
+				Assert(BufferIsValid(item->data.heap.buffer));
 				scan->xs_hitup = item->data.heap.recontup;
+				so->pagePin = item->data.heap.buffer;
+			}
 			res = true;
 		}
 		else
@@ -704,6 +728,14 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 					so->killedItems[so->numKilled++] =
 						so->pageData[so->curPageData - 1].offnum;
 			}
+
+			if (scan->xs_want_itup && so->nPageData > 0)
+			{
+				Assert(BufferIsValid(so->pagePin));
+				ReleaseBuffer(so->pagePin);
+				so->pagePin = InvalidBuffer;
+			}
+
 			/* find and process the next index page */
 			do
 			{

@@ -124,6 +124,7 @@ typedef struct GISTSearchHeapItem
 								 * index-only scans */
 	OffsetNumber offnum;		/* track offset in page to mark tuple as
 								 * LP_DEAD */
+	Buffer		buffer;			/* buffer to unpin, when IOS */
 } GISTSearchHeapItem;
 
 /* Unvisited item, either index page or heap tuple */
@@ -176,6 +177,7 @@ typedef struct GISTScanOpaqueData
 	OffsetNumber curPageData;	/* next item to return */
 	MemoryContext pageDataCxt;	/* context holding the fetched tuples, for
 								 * index-only scans */
+	Buffer		pagePin;		/* buffer of page, if pinned */
 } GISTScanOpaqueData;
 
 typedef GISTScanOpaqueData *GISTScanOpaque;
