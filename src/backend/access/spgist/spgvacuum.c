@@ -629,7 +629,7 @@ spgvacuumpage(spgBulkDeleteState *bds, BlockNumber blkno)
 
 	buffer = ReadBufferExtended(index, MAIN_FORKNUM, blkno,
 								RBM_NORMAL, bds->info->strategy);
-	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+	LockBufferForCleanup(buffer);
 	page = (Page) BufferGetPage(buffer);
 
 	if (PageIsNew(page))

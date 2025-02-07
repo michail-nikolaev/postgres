@@ -30,7 +30,8 @@
 typedef void (*storeRes_func) (SpGistScanOpaque so, ItemPointer heapPtr,
 							   Datum leafValue, bool isNull,
 							   SpGistLeafTuple leafTuple, bool recheck,
-							   bool recheckDistances, double *distances);
+							   bool recheckDistances, double *distances,
+							   Buffer pin);
 
 /*
  * Pairing heap comparison function for the SpGistSearchItem queue.
@@ -95,6 +96,11 @@ spgFreeSearchItem(SpGistScanOpaque so, SpGistSearchItem *item)
 
 	if (item->traversalValue)
 		pfree(item->traversalValue);
+	if (so->want_itup && item->isLeaf)
+	{
+		Assert(BufferIsValid(item->buffer));
+		ReleaseBuffer(item->buffer);
+	}
 
 	pfree(item);
 }
@@ -142,6 +148,7 @@ spgAddStartItem(SpGistScanOpaque so, bool isnull)
 	startEntry->traversalValue = NULL;
 	startEntry->recheck = false;
 	startEntry->recheckDistances = false;
+	startEntry->buffer = InvalidBuffer;
 
 	spgAddSearchItemToQueue(so, startEntry);
 }
@@ -416,6 +423,9 @@ spgrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	/* preprocess scankeys, set up the representation in *so */
 	spgPrepareScanKeys(scan);
 
+	/* release any pinned buffers from earlier rescans */
+	spgScanEndDropAllPagePins(scan, so);
+
 	/* set up starting queue entries */
 	resetSpGistScanOpaque(so);
 
@@ -427,6 +437,12 @@ void
 spgendscan(IndexScanDesc scan)
 {
 	SpGistScanOpaque so = (SpGistScanOpaque) scan->opaque;
+
+	/*
+	 * release any pinned buffers from earlier rescans, before we drop their
+	 * data by dropping the memory contexts.
+	 */
+	spgScanEndDropAllPagePins(scan, so);
 
 	MemoryContextDelete(so->tempCxt);
 	MemoryContextDelete(so->traversalCxt);
@@ -460,7 +476,7 @@ spgendscan(IndexScanDesc scan)
 static SpGistSearchItem *
 spgNewHeapItem(SpGistScanOpaque so, int level, SpGistLeafTuple leafTuple,
 			   Datum leafValue, bool recheck, bool recheckDistances,
-			   bool isnull, double *distances)
+			   bool isnull, double *distances, Buffer addPin)
 {
 	SpGistSearchItem *item = spgAllocSearchItem(so, isnull, distances);
 
@@ -479,6 +495,10 @@ spgNewHeapItem(SpGistScanOpaque so, int level, SpGistLeafTuple leafTuple,
 			datumCopy(leafValue, so->state.attType.attbyval,
 					  so->state.attType.attlen);
 
+		Assert(BufferIsValid(addPin));
+		IncrBufferRefCount(addPin);
+		item->buffer = addPin;
+
 		/*
 		 * If we're going to need to reconstruct INCLUDE attributes, store the
 		 * whole leaf tuple so we can get the INCLUDE attributes out of it.
@@ -495,6 +515,7 @@ spgNewHeapItem(SpGistScanOpaque so, int level, SpGistLeafTuple leafTuple,
 	{
 		item->value = (Datum) 0;
 		item->leafTuple = NULL;
+		item->buffer = InvalidBuffer;
 	}
 	item->traversalValue = NULL;
 	item->isLeaf = true;
@@ -513,7 +534,7 @@ spgNewHeapItem(SpGistScanOpaque so, int level, SpGistLeafTuple leafTuple,
 static bool
 spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 			SpGistLeafTuple leafTuple, bool isnull,
-			bool *reportedSome, storeRes_func storeRes)
+			bool *reportedSome, storeRes_func storeRes, Buffer buffer)
 {
 	Datum		leafValue;
 	double	   *distances;
@@ -580,7 +601,8 @@ spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 														recheck,
 														recheckDistances,
 														isnull,
-														distances);
+														distances,
+														buffer);
 
 			spgAddSearchItemToQueue(so, heapItem);
 
@@ -591,7 +613,7 @@ spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 			/* non-ordered scan, so report the item right away */
 			Assert(!recheckDistances);
 			storeRes(so, &leafTuple->heapPtr, leafValue, isnull,
-					 leafTuple, recheck, false, NULL);
+					 leafTuple, recheck, false, NULL, buffer);
 			*reportedSome = true;
 		}
 	}
@@ -750,6 +772,35 @@ spgGetNextQueueItem(SpGistScanOpaque so)
 	return (SpGistSearchItem *) pairingheap_remove_first(so->scanQueue);
 }
 
+/*
+ * Note: This removes all items from the pairingheap.
+ */
+void
+spgScanEndDropAllPagePins(IndexScanDesc scan, SpGistScanOpaque so)
+{
+	/* Guaranteed no pinned pages */
+	if (so->scanQueue == NULL || !scan->xs_want_itup)
+		return;
+
+	if (BufferIsValid(so->pagePin))
+	{
+		ReleaseBuffer(so->pagePin);
+		so->pagePin = InvalidBuffer;
+	}
+
+	while (!pairingheap_is_empty(so->scanQueue))
+	{
+		SpGistSearchItem *item;
+
+		item = spgGetNextQueueItem(so);
+		if (!item->isLeaf)
+			continue;
+
+		Assert(BufferIsValid(item->buffer));
+		spgFreeSearchItem(so, item);
+	}
+}
+
 enum SpGistSpecialOffsetNumbers
 {
 	SpGistBreakOffsetNumber = InvalidOffsetNumber,
@@ -761,6 +812,7 @@ static OffsetNumber
 spgTestLeafTuple(SpGistScanOpaque so,
 				 SpGistSearchItem *item,
 				 Page page, OffsetNumber offset,
+				 Buffer buffer,
 				 bool isnull, bool isroot,
 				 bool *reportedSome,
 				 storeRes_func storeRes)
@@ -799,7 +851,7 @@ spgTestLeafTuple(SpGistScanOpaque so,
 
 	Assert(ItemPointerIsValid(&leafTuple->heapPtr));
 
-	spgLeafTest(so, item, leafTuple, isnull, reportedSome, storeRes);
+	spgLeafTest(so, item, leafTuple, isnull, reportedSome, storeRes, buffer);
 
 	return SGLT_GET_NEXTOFFSET(leafTuple);
 }
@@ -835,7 +887,8 @@ redirect:
 			Assert(so->numberOfNonNullOrderBys > 0);
 			storeRes(so, &item->heapPtr, item->value, item->isNull,
 					 item->leafTuple, item->recheck,
-					 item->recheckDistances, item->distances);
+					 item->recheckDistances, item->distances,
+					 item->buffer);
 			reportedSome = true;
 		}
 		else
@@ -873,7 +926,7 @@ redirect:
 					/* When root is a leaf, examine all its tuples */
 					for (offset = FirstOffsetNumber; offset <= max; offset++)
 						(void) spgTestLeafTuple(so, item, page, offset,
-												isnull, true,
+												buffer, isnull, true,
 												&reportedSome, storeRes);
 				}
 				else
@@ -883,7 +936,7 @@ redirect:
 					{
 						Assert(offset >= FirstOffsetNumber && offset <= max);
 						offset = spgTestLeafTuple(so, item, page, offset,
-												  isnull, false,
+												  buffer, isnull, false,
 												  &reportedSome, storeRes);
 						if (offset == SpGistRedirectOffsetNumber)
 							goto redirect;
@@ -929,9 +982,9 @@ static void
 storeBitmap(SpGistScanOpaque so, ItemPointer heapPtr,
 			Datum leafValue, bool isnull,
 			SpGistLeafTuple leafTuple, bool recheck,
-			bool recheckDistances, double *distances)
+			bool recheckDistances, double *distances,
+			Buffer pin)
 {
-	Assert(!recheckDistances && !distances);
 	tbm_add_tuples(so->tbm, heapPtr, 1, recheck);
 	so->ntids++;
 }
@@ -954,10 +1007,9 @@ spggetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
 /* storeRes subroutine for gettuple case */
 static void
-storeGettuple(SpGistScanOpaque so, ItemPointer heapPtr,
-			  Datum leafValue, bool isnull,
-			  SpGistLeafTuple leafTuple, bool recheck,
-			  bool recheckDistances, double *nonNullDistances)
+storeGettuple(SpGistScanOpaque so, ItemPointer heapPtr, Datum leafValue,
+			  bool isnull, SpGistLeafTuple leafTuple, bool recheck,
+			  bool recheckDistances, double *nonNullDistances, Buffer pin)
 {
 	Assert(so->nPtrs < MaxIndexTuplesPerPage);
 	so->heapPtrs[so->nPtrs] = *heapPtr;
@@ -1016,6 +1068,25 @@ storeGettuple(SpGistScanOpaque so, ItemPointer heapPtr,
 		so->reconTups[so->nPtrs] = heap_form_tuple(so->reconTupDesc,
 												   leafDatums,
 												   leafIsnulls);
+
+		/*
+		 * IOS: Make sure we have one additional pin on the buffer
+		 * from the tuple we are going to return.
+		 *
+		 * In the case buffer is changing - unpin previous buffer.
+		 *
+		 * We may switch buffers almost randomly in case of ordered
+		 * scan - but in such case each item in queue holding its own
+		 * pin.
+		 */
+		if (so->pagePin != pin)
+		{
+			if (BufferIsValid(so->pagePin))
+				ReleaseBuffer(so->pagePin);
+			so->pagePin = pin;
+			if (BufferIsValid(so->pagePin))
+				IncrBufferRefCount(so->pagePin);
+		}
 	}
 	so->nPtrs++;
 }
@@ -1065,6 +1136,13 @@ spggettuple(IndexScanDesc scan, ScanDirection dir)
 
 			for (i = 0; i < so->nPtrs; i++)
 				pfree(so->reconTups[i]);
+
+			/* Unpin page of last returned tuple if any */
+			if (BufferIsValid(so->pagePin))
+			{
+				ReleaseBuffer(so->pagePin);
+				so->pagePin = InvalidBuffer;
+			}
 		}
 		so->iPtr = so->nPtrs = 0;
 

@@ -175,6 +175,7 @@ typedef struct SpGistSearchItem
 	bool		isLeaf;			/* SearchItem is heap item */
 	bool		recheck;		/* qual recheck is needed */
 	bool		recheckDistances;	/* distance recheck is needed */
+	Buffer		buffer;			/* buffer pinned for this leaf tuple (IOS-only) */
 
 	/* array with numberOfOrderBys entries */
 	double		distances[FLEXIBLE_ARRAY_MEMBER];
@@ -226,6 +227,7 @@ typedef struct SpGistScanOpaqueData
 	TupleDesc	reconTupDesc;	/* if so, descriptor for reconstructed tuples */
 	int			nPtrs;			/* number of TIDs found on current page */
 	int			iPtr;			/* index for scanning through same */
+	Buffer		pagePin;		/* output tuple's pinned buffer, if IOS */
 	ItemPointerData heapPtrs[MaxIndexTuplesPerPage];	/* TIDs from cur page */
 	bool		recheck[MaxIndexTuplesPerPage]; /* their recheck flags */
 	bool		recheckDistances[MaxIndexTuplesPerPage];	/* distance recheck
@@ -487,6 +489,9 @@ typedef SpGistDeadTupleData *SpGistDeadTuple;
 #define GBUF_PARITY_MASK		0x03
 #define GBUF_REQ_LEAF(flags)	(((flags) & GBUF_PARITY_MASK) == GBUF_LEAF)
 #define GBUF_REQ_NULLS(flags)	((flags) & GBUF_NULLS)
+
+/* spgscan.c */
+void spgScanEndDropAllPagePins(IndexScanDesc scan, SpGistScanOpaque so);
 
 /* spgutils.c */
 
