@@ -35,7 +35,7 @@
  * away and the TID was re-used by a completely different heap tuple.
  */
 static void
-gistkillitems(IndexScanDesc scan)
+gistkillitems(IndexScanDesc scan, bool pagePinned)
 {
 	GISTScanOpaque so = (GISTScanOpaque) scan->opaque;
 	Buffer		buffer;
@@ -60,9 +60,10 @@ gistkillitems(IndexScanDesc scan)
 	/*
 	 * If page LSN differs it means that the page was modified since the last
 	 * read. killedItems could be not valid so LP_DEAD hints applying is not
-	 * safe.
+	 * safe. But in case then page was pinned - it is safe, because VACUUM is
+	 * unable to remove tuples due to locking protocol.
 	 */
-	if (BufferGetLSNAtomic(buffer) != so->curPageLSN)
+	if (!pagePinned && BufferGetLSNAtomic(buffer) != so->curPageLSN)
 	{
 		UnlockReleaseBuffer(buffer);
 		so->numKilled = 0;		/* reset counter */
@@ -403,7 +404,8 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem,
 	/*
 	 * We save the LSN of the page as we read it, so that we know whether it
 	 * safe to apply LP_DEAD hints to the page later. This allows us to drop
-	 * the pin for MVCC scans, which allows vacuum to avoid blocking.
+	 * the pin for MVCC scans (except index-only scans), which allows vacuum
+	 * to avoid blocking.
 	 */
 	so->curPageLSN = BufferGetLSNAtomic(buffer);
 
@@ -732,6 +734,13 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 			if (scan->xs_want_itup && so->nPageData > 0)
 			{
 				Assert(BufferIsValid(so->pagePin));
+				/*
+				 * kill items while page still pinned.
+				 * so->numKilled is set to 0 after the call, so, call above
+				 * for the same page is guaranteed to be skipped.
+				 */
+				if ((so->curBlkno != InvalidBlockNumber) && (so->numKilled > 0))
+					gistkillitems(scan, BufferIsValid(so->pagePin));
 				ReleaseBuffer(so->pagePin);
 				so->pagePin = InvalidBuffer;
 			}
@@ -742,7 +751,7 @@ gistgettuple(IndexScanDesc scan, ScanDirection dir)
 				GISTSearchItem *item;
 
 				if ((so->curBlkno != InvalidBlockNumber) && (so->numKilled > 0))
-					gistkillitems(scan);
+					gistkillitems(scan, BufferIsValid(so->pagePin));
 
 				item = getNextGISTSearchItem(so);
 
