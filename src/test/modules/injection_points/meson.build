@@ -45,6 +45,7 @@ tests += {
   'isolation': {
     'specs': [
       'basic',
+      'crash',
       'inplace',
       'syscache-update-pruned',
     ],
