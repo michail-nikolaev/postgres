@@ -32,6 +32,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/tuplesort.h"
+#include "storage/proc.h"
 
 
 /* sort-type codes for sort__start probes */
@@ -133,6 +134,7 @@ typedef struct
 
 	bool		enforceUnique;	/* complain if we find duplicate tuples */
 	bool		uniqueNullsNotDistinct; /* unique constraint null treatment */
+	bool		uniqueDeadIgnored; /* ignore dead tuples in unique check */
 } TuplesortIndexBTreeArg;
 
 /*
@@ -358,6 +360,7 @@ tuplesort_begin_index_btree(Relation heapRel,
 							Relation indexRel,
 							bool enforceUnique,
 							bool uniqueNullsNotDistinct,
+							bool uniqueDeadIgnored,
 							int workMem,
 							SortCoordinate coordinate,
 							int sortopt)
@@ -400,6 +403,7 @@ tuplesort_begin_index_btree(Relation heapRel,
 	arg->index.indexRel = indexRel;
 	arg->enforceUnique = enforceUnique;
 	arg->uniqueNullsNotDistinct = uniqueNullsNotDistinct;
+	arg->uniqueDeadIgnored = uniqueDeadIgnored;
 
 	indexScanKey = _bt_mkscankey(indexRel, NULL);
 
@@ -1653,6 +1657,7 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 		Datum		values[INDEX_MAX_KEYS];
 		bool		isnull[INDEX_MAX_KEYS];
 		char	   *key_desc;
+		bool		uniqueCheckFail = true;
 
 		/*
 		 * Some rather brain-dead implementations of qsort (such as the one in
@@ -1662,18 +1667,58 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 		 */
 		Assert(tuple1 != tuple2);
 
-		index_deform_tuple(tuple1, tupDes, values, isnull);
+		/* This is fail-fast check, see _bt_load for details. */
+		if (arg->uniqueDeadIgnored)
+		{
+			bool	any_tuple_dead,
+					call_again = false,
+					ignored;
 
-		key_desc = BuildIndexValueDescription(arg->index.indexRel, values, isnull);
+			TupleTableSlot	*slot = MakeSingleTupleTableSlot(RelationGetDescr(arg->index.heapRel),
+															 &TTSOpsBufferHeapTuple);
+			ItemPointerData tid = tuple1->t_tid;
 
-		ereport(ERROR,
-				(errcode(ERRCODE_UNIQUE_VIOLATION),
-				 errmsg("could not create unique index \"%s\"",
-						RelationGetRelationName(arg->index.indexRel)),
-				 key_desc ? errdetail("Key %s is duplicated.", key_desc) :
-				 errdetail("Duplicate keys exist."),
-				 errtableconstraint(arg->index.heapRel,
-									RelationGetRelationName(arg->index.indexRel))));
+			IndexFetchTableData *fetch = table_index_fetch_begin(arg->index.heapRel);
+			any_tuple_dead = !table_index_fetch_tuple(fetch, &tid, SnapshotSelf, slot, &call_again, &ignored);
+
+			if (!any_tuple_dead)
+			{
+				call_again = false;
+				tid = tuple2->t_tid;
+				any_tuple_dead = !table_index_fetch_tuple(fetch, &tuple2->t_tid, SnapshotSelf, slot, &call_again,
+														  &ignored);
+			}
+
+			if (any_tuple_dead)
+			{
+				elog(DEBUG5, "skipping duplicate values because some of them are dead: (%u,%u) vs (%u,%u)",
+					 ItemPointerGetBlockNumber(&tuple1->t_tid),
+					 ItemPointerGetOffsetNumber(&tuple1->t_tid),
+					 ItemPointerGetBlockNumber(&tuple2->t_tid),
+					 ItemPointerGetOffsetNumber(&tuple2->t_tid));
+
+				uniqueCheckFail = false;
+			}
+			ExecDropSingleTupleTableSlot(slot);
+			table_index_fetch_end(fetch);
+			Assert(!TransactionIdIsValid(MyProc->xmin));
+		}
+		if (uniqueCheckFail)
+		{
+			index_deform_tuple(tuple1, tupDes, values, isnull);
+
+			key_desc = BuildIndexValueDescription(arg->index.indexRel, values, isnull);
+
+			/* keep this error message in sync with the same in _bt_load */
+			ereport(ERROR,
+					(errcode(ERRCODE_UNIQUE_VIOLATION),
+							errmsg("could not create unique index \"%s\"",
+								   RelationGetRelationName(arg->index.indexRel)),
+							key_desc ? errdetail("Key %s is duplicated.", key_desc) :
+							errdetail("Duplicate keys exist."),
+							errtableconstraint(arg->index.heapRel,
+											   RelationGetRelationName(arg->index.indexRel))));
+		}
 	}
 
 	/*
