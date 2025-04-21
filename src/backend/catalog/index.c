@@ -3536,8 +3536,9 @@ IndexCheckExclusion(Relation heapRelation,
  * insert their new tuples into it. At the same moment we clear "indisready" for
  * auxiliary index, since it is no more required to be updated.
  *
- * We then take a new reference snapshot, any tuples that are valid according
- * to this snap, but are not in the index, must be added to the index.
+ * We then take a new snapshot, any tuples that are valid according
+ * to this snap, but are not in the index, must be added to the index. In
+ * order to propagate xmin we reset that snapshot every few so often.
  * (Any tuples committed live after the snap will be inserted into the
  * index by their originating transaction.  Any tuples committed dead before
  * the snap need not be indexed, because we will wait out all transactions
@@ -3550,7 +3551,7 @@ IndexCheckExclusion(Relation heapRelation,
  * TIDs of both auxiliary and target indexes, and doing a "merge join" against
  * the TID lists to see which tuples from auxiliary index are missing from the
  * target index.  Thus we will ensure that all tuples valid according to the
- * reference snapshot are in the index. Notice we need to do bulkdelete in the
+ * latest snapshot are in the index. Notice we need to do bulkdelete in the
  * particular order: auxiliary first, target last.
  *
  * Building a unique index this way is tricky: we might try to insert a
@@ -3571,13 +3572,14 @@ IndexCheckExclusion(Relation heapRelation,
  *
  * Also, some actions to concurrent drop the auxiliary index are performed.
  */
-void
-validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
+TransactionId
+validate_index(Oid heapId, Oid indexId, Oid auxIndexId)
 {
 	Relation	heapRelation,
 				indexRelation,
 				auxIndexRelation;
 	IndexInfo  *indexInfo;
+	TransactionId limitXmin;
 	IndexVacuumInfo ivinfo, auxivinfo;
 	ValidateIndexState state, auxState;
 	Oid			save_userid;
@@ -3627,8 +3629,12 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 	 * Fetch info needed for index_insert.  (You might think this should be
 	 * passed in from DefineIndex, but its copy is long gone due to having
 	 * been built in a previous transaction.)
+	 *
+	 * We might need snapshot for index expressions or predicates.
 	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
 	indexInfo = BuildIndexInfo(indexRelation);
+	PopActiveSnapshot();
 
 	/* mark build is concurrent just for consistency */
 	indexInfo->ii_Concurrent = true;
@@ -3664,6 +3670,9 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 										   NULL, TUPLESORT_NONE);
 	auxState.htups = auxState.itups = auxState.tups_inserted = 0;
 
+	/* tuplesort_begin_datum may require catalog snapshot */
+	InvalidateCatalogSnapshot();
+
 	(void) index_bulk_delete(&auxivinfo, NULL,
 							 validate_index_callback, &auxState);
 	/* If aux index is empty, merge may be skipped */
@@ -3698,6 +3707,9 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 											NULL, TUPLESORT_NONE);
 	state.htups = state.itups = state.tups_inserted = 0;
 
+	/* tuplesort_begin_datum may require catalog snapshot */
+	InvalidateCatalogSnapshot();
+
 	/* ambulkdelete updates progress metrics */
 	(void) index_bulk_delete(&ivinfo, NULL,
 							 validate_index_callback, &state);
@@ -3717,19 +3729,24 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 		pgstat_progress_update_multi_param(3, progress_index, progress_vals);
 	}
 	tuplesort_performsort(state.tuplesort);
+	/* tuplesort_performsort may require catalog snapshot */
+	InvalidateCatalogSnapshot();
+
 	tuplesort_performsort(auxState.tuplesort);
+	/* tuplesort_performsort may require catalog snapshot */
+	InvalidateCatalogSnapshot();
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	/*
 	 * Now merge both indexes
 	 */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXMERGE);
-	table_index_validate_scan(heapRelation,
-							  indexRelation,
-							  indexInfo,
-							  snapshot,
-							  &state,
-							  &auxState);
+	limitXmin = table_index_validate_scan(heapRelation,
+										  indexRelation,
+										  indexInfo,
+										  &state,
+										  &auxState);
 
 	/* Tuple sort closed by table_index_validate_scan */
 	Assert(state.tuplesort == NULL && auxState.tuplesort == NULL);
@@ -3752,6 +3769,9 @@ validate_index(Oid heapId, Oid indexId, Oid auxIndexId, Snapshot snapshot)
 	index_close(auxIndexRelation, NoLock);
 	index_close(indexRelation, NoLock);
 	table_close(heapRelation, NoLock);
+
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	return limitXmin;
 }
 
 /*

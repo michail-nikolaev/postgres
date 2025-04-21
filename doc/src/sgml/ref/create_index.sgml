@@ -881,9 +881,14 @@ Indexes:
   </para>
 
   <para>
-   Like any long-running transaction, <command>CREATE INDEX</command> on a
-   table can affect which tuples can be removed by concurrent
-   <command>VACUUM</command> on any other table.
+   Due to the improved implementation using periodically refreshed snapshots and
+   auxiliary indexes, concurrent index builds have minimal impact on concurrent
+   <command>VACUUM</command> operations. The system automatically advances its
+   internal transaction horizon during the build process, allowing
+   <command>VACUUM</command> to remove dead tuples on other tables without
+   having to wait for the entire index build to complete. Only during very brief
+   periods when snapshots are being refreshed might there be any temporary effect
+   on concurrent <command>VACUUM</command> operations.
   </para>
 
   <para>

@@ -2034,23 +2034,26 @@ heapam_index_validate_scan_read_stream_next(
 	return result;
 }
 
-static void
+static TransactionId
 heapam_index_validate_scan(Relation heapRelation,
 						   Relation indexRelation,
 						   IndexInfo *indexInfo,
-						   Snapshot snapshot,
 						   ValidateIndexState *state,
 						   ValidateIndexState *auxState)
 {
+	TransactionId limitXmin;
+
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
 
+	Snapshot		snapshot;
 	TupleTableSlot  *slot;
 	EState			*estate;
 	ExprContext		*econtext;
 	BufferAccessStrategy bstrategy = GetAccessStrategy(BAS_BULKREAD);
 
-	int				num_to_check;
+	int				num_to_check,
+					page_read_counter = 1; /* set to 1 to skip snapshot reset at start */
 	Tuplestorestate *tuples_for_check;
 	ValidateIndexScanState callback_private_data;
 
@@ -2061,13 +2064,15 @@ heapam_index_validate_scan(Relation heapRelation,
 	/* Use 10% of memory for tuple store. */
 	int		store_work_mem_part = maintenance_work_mem / 10;
 
-	/*
-	 * Encode TIDs as int8 values for the sort, rather than directly sorting
-	 * item pointers.  This can be significantly faster, primarily because TID
-	 * is a pass-by-reference type on all platforms, whereas int8 is
-	 * pass-by-value on most platforms.
-	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
+
 	tuples_for_check =  tuplestore_begin_datum(INT8OID, false, false, store_work_mem_part);
+
+	PopActiveSnapshot();
+	InvalidateCatalogSnapshot();
+
+	Assert(!HaveRegisteredOrActiveSnapshot());
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	/*
 	 * sanity checks
@@ -2083,6 +2088,29 @@ heapam_index_validate_scan(Relation heapRelation,
 	tuplesort_end(auxState->tuplesort);
 
 	state->tuplesort = auxState->tuplesort = NULL;
+
+	/*
+	 * Now take the first snapshot that will be used by to filter candidate
+	 * tuples. We are going to replace it by newer snapshot every so often
+	 * to propagate horizon.
+	 *
+	 * Beware!  There might still be snapshots in use that treat some transaction
+	 * as in-progress that our temporary snapshot treats as committed.
+	 *
+	 * If such a recently-committed transaction deleted tuples in the table,
+	 * we will not include them in the index; yet those transactions which
+	 * see the deleting one as still-in-progress will expect such tuples to
+	 * be there once we mark the index as valid.
+	 *
+	 * We solve this by waiting for all endangered transactions to exit before
+	 * we mark the index as valid, for that reason limitXmin is supported.
+	 *
+	 * We also set ActiveSnapshot to this snap, since functions in indexes may
+	 * need a snapshot.
+	 */
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	PushActiveSnapshot(snapshot);
+	limitXmin = snapshot->xmin;
 
 	estate = CreateExecutorState();
 	econtext = GetPerTupleExprContext(estate);
@@ -2117,6 +2145,7 @@ heapam_index_validate_scan(Relation heapRelation,
 
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		block_number = BufferGetBlockNumber(buf);
+		page_read_counter++;
 
 		i = 0;
 		while ((off = tuples[i]) != InvalidOffsetNumber)
@@ -2172,6 +2201,20 @@ heapam_index_validate_scan(Relation heapRelation,
 		}
 
 		ReleaseBuffer(buf);
+#define VALIDATE_INDEX_RESET_SNAPSHOT_EACH_N_PAGE 4096
+		if (page_read_counter % VALIDATE_INDEX_RESET_SNAPSHOT_EACH_N_PAGE == 0)
+		{
+			PopActiveSnapshot();
+			UnregisterSnapshot(snapshot);
+			/* to make sure we propagate xmin */
+			InvalidateCatalogSnapshot();
+			Assert(!TransactionIdIsValid(MyProc->xmin));
+
+			snapshot = RegisterSnapshot(GetLatestSnapshot());
+			PushActiveSnapshot(snapshot);
+			/* xmin should not go backwards, but just for the case*/
+			limitXmin = TransactionIdNewer(limitXmin, snapshot->xmin);
+		}
 	}
 
 	ExecDropSingleTupleTableSlot(slot);
@@ -2181,9 +2224,21 @@ heapam_index_validate_scan(Relation heapRelation,
 	read_stream_end(read_stream);
 	tuplestore_end(tuples_for_check);
 
+	/*
+	 * Drop the latest snapshot.  We must do this before waiting out other
+	 * snapshot holders, else we will deadlock against other processes also
+	 * doing CREATE INDEX CONCURRENTLY, which would see our snapshot as one
+	 * they must wait for.
+	 */
+	PopActiveSnapshot();
+	UnregisterSnapshot(snapshot);
+	InvalidateCatalogSnapshot();
+	Assert(MyProc->xmin == InvalidTransactionId);
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+
+	return limitXmin;
 }
 
 /*

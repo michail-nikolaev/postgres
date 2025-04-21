@@ -445,7 +445,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	 * dead tuples) won't get very full, so we give it only work_mem.
 	 *
 	 * In case of concurrent build dead tuples are not need to be put into index
-	 * since we wait for all snapshots older than reference snapshot during the
+	 * since we wait for all snapshots older than latest snapshot during the
 	 * validation phase.
 	 */
 	if (indexInfo->ii_Unique && !indexInfo->ii_Concurrent)
