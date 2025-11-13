@@ -2236,7 +2236,8 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>.
     Due to some restrictions in implementation of conflict detection,
     logical replication may report incorrect conflict types in the server
     log and statistics. An <literal>update_origin_differs</literal> conflict
-    may be incorrectly reported as <literal>update_missing</literal>, and a
+    may be incorrectly reported as <literal>update_missing</literal> or
+    <literal>update_deleted</literal, and a
     <literal>delete_origin_differs</literal> conflict may be incorrectly
     reported as <literal>delete_missing</literal>.
     In some cases such race condition may cause inconsistent behaviour, see
@@ -2448,8 +2449,8 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
         <para>
          An <command>UPDATE</command> from the publisher not being applied, so
          the publisher's changes are lost while the subscriber's local changes
-         remain. In this case an <literal>update_missing</literal> conflict is
-         logged instead of <literal>update_origin_differs</literal>. This can
+         remain. In this case an <literal>update_missing</literal> or <update_deleted>
+         conflict is logged instead of <literal>update_origin_differs</literal>. This can
          occur even when the subscriber's <command>UPDATE</command> modifies only
          columns that do not exist on the publisher, which might otherwise appear
          to be a safe operation.
