@@ -93,6 +93,8 @@
   application, there will be no conflicts from a single subscription.  On the
   other hand, if there are other writes done either by an application or by other
   subscribers to the same set of tables, conflicts can arise.
+  See <xref linkend="logical-replication-conflicts"/> and
+  <xref linkend="logical-replication-restrictions"/>.
  </para>
 
  <sect1 id="logical-replication-publication">
@@ -2229,6 +2231,19 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>.
    </variablelist>
   </para>
 
+  <warning>
+   <para>
+    Due to some restrictions in implementation of conflict detection,
+    logical replication may report incorrect conflict types in the server
+    log and statistics. An <literal>update_origin_differs</literal> conflict
+    may be incorrectly reported as <literal>update_missing</literal>, and a
+    <literal>delete_origin_differs</literal> conflict may be incorrectly
+    reported as <literal>delete_missing</literal>.
+    In some cases such race condition may cause inconsistent behaviour, see
+    <xref linkend="logical-replication-restrictions"/> for details.
+   </para>
+  </warning>
+
   <para>
    Logical replication operations are performed with the privileges of the role
    which owns the subscription.  Permissions failures on target tables will
@@ -2409,6 +2424,41 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
      key or replica identity defined for it.
     </para>
    </listitem>
+
+   <listitem>
+     <para>
+      Due to a restriction of the current conflict detection logic, concurrent
+      writes on the subscriber can lead to data inconsistencies. While applying
+      a <command>DELETE</command> or <command>UPDATE</command> from the publisher,
+      a concurrent <command>UPDATE</command> on the subscriber can cause the
+      logical replication worker to fail to find the target row, so the publisher's
+      change is skipped and an incorrect conflict type is reported.
+      This can result in:
+      <itemizedlist>
+       <listitem>
+        <para>
+         A <command>DELETE</command> from the publisher not being applied, leaving
+         the row on the subscriber with locally modified values. In this case a
+         <literal>delete_missing</literal> conflict is logged even though the row
+         still exists on the subscriber, whereas <literal>delete_origin_differs</literal>
+         would be expected.
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         An <command>UPDATE</command> from the publisher not being applied, so
+         the publisher's changes are lost while the subscriber's local changes
+         remain. In this case an <literal>update_missing</literal> conflict is
+         logged instead of <literal>update_origin_differs</literal>. This can
+         occur even when the subscriber's <command>UPDATE</command> modifies only
+         columns that do not exist on the publisher, which might otherwise appear
+         to be a safe operation.
+        </para>
+       </listitem>
+      </itemizedlist>
+     </para>
+   </listitem>
+
   </itemizedlist>
  </sect1>
 
