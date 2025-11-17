@@ -43,8 +43,11 @@
 #define HEAP_PAGE_PRUNE_MARK_UNUSED_NOW		(1 << 0)
 #define HEAP_PAGE_PRUNE_FREEZE				(1 << 1)
 
+#define SO_RESET_SNAPSHOT_EACH_N_PAGE		4096
+
 typedef struct BulkInsertStateData *BulkInsertState;
-struct TupleTableSlot;
+typedef struct GlobalVisState GlobalVisState;
+typedef struct TupleTableSlot TupleTableSlot;
 struct VacuumCutoffs;
 
 #define MaxLockTupleMode	LockTupleExclusive
@@ -280,12 +283,6 @@ typedef enum
  */
 
 
-/*
- * HeapScanIsValid
- *		True iff the heap scan is valid.
- */
-#define HeapScanIsValid(scan) PointerIsValid(scan)
-
 extern TableScanDesc heap_beginscan(Relation relation, Snapshot snapshot,
 									int nkeys, ScanKey key,
 									ParallelTableScanDesc parallel_scan,
@@ -298,7 +295,7 @@ extern void heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 extern void heap_endscan(TableScanDesc sscan);
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);
 extern bool heap_getnextslot(TableScanDesc sscan,
-							 ScanDirection direction, struct TupleTableSlot *slot);
+							 ScanDirection direction, TupleTableSlot *slot);
 extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 							  ItemPointer maxtid);
 extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
@@ -318,23 +315,23 @@ extern void ReleaseBulkInsertStatePin(BulkInsertState bistate);
 
 extern void heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 						int options, BulkInsertState bistate);
-extern void heap_multi_insert(Relation relation, struct TupleTableSlot **slots,
+extern void heap_multi_insert(Relation relation, TupleTableSlot **slots,
 							  int ntuples, CommandId cid, int options,
 							  BulkInsertState bistate);
 extern TM_Result heap_delete(Relation relation, ItemPointer tid,
 							 CommandId cid, Snapshot crosscheck, bool wait,
-							 struct TM_FailureData *tmfd, bool changingPart);
+							 TM_FailureData *tmfd, bool changingPart);
 extern void heap_finish_speculative(Relation relation, ItemPointer tid);
 extern void heap_abort_speculative(Relation relation, ItemPointer tid);
 extern TM_Result heap_update(Relation relation, ItemPointer otid,
 							 HeapTuple newtup,
 							 CommandId cid, Snapshot crosscheck, bool wait,
-							 struct TM_FailureData *tmfd, LockTupleMode *lockmode,
+							 TM_FailureData *tmfd, LockTupleMode *lockmode,
 							 TU_UpdateIndexes *update_indexes);
 extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 								 CommandId cid, LockTupleMode mode, LockWaitPolicy wait_policy,
 								 bool follow_updates,
-								 Buffer *buffer, struct TM_FailureData *tmfd);
+								 Buffer *buffer, TM_FailureData *tmfd);
 
 extern bool heap_inplace_lock(Relation relation,
 							  HeapTuple oldtup_ptr, Buffer buffer,
@@ -371,10 +368,9 @@ extern TransactionId heap_index_delete_tuples(Relation rel,
 											  TM_IndexDeleteOp *delstate);
 
 /* in heap/pruneheap.c */
-struct GlobalVisState;
 extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern void heap_page_prune_and_freeze(Relation relation, Buffer buffer,
-									   struct GlobalVisState *vistest,
+									   GlobalVisState *vistest,
 									   int options,
 									   struct VacuumCutoffs *cutoffs,
 									   PruneFreezeResult *presult,
@@ -388,6 +384,7 @@ extern void heap_page_prune_execute(Buffer buffer, bool lp_truncate_only,
 									OffsetNumber *nowunused, int nunused);
 extern void heap_get_root_tuples(Page page, OffsetNumber *root_offsets);
 extern void log_heap_prune_and_freeze(Relation relation, Buffer buffer,
+									  Buffer vmbuffer, uint8 vmflags,
 									  TransactionId conflict_xid,
 									  bool cleanup_lock,
 									  PruneReason reason,
@@ -413,7 +410,7 @@ extern void HeapTupleSetHintBits(HeapTupleHeader tuple, Buffer buffer,
 								 uint16 infomask, TransactionId xid);
 extern bool HeapTupleHeaderIsOnlyLocked(HeapTupleHeader tuple);
 extern bool HeapTupleIsSurelyDead(HeapTuple htup,
-								  struct GlobalVisState *vistest);
+								  GlobalVisState *vistest);
 
 /*
  * To avoid leaking too much knowledge about reorderbuffer implementation

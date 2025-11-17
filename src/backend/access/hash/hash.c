@@ -197,6 +197,7 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	result->heap_tuples = reltuples;
 	result->index_tuples = buildstate.indtuples;
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 
 	return result;
 }

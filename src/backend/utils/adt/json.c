@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
@@ -904,7 +905,7 @@ json_unique_hash(const void *key, Size keysize)
 
 	hash ^= hash_bytes((const unsigned char *) entry->key, entry->key_len);
 
-	return DatumGetUInt32(hash);
+	return hash;
 }
 
 static int

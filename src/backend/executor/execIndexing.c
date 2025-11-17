@@ -117,6 +117,7 @@
 #include "utils/multirangetypes.h"
 #include "utils/rangetypes.h"
 #include "utils/snapmgr.h"
+#include "utils/injection_point.h"
 
 /* waitMode argument to check_exclusion_or_unique_constraint() */
 typedef enum
@@ -439,11 +440,14 @@ ExecInsertIndexTuples(ResultRelInfo *resultRelInfo,
 		 * There's definitely going to be an index_insert() call for this
 		 * index.  If we're being called as part of an UPDATE statement,
 		 * consider if the 'indexUnchanged' = true hint should be passed.
+		 *
+		 * In case of auxiliary index always pass false as optimisation.
 		 */
-		indexUnchanged = update && index_unchanged_by_update(resultRelInfo,
-															 estate,
-															 indexInfo,
-															 indexRelation);
+		indexUnchanged = update && likely(!indexInfo->ii_Auxiliary) &&
+									index_unchanged_by_update(resultRelInfo,
+															  estate,
+															  indexInfo,
+															  indexRelation);
 
 		satisfiesConstraint =
 			index_insert(indexRelation, /* index relation */
@@ -942,6 +946,8 @@ retry:
 	econtext->ecxt_scantuple = save_scantuple;
 
 	ExecDropSingleTupleTableSlot(existing_slot);
+	if (!conflict)
+		INJECTION_POINT("check_exclusion_or_unique_constraint_no_conflict", NULL);
 
 	return !conflict;
 }

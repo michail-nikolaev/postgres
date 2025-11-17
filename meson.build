@@ -280,10 +280,6 @@ elif host_system == 'windows'
     # define before including <time.h> for getting localtime_r() etc. on MinGW
     cppflags += '-D_POSIX_C_SOURCE'
   endif
-  if cc.get_id() == 'msvc'
-    # required for VA_ARGS_NARGS() in c.h; requires VS 2019
-    cppflags += '/Zc:preprocessor'
-  endif
 
   export_file_format = 'win'
   export_file_suffix = 'def'
@@ -549,6 +545,33 @@ dir_doc_extension = dir_doc / 'extension'
 # configuration-time checks (so they are more isolated). If they should be
 # used, they need to be added to test_c_args as well.
 ###############################################################
+
+# Do we need an option to enable C11?
+c11_test = '''
+#if !defined __STDC_VERSION__ || __STDC_VERSION__ < 201112L
+# error "Compiler does not advertise C11 conformance"
+#endif
+'''
+
+if not cc.compiles(c11_test, name: 'C11')
+  c11_ok = false
+  if cc.get_id() == 'msvc'
+    c11_test_args = ['/std:c11']
+  else
+    c11_test_args = ['-std=gnu11', '-std=c11']
+  endif
+  foreach arg : c11_test_args
+    if cc.compiles(c11_test, name: 'C11 with @0@'.format(arg), args: [arg])
+      c11_ok = true
+      cflags += arg
+      break
+    endif
+  endforeach
+  if not c11_ok
+    error('C compiler does not support C11')
+  endif
+endif
+
 
 postgres_inc = [include_directories(postgres_inc_d)]
 test_lib_d = postgres_lib_d
@@ -948,10 +971,10 @@ if not libcurlopt.disabled()
   # libcurl and one of either epoll or kqueue.
   oauth_flow_supported = (
     libcurl.found()
-    and (cc.check_header('sys/event.h', required: false,
-                         args: test_c_args, include_directories: postgres_inc)
-         or cc.check_header('sys/epoll.h', required: false,
-                            args: test_c_args, include_directories: postgres_inc))
+    and (cc.has_header('sys/event.h',
+                       args: test_c_args, include_directories: postgres_inc)
+         or cc.has_header('sys/epoll.h',
+                          args: test_c_args, include_directories: postgres_inc))
   )
 
   if oauth_flow_supported
@@ -995,6 +1018,12 @@ liburingopt = get_option('liburing')
 liburing = dependency('liburing', required: liburingopt)
 if liburing.found()
   cdata.set('USE_LIBURING', 1)
+
+  if cc.has_function('io_uring_queue_init_mem',
+      dependencies: liburing, args: test_c_args)
+    cdata.set('HAVE_LIBURING_QUEUE_INIT_MEM', 1)
+  endif
+
 endif
 
 
@@ -1578,7 +1607,10 @@ if uuidopt != 'none'
   elif uuidopt == 'ossp'
     # In upstream, the package and library is called just 'uuid', but many
     # distros change it to 'ossp-uuid'.
-    uuid = dependency('ossp-uuid', 'uuid', required: false)
+    uuid = dependency('ossp-uuid', required: false)
+    if not uuid.found()
+      uuid = dependency('uuid', required: false)
+    endif
     uuidfunc = 'uuid_export'
     uuidheader = 'uuid.h'
 
@@ -1698,49 +1730,6 @@ endif
 # Compiler tests
 ###############################################################
 
-# Do we need -std=c99 to compile C99 code? We don't want to add -std=c99
-# unnecessarily, because we optionally rely on newer features.
-c99_test = '''
-#include <stdbool.h>
-#include <complex.h>
-#include <tgmath.h>
-#include <inttypes.h>
-
-struct named_init_test {
-  int a;
-  int b;
-};
-
-extern void structfunc(struct named_init_test);
-
-int main(int argc, char **argv)
-{
-  struct named_init_test nit = {
-    .a = 3,
-    .b = 5,
-  };
-
-  for (int loop_var = 0; loop_var < 3; loop_var++)
-  {
-    nit.a += nit.b;
-  }
-
-  structfunc((struct named_init_test){1, 0});
-
-  return nit.a != 0;
-}
-'''
-
-if not cc.compiles(c99_test, name: 'c99', args: test_c_args)
-  if cc.compiles(c99_test, name: 'c99 with -std=c99',
-        args: test_c_args + ['-std=c99'])
-    test_c_args += '-std=c99'
-    cflags += '-std=c99'
-  else
-    error('C compiler does not support C99')
-  endif
-endif
-
 if host_machine.endian() == 'big'
   cdata.set('WORDS_BIGENDIAN', 1)
 endif
@@ -1823,7 +1812,7 @@ if cc.links('''
   if not meson.is_cross_build()
     r = cc.run('''
     /* This must match the corresponding code in c.h: */
-    #if defined(__GNUC__) || defined(__SUNPRO_C)
+    #if defined(__GNUC__)
     #define pg_attribute_aligned(a) __attribute__((aligned(a)))
     #elif defined(_MSC_VER)
     #define pg_attribute_aligned(a) __declspec(align(a))
@@ -1990,10 +1979,7 @@ if cc.links('''
   cdata.set('HAVE__BUILTIN_OP_OVERFLOW', 1)
 endif
 
-
-# XXX: The configure.ac check for __cpuid() is broken, we don't copy that
-# here. To prevent problems due to two detection methods working, stop
-# checking after one.
+# Check for __get_cpuid() and __cpuid().
 if cc.links('''
     #include <cpuid.h>
     int main(int arg, char **argv)
@@ -3130,6 +3116,8 @@ gen_export_kwargs = {
   'install': false,
 }
 
+# command to create stamp files on all OSs
+stamp_cmd = [python, '-c', 'import sys; open(sys.argv[1], "w")', '@OUTPUT0@']
 
 
 ###
@@ -3247,14 +3235,14 @@ subdir('src/port')
 frontend_common_code = declare_dependency(
   compile_args: ['-DFRONTEND'],
   include_directories: [postgres_inc],
-  sources: generated_headers,
+  sources: generated_headers_stamp,
   dependencies: [os_deps, zlib, zstd, lz4],
 )
 
 backend_common_code = declare_dependency(
   compile_args: ['-DBUILDING_DLL'],
   include_directories: [postgres_inc],
-  sources: generated_headers,
+  sources: generated_headers_stamp,
   dependencies: [os_deps, zlib, zstd],
 )
 
@@ -3269,7 +3257,7 @@ shlib_code = declare_dependency(
 frontend_stlib_code = declare_dependency(
   include_directories: [postgres_inc],
   link_with: [common_static, pgport_static],
-  sources: generated_headers,
+  sources: generated_headers_stamp,
   dependencies: [os_deps, libintl],
 )
 
@@ -3277,7 +3265,7 @@ frontend_stlib_code = declare_dependency(
 frontend_shlib_code = declare_dependency(
   include_directories: [postgres_inc],
   link_with: [common_shlib, pgport_shlib],
-  sources: generated_headers,
+  sources: generated_headers_stamp,
   dependencies: [shlib_code, os_deps, libintl],
 )
 
@@ -3287,7 +3275,7 @@ frontend_shlib_code = declare_dependency(
 frontend_no_fe_utils_code = declare_dependency(
   include_directories: [postgres_inc],
   link_with: [common_static, pgport_static],
-  sources: generated_headers,
+  sources: generated_headers_stamp,
   dependencies: [os_deps, libintl],
 )
 
@@ -3302,6 +3290,7 @@ libpq_deps += [
 ]
 
 libpq_oauth_deps += [
+  thread_dep,
   libcurl,
 ]
 
@@ -3314,7 +3303,7 @@ subdir('src/interfaces/libpq-oauth')
 frontend_code = declare_dependency(
   include_directories: [postgres_inc],
   link_with: [fe_utils, common_static, pgport_static],
-  sources: generated_headers,
+  sources: generated_headers_stamp,
   dependencies: [os_deps, libintl],
 )
 
@@ -3344,7 +3333,7 @@ backend_code = declare_dependency(
   include_directories: [postgres_inc],
   link_args: ldflags_be,
   link_with: [],
-  sources: generated_headers + generated_backend_headers,
+  sources: generated_backend_headers_stamp,
   dependencies: os_deps + backend_both_deps + backend_deps,
 )
 
@@ -3468,6 +3457,13 @@ installed_targets = [
   nls_mo_targets,
   ecpg_targets,
 ]
+
+if oauth_flow_supported
+  installed_targets += [
+    libpq_oauth_so,
+    libpq_oauth_st,
+  ]
+endif
 
 # all targets that require building code
 all_built = [

@@ -143,7 +143,6 @@ typedef struct BrinLeader
 	 */
 	BrinShared *brinshared;
 	Sharedsort *sharedsort;
-	Snapshot	snapshot;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 } BrinLeader;
@@ -231,7 +230,7 @@ static void brin_fill_empty_ranges(BrinBuildState *state,
 static void _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 								 bool isconcurrent, int request);
 static void _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state);
-static Size _brin_parallel_estimate_shared(Relation heap, Snapshot snapshot);
+static Size _brin_parallel_estimate_shared(Relation heap);
 static double _brin_parallel_heapscan(BrinBuildState *state);
 static double _brin_parallel_merge(BrinBuildState *state);
 static void _brin_leader_participate_as_worker(BrinBuildState *buildstate,
@@ -573,7 +572,6 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	Relation	heapRel;
 	BrinOpaque *opaque;
 	BlockNumber nblocks;
-	BlockNumber heapBlk;
 	int64		totalpages = 0;
 	FmgrInfo   *consistentFn;
 	MemoryContext oldcxt;
@@ -735,9 +733,10 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	/*
 	 * Now scan the revmap.  We start by querying for heap page 0,
 	 * incrementing by the number of pages per range; this gives us a full
-	 * view of the table.
+	 * view of the table.  We make use of uint64 for heapBlk as a BlockNumber
+	 * could wrap for tables with close to 2^32 pages.
 	 */
-	for (heapBlk = 0; heapBlk < nblocks; heapBlk += opaque->bo_pagesPerRange)
+	for (uint64 heapBlk = 0; heapBlk < nblocks; heapBlk += opaque->bo_pagesPerRange)
 	{
 		bool		addrange;
 		bool		gottuple = false;
@@ -749,7 +748,7 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
 		MemoryContextReset(perRangeCxt);
 
-		tup = brinGetTupleForHeapBlock(opaque->bo_rmAccess, heapBlk, &buf,
+		tup = brinGetTupleForHeapBlock(opaque->bo_rmAccess, (BlockNumber) heapBlk, &buf,
 									   &off, &size, BUFFER_LOCK_SHARE);
 		if (tup)
 		{
@@ -924,7 +923,7 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 		/* add the pages in the range to the output bitmap, if needed */
 		if (addrange)
 		{
-			BlockNumber pageno;
+			uint64		pageno;
 
 			for (pageno = heapBlk;
 				 pageno <= Min(nblocks, heapBlk + opaque->bo_pagesPerRange) - 1;
@@ -1216,7 +1215,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		state->bs_sortstate =
 			tuplesort_begin_index_brin(maintenance_work_mem, coordinate,
 									   TUPLESORT_NONE);
-
+		InvalidateCatalogSnapshot();
 		/* scan the relation and merge per-worker results */
 		reltuples = _brin_parallel_merge(state);
 
@@ -1233,6 +1232,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		reltuples = table_index_build_scan(heap, index, indexInfo, false, true,
 										   brinbuildCallback, state, NULL);
 
+		InvalidateCatalogSnapshot();
 		/*
 		 * process the final batch
 		 *
@@ -1266,6 +1266,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	result->heap_tuples = reltuples;
 	result->index_tuples = idxtuples;
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 
 	return result;
 }
@@ -1608,7 +1609,7 @@ brin_build_desc(Relation rel)
 		opcInfoFn = index_getprocinfo(rel, keyno + 1, BRIN_PROCNUM_OPCINFO);
 
 		opcinfo[keyno] = (BrinOpcInfo *)
-			DatumGetPointer(FunctionCall1(opcInfoFn, attr->atttypid));
+			DatumGetPointer(FunctionCall1(opcInfoFn, ObjectIdGetDatum(attr->atttypid)));
 		totalstored += opcinfo[keyno]->oi_nstored;
 	}
 
@@ -2262,7 +2263,7 @@ add_values_to_range(Relation idxRel, BrinDesc *bdesc, BrinMemTuple *dtup,
 								   PointerGetDatum(bdesc),
 								   PointerGetDatum(bval),
 								   values[keyno],
-								   nulls[keyno]);
+								   BoolGetDatum(nulls[keyno]));
 		/* if that returned true, we need to insert the updated tuple */
 		modified |= DatumGetBool(result);
 
@@ -2365,7 +2366,6 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 {
 	ParallelContext *pcxt;
 	int			scantuplesortstates;
-	Snapshot	snapshot;
 	Size		estbrinshared;
 	Size		estsort;
 	BrinShared *brinshared;
@@ -2374,6 +2374,7 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	bool		leaderparticipates = true;
+	bool		need_pop_active_snapshot = true;
 	int			querylen;
 
 #ifdef DISABLE_LEADER_PARTICIPATION
@@ -2395,18 +2396,25 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	 * Prepare for scan of the base relation.  In a normal index build, we use
 	 * SnapshotAny because we must retrieve all tuples and do our own time
 	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
-	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
+	 * concurrent build, we take a regular MVCC snapshot and push it as active.
+	 * Later we index whatever's live according to that snapshot while that
+	 * snapshot is reset periodically.
 	 */
 	if (!isconcurrent)
-		snapshot = SnapshotAny;
+	{
+		Assert(ActiveSnapshotSet());
+		need_pop_active_snapshot = false;
+	}
 	else
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	{
+		Assert(!ActiveSnapshotSet());
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BRIN_SHARED workspace.
 	 */
-	estbrinshared = _brin_parallel_estimate_shared(heap, snapshot);
+	estbrinshared = _brin_parallel_estimate_shared(heap);
 	shm_toc_estimate_chunk(&pcxt->estimator, estbrinshared);
 	estsort = tuplesort_estimate_shared(scantuplesortstates);
 	shm_toc_estimate_chunk(&pcxt->estimator, estsort);
@@ -2444,8 +2452,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (IsMVCCSnapshot(snapshot))
-			UnregisterSnapshot(snapshot);
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
 		return;
@@ -2470,7 +2478,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 
 	table_parallelscan_initialize(heap,
 								  ParallelTableScanFromBrinShared(brinshared),
-								  snapshot);
+								  isconcurrent ? InvalidSnapshot : SnapshotAny,
+								  isconcurrent);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -2516,19 +2525,27 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 		brinleader->nparticipanttuplesorts++;
 	brinleader->brinshared = brinshared;
 	brinleader->sharedsort = sharedsort;
-	brinleader->snapshot = snapshot;
 	brinleader->walusage = walusage;
 	brinleader->bufferusage = bufferusage;
 
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		_brin_end_parallel(brinleader, NULL);
 		return;
 	}
 
 	/* Save leader state now that it's clear build will be parallel */
 	buildstate->bs_leader = brinleader;
+
+	/*
+	 * In case of concurrent build snapshots are going to be reset periodically.
+	 * We need to wait until all workers imported initial snapshot.
+	 */
+	if (isconcurrent)
+		WaitForParallelWorkersToAttach(pcxt, true);
 
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
@@ -2538,7 +2555,10 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
 	 */
-	WaitForParallelWorkersToAttach(pcxt);
+	if (!isconcurrent)
+		WaitForParallelWorkersToAttach(pcxt, false);
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 }
 
 /*
@@ -2559,9 +2579,6 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 	for (i = 0; i < brinleader->pcxt->nworkers_launched; i++)
 		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
 
-	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(brinleader->snapshot))
-		UnregisterSnapshot(brinleader->snapshot);
 	DestroyParallelContext(brinleader->pcxt);
 	ExitParallelMode();
 }
@@ -2761,14 +2778,14 @@ _brin_parallel_merge(BrinBuildState *state)
 
 /*
  * Returns size of shared memory required to store state for a parallel
- * brin index build based on the snapshot its parallel scan will use.
+ * brin index build.
  */
 static Size
-_brin_parallel_estimate_shared(Relation heap, Snapshot snapshot)
+_brin_parallel_estimate_shared(Relation heap)
 {
 	/* c.f. shm_toc_allocate as to why BUFFERALIGN is used */
 	return add_size(BUFFERALIGN(sizeof(BrinShared)),
-					table_parallelscan_estimate(heap, snapshot));
+					table_parallelscan_estimate(heap, InvalidSnapshot));
 }
 
 /*
@@ -2790,6 +2807,7 @@ _brin_leader_participate_as_worker(BrinBuildState *buildstate, Relation heap, Re
 	/* Perform work common to all participants */
 	_brin_parallel_scan_and_build(buildstate, brinleader->brinshared,
 								  brinleader->sharedsort, heap, index, sortmem, true);
+	Assert(!brinleader->brinshared->isconcurrent || !TransactionIdIsValid(MyProc->xid));
 }
 
 /*
@@ -2875,11 +2893,9 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	int			sortmem;
 
 	/*
-	 * The only possible status flag that can be set to the parallel worker is
-	 * PROC_IN_SAFE_IC.
+	 * There are no possible status flag that can be set to the parallel worker.
 	 */
-	Assert((MyProc->statusFlags == 0) ||
-		   (MyProc->statusFlags == PROC_IN_SAFE_IC));
+	Assert(MyProc->statusFlags == 0);
 
 	/* Set debug_query_string for individual workers first */
 	sharedquery = shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT, true);
@@ -2930,6 +2946,13 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	_brin_parallel_scan_and_build(buildstate, brinshared, sharedsort,
 								  heapRel, indexRel, sortmem, false);
+	if (brinshared->isconcurrent)
+	{
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+		Assert(!TransactionIdIsValid(MyProc->xid));
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);

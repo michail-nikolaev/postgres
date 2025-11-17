@@ -131,8 +131,12 @@ ExecSeqScanWithQual(PlanState *pstate)
 {
 	SeqScanState *node = castNode(SeqScanState, pstate);
 
+	/*
+	 * Use pg_assume() for != NULL tests to make the compiler realize no
+	 * runtime check for the field is needed in ExecScanExtended().
+	 */
 	Assert(pstate->state->es_epq_active == NULL);
-	Assert(pstate->qual != NULL);
+	pg_assume(pstate->qual != NULL);
 	Assert(pstate->ps_ProjInfo == NULL);
 
 	return ExecScanExtended(&node->ss,
@@ -153,7 +157,7 @@ ExecSeqScanWithProject(PlanState *pstate)
 
 	Assert(pstate->state->es_epq_active == NULL);
 	Assert(pstate->qual == NULL);
-	Assert(pstate->ps_ProjInfo != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
 
 	return ExecScanExtended(&node->ss,
 							(ExecScanAccessMtd) SeqNext,
@@ -173,8 +177,8 @@ ExecSeqScanWithQualProject(PlanState *pstate)
 	SeqScanState *node = castNode(SeqScanState, pstate);
 
 	Assert(pstate->state->es_epq_active == NULL);
-	Assert(pstate->qual != NULL);
-	Assert(pstate->ps_ProjInfo != NULL);
+	pg_assume(pstate->qual != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
 
 	return ExecScanExtended(&node->ss,
 							(ExecScanAccessMtd) SeqNext,
@@ -367,7 +371,8 @@ ExecSeqScanInitializeDSM(SeqScanState *node,
 	pscan = shm_toc_allocate(pcxt->toc, node->pscan_len);
 	table_parallelscan_initialize(node->ss.ss_currentRelation,
 								  pscan,
-								  estate->es_snapshot);
+								  estate->es_snapshot,
+								  false);
 	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pscan);
 	node->ss.ss_currentScanDesc =
 		table_beginscan_parallel(node->ss.ss_currentRelation, pscan);

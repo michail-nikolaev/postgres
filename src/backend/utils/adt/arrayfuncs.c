@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <math.h>
 
+#include "access/transam.h"
 #include "catalog/pg_type.h"
 #include "common/int.h"
 #include "funcapi.h"
@@ -3406,7 +3407,7 @@ construct_array_builtin(Datum *elems, int nelems, Oid elmtype)
 
 		case FLOAT8OID:
 			elmlen = sizeof(float8);
-			elmbyval = FLOAT8PASSBYVAL;
+			elmbyval = true;
 			elmalign = TYPALIGN_DOUBLE;
 			break;
 
@@ -3424,7 +3425,7 @@ construct_array_builtin(Datum *elems, int nelems, Oid elmtype)
 
 		case INT8OID:
 			elmlen = sizeof(int64);
-			elmbyval = FLOAT8PASSBYVAL;
+			elmbyval = true;
 			elmalign = TYPALIGN_DOUBLE;
 			break;
 
@@ -3718,7 +3719,7 @@ deconstruct_array_builtin(ArrayType *array,
 
 		case FLOAT8OID:
 			elmlen = sizeof(float8);
-			elmbyval = FLOAT8PASSBYVAL;
+			elmbyval = true;
 			elmalign = TYPALIGN_DOUBLE;
 			break;
 
@@ -4601,7 +4602,7 @@ array_create_iterator(ArrayType *arr, int slice_ndim, ArrayMetaState *mstate)
 	/*
 	 * Sanity-check inputs --- caller should have got this right already
 	 */
-	Assert(PointerIsValid(arr));
+	Assert(arr);
 	if (slice_ndim < 0 || slice_ndim > ARR_NDIM(arr))
 		elog(ERROR, "invalid arguments to array_create_iterator");
 

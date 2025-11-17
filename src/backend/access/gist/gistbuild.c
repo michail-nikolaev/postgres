@@ -43,6 +43,7 @@
 #include "optimizer/optimizer.h"
 #include "storage/bufmgr.h"
 #include "storage/bulk_write.h"
+#include "storage/proc.h"
 
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -259,6 +260,7 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	buildstate.indtuples = 0;
 	buildstate.indtuplesSize = 0;
 
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 	if (buildstate.buildMode == GIST_SORTED_BUILD)
 	{
 		/*
@@ -350,6 +352,7 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	result->heap_tuples = reltuples;
 	result->index_tuples = (double) buildstate.indtuples;
+	Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xid));
 
 	return result;
 }
@@ -558,7 +561,7 @@ gist_indexsortbuild_levelstate_flush(GISTBuildState *state,
 		{
 			IndexTuple	thistup = (IndexTuple) data;
 
-			if (PageAddItem(target, (Item) data, IndexTupleSize(thistup), i + FirstOffsetNumber, false, false) == InvalidOffsetNumber)
+			if (PageAddItem(target, data, IndexTupleSize(thistup), i + FirstOffsetNumber, false, false) == InvalidOffsetNumber)
 				elog(ERROR, "failed to add item to index page in \"%s\"", RelationGetRelationName(state->indexrel));
 
 			data += IndexTupleSize(thistup);
@@ -969,7 +972,7 @@ gistProcessItup(GISTBuildState *buildstate, IndexTuple itup,
 		buffer = ReadBuffer(indexrel, blkno);
 		LockBuffer(buffer, GIST_EXCLUSIVE);
 
-		page = (Page) BufferGetPage(buffer);
+		page = BufferGetPage(buffer);
 		childoffnum = gistchoose(indexrel, page, itup, giststate);
 		iid = PageGetItemId(page, childoffnum);
 		idxtuple = (IndexTuple) PageGetItem(page, iid);
@@ -1448,7 +1451,7 @@ gistGetMaxLevel(Relation index)
 		 * pro forma.
 		 */
 		LockBuffer(buffer, GIST_SHARE);
-		page = (Page) BufferGetPage(buffer);
+		page = BufferGetPage(buffer);
 
 		if (GistPageIsLeaf(page))
 		{

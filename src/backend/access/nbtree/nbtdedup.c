@@ -16,6 +16,7 @@
 
 #include "access/nbtree.h"
 #include "access/nbtxlog.h"
+#include "access/tableam.h"
 #include "access/xloginsert.h"
 #include "miscadmin.h"
 #include "utils/rel.h"
@@ -125,8 +126,7 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 		Size		hitemsz = ItemIdGetLength(hitemid);
 		IndexTuple	hitem = (IndexTuple) PageGetItem(page, hitemid);
 
-		if (PageAddItem(newpage, (Item) hitem, hitemsz, P_HIKEY,
-						false, false) == InvalidOffsetNumber)
+		if (PageAddItem(newpage, hitem, hitemsz, P_HIKEY, false, false) == InvalidOffsetNumber)
 			elog(ERROR, "deduplication failed to add highkey");
 	}
 
@@ -148,7 +148,7 @@ _bt_dedup_pass(Relation rel, Buffer buf, IndexTuple newitem, Size newitemsz,
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
 		else if (state->deduplicate &&
-				 _bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
+				 _bt_keep_natts_fast(rel, state->base, itup, NULL) > nkeyatts &&
 				 _bt_dedup_save_htid(state, itup))
 		{
 			/*
@@ -374,7 +374,7 @@ _bt_bottomupdel_pass(Relation rel, Buffer buf, Relation heapRel,
 			/* itup starts first pending interval */
 			_bt_dedup_start_pending(state, itup, offnum);
 		}
-		else if (_bt_keep_natts_fast(rel, state->base, itup) > nkeyatts &&
+		else if (_bt_keep_natts_fast(rel, state->base, itup, NULL) > nkeyatts &&
 				 _bt_dedup_save_htid(state, itup))
 		{
 			/* Tuple is equal; just added its TIDs to pending interval */
@@ -569,8 +569,7 @@ _bt_dedup_finish_pending(Page newpage, BTDedupState state)
 		tuplesz = IndexTupleSize(state->base);
 		Assert(tuplesz == MAXALIGN(IndexTupleSize(state->base)));
 		Assert(tuplesz <= BTMaxItemSize);
-		if (PageAddItem(newpage, (Item) state->base, tuplesz, tupoff,
-						false, false) == InvalidOffsetNumber)
+		if (PageAddItem(newpage, state->base, tuplesz, tupoff, false, false) == InvalidOffsetNumber)
 			elog(ERROR, "deduplication failed to add tuple to page");
 
 		spacesaving = 0;
@@ -589,8 +588,7 @@ _bt_dedup_finish_pending(Page newpage, BTDedupState state)
 
 		Assert(tuplesz == MAXALIGN(IndexTupleSize(final)));
 		Assert(tuplesz <= BTMaxItemSize);
-		if (PageAddItem(newpage, (Item) final, tuplesz, tupoff, false,
-						false) == InvalidOffsetNumber)
+		if (PageAddItem(newpage, final, tuplesz, tupoff, false, false) == InvalidOffsetNumber)
 			elog(ERROR, "deduplication failed to add tuple to page");
 
 		pfree(final);
@@ -789,12 +787,12 @@ _bt_do_singleval(Relation rel, Page page, BTDedupState state,
 	itemid = PageGetItemId(page, minoff);
 	itup = (IndexTuple) PageGetItem(page, itemid);
 
-	if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
+	if (_bt_keep_natts_fast(rel, newitem, itup, NULL) > nkeyatts)
 	{
 		itemid = PageGetItemId(page, PageGetMaxOffsetNumber(page));
 		itup = (IndexTuple) PageGetItem(page, itemid);
 
-		if (_bt_keep_natts_fast(rel, newitem, itup) > nkeyatts)
+		if (_bt_keep_natts_fast(rel, newitem, itup, NULL) > nkeyatts)
 			return true;
 	}
 

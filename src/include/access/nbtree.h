@@ -17,12 +17,12 @@
 #include "access/amapi.h"
 #include "access/itup.h"
 #include "access/sdir.h"
-#include "access/tableam.h"
-#include "access/xlogreader.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "lib/stringinfo.h"
 #include "storage/bufmgr.h"
+#include "storage/dsm.h"
 #include "storage/shm_toc.h"
 #include "utils/skipsupport.h"
 
@@ -1285,9 +1285,10 @@ extern void _bt_pageinit(Page page, Size size);
 extern void _bt_delitems_vacuum(Relation rel, Buffer buf,
 								OffsetNumber *deletable, int ndeletable,
 								BTVacuumPosting *updatable, int nupdatable);
+struct TM_IndexDeleteOp;		/* avoid including tableam.h here */
 extern void _bt_delitems_delete_check(Relation rel, Buffer buf,
 									  Relation heapRel,
-									  TM_IndexDeleteOp *delstate);
+									  struct TM_IndexDeleteOp *delstate);
 extern void _bt_pagedel(Relation rel, Buffer leafbuf, BTVacState *vstate);
 extern void _bt_pendingfsm_init(Relation rel, BTVacState *vstate,
 								bool cleanuponly);
@@ -1340,8 +1341,10 @@ extern bool btproperty(Oid index_oid, int attno,
 extern char *btbuildphasename(int64 phasenum);
 extern IndexTuple _bt_truncate(Relation rel, IndexTuple lastleft,
 							   IndexTuple firstright, BTScanInsert itup_key);
+extern int	_bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
+						   BTScanInsert itup_key, bool *hasnulls);
 extern int	_bt_keep_natts_fast(Relation rel, IndexTuple lastleft,
-								IndexTuple firstright);
+								IndexTuple firstright, bool *hasnulls);
 extern bool _bt_check_natts(Relation rel, bool heapkeyspace, Page page,
 							OffsetNumber offnum);
 extern void _bt_check_third_page(Relation rel, Relation heap,

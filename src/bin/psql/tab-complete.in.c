@@ -443,6 +443,16 @@ do { \
 	matches = rl_completion_matches(text, complete_from_schema_query); \
 } while (0)
 
+#define COMPLETE_WITH_FILES(escape, force_quote) \
+do { \
+	completion_charp = escape; \
+	completion_force_quote = force_quote; \
+	matches = rl_completion_matches(text, complete_from_files); \
+} while (0)
+
+#define COMPLETE_WITH_GENERATOR(generator) \
+	matches = rl_completion_matches(text, generator)
+
 /*
  * Assembly instructions for schema queries
  *
@@ -1010,7 +1020,7 @@ static const SchemaQuery Query_for_trigger_of_table = {
 
 #define Query_for_list_of_database_vars \
 "SELECT conf FROM ("\
-"       SELECT setdatabase, pg_catalog.split_part(unnest(setconfig),'=',1) conf"\
+"       SELECT setdatabase, pg_catalog.split_part(pg_catalog.unnest(setconfig),'=',1) conf"\
 "         FROM pg_db_role_setting "\
 "       ) s, pg_database d "\
 " WHERE s.setdatabase = d.oid "\
@@ -1086,9 +1096,12 @@ Keywords_for_list_of_owner_roles, "PUBLIC"
 "  WHERE usename LIKE '%s'"
 
 #define Query_for_list_of_user_vars \
-" SELECT pg_catalog.split_part(pg_catalog.unnest(rolconfig),'=',1) "\
-"   FROM pg_catalog.pg_roles "\
-"  WHERE rolname LIKE '%s'"
+"SELECT conf FROM ("\
+"       SELECT rolname, pg_catalog.split_part(pg_catalog.unnest(rolconfig),'=',1) conf"\
+"         FROM pg_catalog.pg_roles"\
+"       ) s"\
+"  WHERE s.conf like '%s' "\
+"    AND s.rolname LIKE '%s'"
 
 #define Query_for_list_of_access_methods \
 " SELECT amname "\
@@ -1197,6 +1210,19 @@ Alter_procedure_options, "COST", "IMMUTABLE", "LEAKPROOF", "NOT LEAKPROOF", \
 #define Alter_function_options \
 Alter_routine_options, "CALLED ON NULL INPUT", "RETURNS NULL ON NULL INPUT", \
 "STRICT", "SUPPORT"
+
+/* COPY options shared between FROM and TO */
+#define Copy_common_options \
+"DELIMITER", "ENCODING", "ESCAPE", "FORMAT", "HEADER", "NULL", "QUOTE"
+
+/* COPY FROM options */
+#define Copy_from_options \
+Copy_common_options, "DEFAULT", "FORCE_NOT_NULL", "FORCE_NULL", "FREEZE", \
+"LOG_VERBOSITY", "ON_ERROR", "REJECT_LIMIT"
+
+/* COPY TO options */
+#define Copy_to_options \
+Copy_common_options, "FORCE_QUOTE"
 
 /*
  * These object types were introduced later than our support cutoff of
@@ -1395,6 +1421,7 @@ static const char *const table_storage_parameters[] = {
 	"autovacuum_vacuum_threshold",
 	"fillfactor",
 	"log_autovacuum_min_duration",
+	"log_autoanalyze_min_duration",
 	"parallel_workers",
 	"toast.autovacuum_enabled",
 	"toast.autovacuum_freeze_max_age",
@@ -1902,11 +1929,11 @@ psql_completion(const char *text, int start, int end)
 		"\\out",
 		"\\parse", "\\password", "\\print", "\\prompt", "\\pset",
 		"\\qecho", "\\quit",
-		"\\reset",
+		"\\reset", "\\restrict",
 		"\\s", "\\sendpipeline", "\\set", "\\setenv", "\\sf",
 		"\\startpipeline", "\\sv", "\\syncpipeline",
 		"\\t", "\\T", "\\timing",
-		"\\unset",
+		"\\unrestrict", "\\unset",
 		"\\x",
 		"\\warn", "\\watch", "\\write",
 		"\\z",
@@ -2166,7 +2193,7 @@ match_previous_words(int pattern_id,
 			/* for INDEX and TABLE/SEQUENCE, respectively */
 						  "UNIQUE", "UNLOGGED");
 		else
-			matches = rl_completion_matches(text, create_command_generator);
+			COMPLETE_WITH_GENERATOR(create_command_generator);
 	}
 	/* complete with something you can create or replace */
 	else if (TailMatches("CREATE", "OR", "REPLACE"))
@@ -2176,7 +2203,7 @@ match_previous_words(int pattern_id,
 /* DROP, but not DROP embedded in other commands */
 	/* complete with something you can drop */
 	else if (Matches("DROP"))
-		matches = rl_completion_matches(text, drop_command_generator);
+		COMPLETE_WITH_GENERATOR(drop_command_generator);
 
 /* ALTER */
 
@@ -2187,7 +2214,7 @@ match_previous_words(int pattern_id,
 
 	/* ALTER something */
 	else if (Matches("ALTER"))
-		matches = rl_completion_matches(text, alter_command_generator);
+		COMPLETE_WITH_GENERATOR(alter_command_generator);
 	/* ALTER TABLE,INDEX,MATERIALIZED VIEW ALL IN TABLESPACE xxx */
 	else if (TailMatches("ALL", "IN", "TABLESPACE", MatchAny))
 		COMPLETE_WITH("SET TABLESPACE", "OWNED BY");
@@ -2292,11 +2319,11 @@ match_previous_words(int pattern_id,
 	/* ALTER SUBSCRIPTION <name> */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny))
 		COMPLETE_WITH("CONNECTION", "ENABLE", "DISABLE", "OWNER TO",
-					  "RENAME TO", "REFRESH PUBLICATION", "SET", "SKIP (",
-					  "ADD PUBLICATION", "DROP PUBLICATION");
-	/* ALTER SUBSCRIPTION <name> REFRESH PUBLICATION */
-	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH", "PUBLICATION"))
-		COMPLETE_WITH("WITH (");
+					  "RENAME TO", "REFRESH PUBLICATION", "REFRESH SEQUENCES",
+					  "SET", "SKIP (", "ADD PUBLICATION", "DROP PUBLICATION");
+	/* ALTER SUBSCRIPTION <name> REFRESH */
+	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH"))
+		COMPLETE_WITH("PUBLICATION", "SEQUENCES");
 	/* ALTER SUBSCRIPTION <name> REFRESH PUBLICATION WITH ( */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH", "PUBLICATION", "WITH", "("))
 		COMPLETE_WITH("copy_data");
@@ -2305,9 +2332,11 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("(", "PUBLICATION");
 	/* ALTER SUBSCRIPTION <name> SET ( */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "SET", "("))
-		COMPLETE_WITH("binary", "disable_on_error", "failover", "origin",
-					  "password_required", "run_as_owner", "slot_name",
-					  "streaming", "synchronous_commit", "two_phase");
+		COMPLETE_WITH("binary", "disable_on_error", "failover",
+					  "max_retention_duration", "origin",
+					  "password_required", "retain_dead_tuples",
+					  "run_as_owner", "slot_name", "streaming",
+					  "synchronous_commit", "two_phase");
 	/* ALTER SUBSCRIPTION <name> SKIP ( */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "SKIP", "("))
 		COMPLETE_WITH("lsn");
@@ -2503,7 +2532,10 @@ match_previous_words(int pattern_id,
 
 	/* ALTER USER,ROLE <name> RESET */
 	else if (Matches("ALTER", "USER|ROLE", MatchAny, "RESET"))
+	{
+		set_completion_reference(prev2_wd);
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_user_vars, "ALL");
+	}
 
 	/* ALTER USER,ROLE <name> WITH */
 	else if (Matches("ALTER", "USER|ROLE", MatchAny, "WITH"))
@@ -2733,17 +2765,24 @@ match_previous_words(int pattern_id,
 	/* ALTER TABLE xxx ADD */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ADD"))
 	{
-		/* make sure to keep this list and the !Matches() below in sync */
-		COMPLETE_WITH("COLUMN", "CONSTRAINT", "CHECK", "UNIQUE", "PRIMARY KEY",
-					  "EXCLUDE", "FOREIGN KEY");
+		/*
+		 * make sure to keep this list and the MatchAnyExcept() below in sync
+		 */
+		COMPLETE_WITH("COLUMN", "CONSTRAINT", "CHECK (", "NOT NULL", "UNIQUE",
+					  "PRIMARY KEY", "EXCLUDE", "FOREIGN KEY");
 	}
 	/* ALTER TABLE xxx ADD [COLUMN] yyy */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "COLUMN", MatchAny) ||
-			 Matches("ALTER", "TABLE", MatchAny, "ADD", MatchAnyExcept("COLUMN|CONSTRAINT|CHECK|UNIQUE|PRIMARY|EXCLUDE|FOREIGN")))
+			 Matches("ALTER", "TABLE", MatchAny, "ADD", MatchAnyExcept("COLUMN|CONSTRAINT|CHECK|UNIQUE|PRIMARY|NOT|EXCLUDE|FOREIGN")))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_datatypes);
 	/* ALTER TABLE xxx ADD CONSTRAINT yyy */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny))
-		COMPLETE_WITH("CHECK", "UNIQUE", "PRIMARY KEY", "EXCLUDE", "FOREIGN KEY");
+		COMPLETE_WITH("CHECK (", "NOT NULL", "UNIQUE", "PRIMARY KEY", "EXCLUDE", "FOREIGN KEY");
+	/* ALTER TABLE xxx ADD NOT NULL */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "NOT", "NULL"))
+		COMPLETE_WITH_ATTR(prev4_wd);
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny, "NOT", "NULL"))
+		COMPLETE_WITH_ATTR(prev6_wd);
 	/* ALTER TABLE xxx ADD [CONSTRAINT yyy] (PRIMARY KEY|UNIQUE) */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "PRIMARY", "KEY") ||
 			 Matches("ALTER", "TABLE", MatchAny, "ADD", "UNIQUE") ||
@@ -3133,6 +3172,22 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_VERSIONED_SCHEMA_QUERY(Query_for_list_of_procedures);
 	else if (Matches("CALL", MatchAny))
 		COMPLETE_WITH("(");
+/* CHECKPOINT */
+	else if (Matches("CHECKPOINT"))
+		COMPLETE_WITH("(");
+	else if (HeadMatches("CHECKPOINT", "(*") &&
+			 !HeadMatches("CHECKPOINT", "(*)"))
+	{
+		/*
+		 * This fires if we're in an unfinished parenthesized option list.
+		 * get_previous_words treats a completed parenthesized option list as
+		 * one word, so the above test is correct.
+		 */
+		if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
+			COMPLETE_WITH("MODE", "FLUSH_UNLOGGED");
+		else if (TailMatches("MODE"))
+			COMPLETE_WITH("FAST", "SPREAD");
+	}
 /* CLOSE */
 	else if (Matches("CLOSE"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_cursors,
@@ -3272,17 +3327,9 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("FROM", "TO");
 	/* Complete COPY <sth> FROM|TO with filename */
 	else if (Matches("COPY", MatchAny, "FROM|TO"))
-	{
-		completion_charp = "";
-		completion_force_quote = true;	/* COPY requires quoted filename */
-		matches = rl_completion_matches(text, complete_from_files);
-	}
+		COMPLETE_WITH_FILES("", true);	/* COPY requires quoted filename */
 	else if (Matches("\\copy", MatchAny, "FROM|TO"))
-	{
-		completion_charp = "";
-		completion_force_quote = false;
-		matches = rl_completion_matches(text, complete_from_files);
-	}
+		COMPLETE_WITH_FILES("", false);
 
 	/* Complete COPY <sth> TO <sth> */
 	else if (Matches("COPY|\\copy", MatchAny, "TO", MatchAny))
@@ -3292,23 +3339,24 @@ match_previous_words(int pattern_id,
 	else if (Matches("COPY|\\copy", MatchAny, "FROM", MatchAny))
 		COMPLETE_WITH("WITH (", "WHERE");
 
-	/* Complete COPY <sth> FROM|TO filename WITH ( */
-	else if (Matches("COPY|\\copy", MatchAny, "FROM|TO", MatchAny, "WITH", "("))
-		COMPLETE_WITH("FORMAT", "FREEZE", "DELIMITER", "NULL",
-					  "HEADER", "QUOTE", "ESCAPE", "FORCE_QUOTE",
-					  "FORCE_NOT_NULL", "FORCE_NULL", "ENCODING", "DEFAULT",
-					  "ON_ERROR", "LOG_VERBOSITY", "REJECT_LIMIT");
+	/* Complete COPY <sth> FROM filename WITH ( */
+	else if (Matches("COPY|\\copy", MatchAny, "FROM", MatchAny, "WITH", "("))
+		COMPLETE_WITH(Copy_from_options);
+
+	/* Complete COPY <sth> TO filename WITH ( */
+	else if (Matches("COPY|\\copy", MatchAny, "TO", MatchAny, "WITH", "("))
+		COMPLETE_WITH(Copy_to_options);
 
 	/* Complete COPY <sth> FROM|TO filename WITH (FORMAT */
 	else if (Matches("COPY|\\copy", MatchAny, "FROM|TO", MatchAny, "WITH", "(", "FORMAT"))
 		COMPLETE_WITH("binary", "csv", "text");
 
 	/* Complete COPY <sth> FROM filename WITH (ON_ERROR */
-	else if (Matches("COPY|\\copy", MatchAny, "FROM|TO", MatchAny, "WITH", "(", "ON_ERROR"))
+	else if (Matches("COPY|\\copy", MatchAny, "FROM", MatchAny, "WITH", "(", "ON_ERROR"))
 		COMPLETE_WITH("stop", "ignore");
 
 	/* Complete COPY <sth> FROM filename WITH (LOG_VERBOSITY */
-	else if (Matches("COPY|\\copy", MatchAny, "FROM|TO", MatchAny, "WITH", "(", "LOG_VERBOSITY"))
+	else if (Matches("COPY|\\copy", MatchAny, "FROM", MatchAny, "WITH", "(", "LOG_VERBOSITY"))
 		COMPLETE_WITH("silent", "default", "verbose");
 
 	/* Complete COPY <sth> FROM <sth> WITH (<options>) */
@@ -3538,11 +3586,11 @@ match_previous_words(int pattern_id,
 
 /* CREATE PUBLICATION */
 	else if (Matches("CREATE", "PUBLICATION", MatchAny))
-		COMPLETE_WITH("FOR TABLE", "FOR ALL TABLES", "FOR TABLES IN SCHEMA", "WITH (");
+		COMPLETE_WITH("FOR TABLE", "FOR TABLES IN SCHEMA", "FOR ALL TABLES", "FOR ALL SEQUENCES", "WITH (");
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR"))
-		COMPLETE_WITH("TABLE", "ALL TABLES", "TABLES IN SCHEMA");
+		COMPLETE_WITH("TABLE", "TABLES IN SCHEMA", "ALL TABLES", "ALL SEQUENCES");
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL"))
-		COMPLETE_WITH("TABLES");
+		COMPLETE_WITH("TABLES", "SEQUENCES");
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "ALL", "TABLES"))
 		COMPLETE_WITH("WITH (");
 	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES"))
@@ -3736,9 +3784,11 @@ match_previous_words(int pattern_id,
 	/* Complete "CREATE SUBSCRIPTION <name> ...  WITH ( <opt>" */
 	else if (Matches("CREATE", "SUBSCRIPTION", MatchAnyN, "WITH", "("))
 		COMPLETE_WITH("binary", "connect", "copy_data", "create_slot",
-					  "disable_on_error", "enabled", "failover", "origin",
-					  "password_required", "run_as_owner", "slot_name",
-					  "streaming", "synchronous_commit", "two_phase");
+					  "disable_on_error", "enabled", "failover",
+					  "max_retention_duration", "origin",
+					  "password_required", "retain_dead_tuples",
+					  "run_as_owner", "slot_name", "streaming",
+					  "synchronous_commit", "two_phase");
 
 /* CREATE TRIGGER --- is allowed inside CREATE SCHEMA, so use TailMatches */
 
@@ -4503,13 +4553,10 @@ match_previous_words(int pattern_id,
 					  "ROUTINES IN SCHEMA",
 					  "SEQUENCES IN SCHEMA",
 					  "TABLES IN SCHEMA");
-	else if (TailMatches("GRANT|REVOKE", MatchAny, "ON", "FOREIGN") ||
-			 TailMatches("REVOKE", "GRANT", "OPTION", "FOR", MatchAny, "ON", "FOREIGN"))
-		COMPLETE_WITH("DATA WRAPPER", "SERVER");
 
 	/*
 	 * Complete "GRANT/REVOKE * ON DATABASE/DOMAIN/..." with a list of
-	 * appropriate objects.
+	 * appropriate objects or keywords.
 	 *
 	 * Complete "GRANT/REVOKE * ON *" with "TO/FROM".
 	 */
@@ -4522,8 +4569,17 @@ match_previous_words(int pattern_id,
 			COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_domains);
 		else if (TailMatches("FUNCTION"))
 			COMPLETE_WITH_VERSIONED_SCHEMA_QUERY(Query_for_list_of_functions);
+		else if (TailMatches("FOREIGN"))
+			COMPLETE_WITH("DATA WRAPPER", "SERVER");
 		else if (TailMatches("LANGUAGE"))
 			COMPLETE_WITH_QUERY(Query_for_list_of_languages);
+		else if (TailMatches("LARGE"))
+		{
+			if (HeadMatches("ALTER", "DEFAULT", "PRIVILEGES"))
+				COMPLETE_WITH("OBJECTS");
+			else
+				COMPLETE_WITH("OBJECT");
+		}
 		else if (TailMatches("PROCEDURE"))
 			COMPLETE_WITH_VERSIONED_SCHEMA_QUERY(Query_for_list_of_procedures);
 		else if (TailMatches("ROUTINE"))
@@ -4582,10 +4638,14 @@ match_previous_words(int pattern_id,
 	else if (Matches("ALTER", "DEFAULT", "PRIVILEGES", MatchAnyN, "TO", MatchAny))
 		COMPLETE_WITH("WITH GRANT OPTION");
 	/* Complete "GRANT/REVOKE ... ON * *" with TO/FROM */
-	else if (Matches("GRANT", MatchAnyN, "ON", MatchAny, MatchAny))
-		COMPLETE_WITH("TO");
-	else if (Matches("REVOKE", MatchAnyN, "ON", MatchAny, MatchAny))
-		COMPLETE_WITH("FROM");
+	else if (Matches("GRANT|REVOKE", MatchAnyN, "ON", MatchAny, MatchAny) &&
+			 !TailMatches("FOREIGN", "SERVER") && !TailMatches("LARGE", "OBJECT"))
+	{
+		if (Matches("GRANT", MatchAnyN, "ON", MatchAny, MatchAny))
+			COMPLETE_WITH("TO");
+		else
+			COMPLETE_WITH("FROM");
+	}
 
 	/* Complete "GRANT/REVOKE * ON ALL * IN SCHEMA *" with TO/FROM */
 	else if (TailMatches("GRANT|REVOKE", MatchAny, "ON", "ALL", MatchAny, "IN", "SCHEMA", MatchAny) ||
@@ -4612,6 +4672,26 @@ match_previous_words(int pattern_id,
 			 TailMatches("REVOKE", "GRANT", "OPTION", "FOR", MatchAny, "ON", "FOREIGN", "SERVER", MatchAny))
 	{
 		if (TailMatches("GRANT", MatchAny, MatchAny, MatchAny, MatchAny, MatchAny))
+			COMPLETE_WITH("TO");
+		else
+			COMPLETE_WITH("FROM");
+	}
+
+	/* Complete "GRANT/REVOKE * ON LARGE OBJECT *" with TO/FROM */
+	else if (TailMatches("GRANT|REVOKE", MatchAny, "ON", "LARGE", "OBJECT", MatchAny) ||
+			 TailMatches("REVOKE", "GRANT", "OPTION", "FOR", MatchAny, "ON", "LARGE", "OBJECT", MatchAny))
+	{
+		if (TailMatches("GRANT", MatchAny, MatchAny, MatchAny, MatchAny, MatchAny))
+			COMPLETE_WITH("TO");
+		else
+			COMPLETE_WITH("FROM");
+	}
+
+	/* Complete "GRANT/REVOKE * ON LARGE OBJECTS" with TO/FROM */
+	else if (TailMatches("GRANT|REVOKE", MatchAny, "ON", "LARGE", "OBJECTS") ||
+			 TailMatches("REVOKE", "GRANT", "OPTION", "FOR", MatchAny, "ON", "LARGE", "OBJECTS"))
+	{
+		if (TailMatches("GRANT", MatchAny, MatchAny, MatchAny, MatchAny))
 			COMPLETE_WITH("TO");
 		else
 			COMPLETE_WITH("FROM");
@@ -4952,7 +5032,7 @@ match_previous_words(int pattern_id,
 	/* Complete with a variable name */
 	else if (TailMatches("SET|RESET") &&
 			 !TailMatches("UPDATE", MatchAny, "SET") &&
-			 !TailMatches("ALTER", "DATABASE", MatchAny, "RESET"))
+			 !TailMatches("ALTER", "DATABASE|USER|ROLE", MatchAny, "RESET"))
 		COMPLETE_WITH_QUERY_VERBATIM_PLUS(Query_for_list_of_set_vars,
 										  "CONSTRAINTS",
 										  "TRANSACTION",
@@ -5356,9 +5436,9 @@ match_previous_words(int pattern_id,
 	else if (TailMatchesCS("\\h|\\help", MatchAny))
 	{
 		if (TailMatches("DROP"))
-			matches = rl_completion_matches(text, drop_command_generator);
+			COMPLETE_WITH_GENERATOR(drop_command_generator);
 		else if (TailMatches("ALTER"))
-			matches = rl_completion_matches(text, alter_command_generator);
+			COMPLETE_WITH_GENERATOR(alter_command_generator);
 
 		/*
 		 * CREATE is recognized by tail match elsewhere, so doesn't need to be
@@ -5457,12 +5537,9 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_views);
 	else if (TailMatchesCS("\\cd|\\e|\\edit|\\g|\\gx|\\i|\\include|"
 						   "\\ir|\\include_relative|\\o|\\out|"
-						   "\\s|\\w|\\write|\\lo_import"))
-	{
-		completion_charp = "\\";
-		completion_force_quote = false;
-		matches = rl_completion_matches(text, complete_from_files);
-	}
+						   "\\s|\\w|\\write|\\lo_import") ||
+			 TailMatchesCS("\\lo_export", MatchAny))
+		COMPLETE_WITH_FILES("\\", false);
 
 	/* gen_tabcomplete.pl ends special processing here */
 	/* END GEN_TABCOMPLETE */

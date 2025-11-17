@@ -53,6 +53,7 @@
 #include "utils/inval.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
+#include "utils/injection_point.h"
 
 
 static HeapTuple heap_prepare_insert(Relation relation, HeapTuple tup,
@@ -634,6 +635,36 @@ heap_prepare_pagescan(TableScanDesc sscan)
 }
 
 /*
+ * Reset the active snapshot during a scan.
+ * This ensures the xmin horizon can advance while maintaining safe tuple visibility.
+ * Note: No other snapshot should be active during this operation.
+ */
+static inline void
+heap_reset_scan_snapshot(TableScanDesc sscan)
+{
+	/* Make sure no other snapshot was set as active. */
+	Assert(GetActiveSnapshot() == sscan->rs_snapshot);
+	/* And make sure active snapshot is not registered. */
+	Assert(GetActiveSnapshot()->regd_count == 0);
+	PopActiveSnapshot();
+
+	sscan->rs_snapshot = InvalidSnapshot; /* just ot be tidy */
+	Assert(!HaveRegisteredOrActiveSnapshot());
+	InvalidateCatalogSnapshot();
+
+	/* Goal of snapshot reset is to allow horizon to advance. */
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+#if USE_INJECTION_POINTS
+	/* In some cases it is still not possible due xid assign. */
+	if (!TransactionIdIsValid(MyProc->xid))
+		INJECTION_POINT("heap_reset_scan_snapshot_effective", NULL);
+#endif
+
+	PushActiveSnapshot(GetLatestSnapshot());
+	sscan->rs_snapshot = GetActiveSnapshot();
+}
+
+/*
  * heap_fetch_next_buffer - read and pin the next block from MAIN_FORKNUM.
  *
  * Read the next block of the scan relation from the read stream and save it
@@ -674,7 +705,12 @@ heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
 
 	scan->rs_cbuf = read_stream_next_buffer(scan->rs_read_stream, NULL);
 	if (BufferIsValid(scan->rs_cbuf))
+	{
 		scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
+		if ((scan->rs_base.rs_flags & SO_RESET_SNAPSHOT) &&
+			(scan->rs_cblock % SO_RESET_SNAPSHOT_EACH_N_PAGE == 0))
+			heap_reset_scan_snapshot((TableScanDesc) scan);
+	}
 }
 
 /*
@@ -1143,6 +1179,17 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	if (!(snapshot && IsMVCCSnapshot(snapshot)))
 		scan->rs_base.rs_flags &= ~SO_ALLOW_PAGEMODE;
 
+	/* Check that a historic snapshot is not used for non-catalog tables */
+	if (snapshot &&
+		IsHistoricMVCCSnapshot(snapshot) &&
+		!RelationIsAccessibleInLogicalDecoding(relation))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+				 errmsg("cannot query non-catalog table \"%s\" during logical decoding",
+						RelationGetRelationName(relation))));
+	}
+
 	/*
 	 * For seqscan and sample scans in a serializable transaction, acquire a
 	 * predicate lock on the entire relation. This is required not only to
@@ -1324,6 +1371,15 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_parallelworkerdata != NULL)
 		pfree(scan->rs_parallelworkerdata);
+
+	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+	{
+		Assert(!(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT));
+		/* Make sure no other snapshot was set as active. */
+		Assert(GetActiveSnapshot() == sscan->rs_snapshot);
+		/* And make sure snapshot is not registered. */
+		Assert(GetActiveSnapshot()->regd_count == 0);
+	}
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
@@ -2455,7 +2511,11 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		starting_with_empty_page = PageGetMaxOffsetNumber(page) == 0;
 
 		if (starting_with_empty_page && (options & HEAP_INSERT_FROZEN))
+		{
 			all_frozen_set = true;
+			/* Lock the vmbuffer before entering the critical section */
+			LockBuffer(vmbuffer, BUFFER_LOCK_EXCLUSIVE);
+		}
 
 		/* NO EREPORT(ERROR) from here till changes are logged */
 		START_CRIT_SECTION();
@@ -2495,7 +2555,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		 * going to add further frozen rows to it.
 		 *
 		 * If we're only adding already frozen rows to a previously empty
-		 * page, mark it as all-visible.
+		 * page, mark it as all-frozen and update the visibility map. We're
+		 * already holding a pin on the vmbuffer.
 		 */
 		if (PageIsAllVisible(page) && !(options & HEAP_INSERT_FROZEN))
 		{
@@ -2506,7 +2567,14 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 								vmbuffer, VISIBILITYMAP_VALID_BITS);
 		}
 		else if (all_frozen_set)
+		{
 			PageSetAllVisible(page);
+			visibilitymap_set_vmbits(BufferGetBlockNumber(buffer),
+									 vmbuffer,
+									 VISIBILITYMAP_ALL_VISIBLE |
+									 VISIBILITYMAP_ALL_FROZEN,
+									 relation->rd_locator);
+		}
 
 		/*
 		 * XXX Should we set PageSetPrunable on this page ? See heap_insert()
@@ -2554,6 +2622,12 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			xlrec->flags = 0;
 			if (all_visible_cleared)
 				xlrec->flags = XLH_INSERT_ALL_VISIBLE_CLEARED;
+
+			/*
+			 * We don't have to worry about including a conflict xid in the
+			 * WAL record, as HEAP_INSERT_FROZEN intentionally violates
+			 * visibility rules.
+			 */
 			if (all_frozen_set)
 				xlrec->flags = XLH_INSERT_ALL_FROZEN_SET;
 
@@ -2617,6 +2691,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			XLogBeginInsert();
 			XLogRegisterData(xlrec, tupledata - scratch.data);
 			XLogRegisterBuffer(0, buffer, REGBUF_STANDARD | bufflags);
+			if (all_frozen_set)
+				XLogRegisterBuffer(1, vmbuffer, 0);
 
 			XLogRegisterBufData(0, tupledata, totaldatalen);
 
@@ -2626,29 +2702,17 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			recptr = XLogInsert(RM_HEAP2_ID, info);
 
 			PageSetLSN(page, recptr);
+			if (all_frozen_set)
+			{
+				Assert(BufferIsDirty(vmbuffer));
+				PageSetLSN(BufferGetPage(vmbuffer), recptr);
+			}
 		}
 
 		END_CRIT_SECTION();
 
-		/*
-		 * If we've frozen everything on the page, update the visibilitymap.
-		 * We're already holding pin on the vmbuffer.
-		 */
 		if (all_frozen_set)
-		{
-			Assert(PageIsAllVisible(page));
-			Assert(visibilitymap_pin_ok(BufferGetBlockNumber(buffer), vmbuffer));
-
-			/*
-			 * It's fine to use InvalidTransactionId here - this is only used
-			 * when HEAP_INSERT_FROZEN is specified, which intentionally
-			 * violates visibility rules.
-			 */
-			visibilitymap_set(relation, BufferGetBlockNumber(buffer), buffer,
-							  InvalidXLogRecPtr, vmbuffer,
-							  InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
-		}
+			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 
 		UnlockReleaseBuffer(buffer);
 		ndone += nthispage;
@@ -4544,7 +4608,6 @@ get_mxact_status_for_lock(LockTupleMode mode, bool is_update)
  *
  * Input parameters:
  *	relation: relation containing tuple (caller must hold suitable lock)
- *	tid: TID of tuple to lock
  *	cid: current command ID (used for visibility test, and stored into
  *		tuple's cmax if lock is successful)
  *	mode: indicates if shared or exclusive tuple lock is desired
@@ -6088,7 +6151,7 @@ heap_finish_speculative(Relation relation, ItemPointer tid)
 
 	buffer = ReadBuffer(relation, ItemPointerGetBlockNumber(tid));
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-	page = (Page) BufferGetPage(buffer);
+	page = BufferGetPage(buffer);
 
 	offnum = ItemPointerGetOffsetNumber(tid);
 	if (PageGetMaxOffsetNumber(page) >= offnum)

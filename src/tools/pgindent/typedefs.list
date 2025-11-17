@@ -42,6 +42,7 @@ AfterTriggersTableData
 AfterTriggersTransData
 Agg
 AggClauseCosts
+AggClauseInfo
 AggInfo
 AggPath
 AggSplit
@@ -55,9 +56,6 @@ AggStrategy
 AggTransInfo
 Aggref
 AggregateInstrumentation
-AioWorkerControl
-AioWorkerSlot
-AioWorkerSubmissionQueue
 AlenState
 Alias
 AllocBlock
@@ -74,6 +72,7 @@ AlterDatabaseSetStmt
 AlterDatabaseStmt
 AlterDefaultPrivilegesStmt
 AlterDomainStmt
+AlterDomainType
 AlterEnumStmt
 AlterEventTrigStmt
 AlterExtensionContentsStmt
@@ -521,7 +520,6 @@ CopyFormatOptions
 CopyFromRoutine
 CopyFromState
 CopyFromStateData
-CopyHeaderChoice
 CopyInsertMethod
 CopyLogVerbosityChoice
 CopyMethod
@@ -1113,6 +1111,7 @@ GroupPathExtraData
 GroupResultPath
 GroupState
 GroupVarInfo
+GroupingExprInfo
 GroupingFunc
 GroupingSet
 GroupingSetData
@@ -1291,6 +1290,7 @@ InjectionPointCacheEntry
 InjectionPointCallback
 InjectionPointCondition
 InjectionPointConditionType
+InjectionPointData
 InjectionPointEntry
 InjectionPointSharedState
 InjectionPointsCtl
@@ -1321,7 +1321,6 @@ IsForeignRelUpdatable_function
 IsForeignScanParallelSafe_function
 IsoConnInfo
 IspellDict
-Item
 ItemArray
 ItemId
 ItemIdData
@@ -1758,9 +1757,11 @@ NextValueExpr
 Node
 NodeTag
 NonEmptyRange
+NoneCompressorState
 Notification
 NotificationList
 NotifyStmt
+NotnullHashEntry
 Nsrt
 NtDllRoutine
 NtFlushBuffersFileEx_t
@@ -1991,6 +1992,7 @@ PLyScalarToOb
 PLySubtransactionData
 PLySubtransactionObject
 PLyTransformToOb
+PLyTrigType
 PLyTupleToOb
 PLyUnicode_FromStringAndSize_t
 PLy_elog_impl_t
@@ -2180,8 +2182,12 @@ PgAioReturn
 PgAioTargetData
 PgAioTargetID
 PgAioTargetInfo
+PgAioUringCaps
 PgAioUringContext
 PgAioWaitRef
+PgAioWorkerControl
+PgAioWorkerSlot
+PgAioWorkerSubmissionQueue
 PgArchData
 PgBackendGSSStatus
 PgBackendSSLStatus
@@ -2272,6 +2278,7 @@ PlanInvalItem
 PlanRowMark
 PlanState
 PlannedStmt
+PlannedStmtOrigin
 PlannerGlobal
 PlannerInfo
 PlannerParamItem
@@ -2347,12 +2354,15 @@ PsqlScanStateData
 PsqlSettings
 Publication
 PublicationActions
+PublicationAllObjSpec
+PublicationAllObjType
 PublicationDesc
 PublicationInfo
 PublicationObjSpec
 PublicationObjSpecType
 PublicationPartOpt
 PublicationRelInfo
+PublicationRelKind
 PublicationSchemaInfo
 PublicationTable
 PublishGencolsType
@@ -2468,6 +2478,7 @@ ReindexObjectType
 ReindexParams
 ReindexStmt
 ReindexType
+RelAggInfo
 RelFileLocator
 RelFileLocatorBackend
 RelFileNumber
@@ -2563,6 +2574,9 @@ RestrictInfo
 Result
 ResultRelInfo
 ResultState
+ResultType
+RetainDeadTuplesData
+RetainDeadTuplesPhase
 ReturnSetInfo
 ReturnStmt
 ReturningClause
@@ -2596,6 +2610,7 @@ RtlNtStatusToDosError_t
 RuleInfo
 RuleLock
 RuleStmt
+RunMode
 RunningTransactions
 RunningTransactionsData
 SASLStatus
@@ -2676,6 +2691,7 @@ SecLabelStmt
 SeenRelsEntry
 SelectLimit
 SelectStmt
+SelectStmtPassthrough
 Selectivity
 SelfJoinCandidate
 SemTPadded
@@ -2907,7 +2923,7 @@ SyncRepStandbyData
 SyncRequestHandler
 SyncRequestType
 SyncStandbySlotsConfigData
-SyncingTablesState
+SyncingRelationsState
 SysFKRelationship
 SysScanDesc
 SyscacheCallbackFunction
@@ -3153,7 +3169,6 @@ UnicodeNormalizationForm
 UnicodeNormalizationQC
 Unique
 UniquePath
-UniquePathMethod
 UniqueRelInfo
 UniqueState
 UnlistenStmt
@@ -3169,7 +3184,6 @@ UpgradeTaskSlotState
 UpgradeTaskStep
 UploadManifestCmd
 UpperRelationKind
-UpperUniquePath
 UserAuth
 UserContext
 UserMapping
@@ -3480,6 +3494,8 @@ bloom_filter
 boolKEY
 brin_column_state
 brin_serialize_callback_type
+btree_gin_convert_function
+btree_gin_leftmost_function
 bytea
 cached_re_str
 canonicalize_state
@@ -3606,6 +3622,7 @@ fe_scram_state
 fe_scram_state_enum
 fetch_range_request
 file_action_t
+file_content_type_t
 file_entry_t
 file_type_t
 filehash_hash
@@ -3628,10 +3645,6 @@ float8
 float8KEY
 floating_decimal_32
 floating_decimal_64
-fmAggrefPtr
-fmExprContextCallbackFunction
-fmNodePtr
-fmStringInfo
 fmgr_hook_type
 foreign_glob_cxt
 foreign_loc_cxt
@@ -3680,7 +3693,6 @@ gss_key_value_set_desc
 gss_name_t
 gtrgm_consistent_cache
 gzFile
-hbaPort
 heap_page_items_state
 help_handler
 hlCheck
@@ -3749,6 +3761,7 @@ leafSegmentInfo
 leaf_item
 libpq_gettext_func
 libpq_source
+libpqsrv_PGresult
 line_t
 lineno_t
 list_sort_comparator

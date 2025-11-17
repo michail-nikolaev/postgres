@@ -56,10 +56,6 @@ struct XidCache
  */
 #define		PROC_IS_AUTOVACUUM	0x01	/* is it an autovac worker? */
 #define		PROC_IN_VACUUM		0x02	/* currently running lazy vacuum */
-#define		PROC_IN_SAFE_IC		0x04	/* currently running CREATE INDEX
-										 * CONCURRENTLY or REINDEX
-										 * CONCURRENTLY on non-expressional,
-										 * non-partial index */
 #define		PROC_VACUUM_FOR_WRAPAROUND	0x08	/* set by autovac only */
 #define		PROC_IN_LOGICAL_DECODING	0x10	/* currently doing logical
 												 * decoding outside xact */
@@ -69,13 +65,13 @@ struct XidCache
 
 /* flags reset at EOXact */
 #define		PROC_VACUUM_STATE_MASK \
-	(PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_VACUUM_FOR_WRAPAROUND)
+	(PROC_IN_VACUUM | PROC_VACUUM_FOR_WRAPAROUND)
 
 /*
  * Xmin-related flags. Make sure any flags that affect how the process' Xmin
  * value is interpreted by VACUUM are included here.
  */
-#define		PROC_XMIN_FLAGS (PROC_IN_VACUUM | PROC_IN_SAFE_IC)
+#define		PROC_XMIN_FLAGS (PROC_IN_VACUUM)
 
 /*
  * We allow a limited number of "weak" relation locks (AccessShareLock,
@@ -130,9 +126,17 @@ extern PGDLLIMPORT int FastPathLockGroupsPerBackend;
  * the checkpoint are actually destroyed on disk. Replay can cope with a file
  * or block that doesn't exist, but not with a block that has the wrong
  * contents.
+ *
+ * Setting DELAY_CHKPT_IN_COMMIT is similar to setting DELAY_CHKPT_START, but
+ * it explicitly indicates that the reason for delaying the checkpoint is due
+ * to a transaction being within a critical commit section. We need this new
+ * flag to ensure all the transactions that have acquired commit timestamp are
+ * finished before we allow the logical replication client to advance its xid
+ * which is used to hold back dead rows for conflict detection.
  */
 #define DELAY_CHKPT_START		(1<<0)
 #define DELAY_CHKPT_COMPLETE	(1<<1)
+#define DELAY_CHKPT_IN_COMMIT	(DELAY_CHKPT_START | 1<<2)
 
 typedef enum
 {

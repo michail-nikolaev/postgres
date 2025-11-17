@@ -26,6 +26,7 @@
 #include "fe_utils/recovery_gen.h"
 #include "fe_utils/simple_list.h"
 #include "fe_utils/string_utils.h"
+#include "fe_utils/version.h"
 #include "getopt_long.h"
 
 #define	DEFAULT_SUB_PORT	"50432"
@@ -407,7 +408,8 @@ static void
 check_data_directory(const char *datadir)
 {
 	struct stat statbuf;
-	char		versionfile[MAXPGPATH];
+	uint32		major_version;
+	char	   *version_str;
 
 	pg_log_info("checking if directory \"%s\" is a cluster data directory",
 				datadir);
@@ -420,11 +422,18 @@ check_data_directory(const char *datadir)
 			pg_fatal("could not access directory \"%s\": %m", datadir);
 	}
 
-	snprintf(versionfile, MAXPGPATH, "%s/PG_VERSION", datadir);
-	if (stat(versionfile, &statbuf) != 0 && errno == ENOENT)
+	/*
+	 * Retrieve the contents of this cluster's PG_VERSION.  We require
+	 * compatibility with the same major version as the one this tool is
+	 * compiled with.
+	 */
+	major_version = GET_PG_MAJORVERSION_NUM(get_pg_version(datadir, &version_str));
+	if (major_version != PG_MAJORVERSION_NUM)
 	{
-		pg_fatal("directory \"%s\" is not a database cluster directory",
-				 datadir);
+		pg_log_error("data directory is of wrong version");
+		pg_log_error_detail("File \"%s\" contains \"%s\", which is not compatible with this program's version \"%s\".",
+							"PG_VERSION", version_str, PG_MAJORVERSION);
+		exit(1);
 	}
 }
 
@@ -801,10 +810,7 @@ setup_publisher(struct LogicalRepInfo *dbinfo)
 		if (lsn)
 			pg_free(lsn);
 		lsn = create_logical_replication_slot(conn, &dbinfo[i]);
-		if (lsn != NULL || dry_run)
-			pg_log_info("create replication slot \"%s\" on publisher",
-						dbinfo[i].replslotname);
-		else
+		if (lsn == NULL && !dry_run)
 			exit(1);
 
 		/*
@@ -1250,8 +1256,17 @@ setup_recovery(const struct LogicalRepInfo *dbinfo, const char *datadir, const c
 	appendPQExpBufferStr(recoveryconfcontents, "recovery_target = ''\n");
 	appendPQExpBufferStr(recoveryconfcontents,
 						 "recovery_target_timeline = 'latest'\n");
+
+	/*
+	 * Set recovery_target_inclusive = false to avoid reapplying the
+	 * transaction committed at 'lsn' after subscription is enabled. This is
+	 * because the provided 'lsn' is also used as the replication start point
+	 * for the subscription. So, the server can send the transaction committed
+	 * at that 'lsn' after replication is started which can lead to applying
+	 * the same transaction twice if we keep recovery_target_inclusive = true.
+	 */
 	appendPQExpBufferStr(recoveryconfcontents,
-						 "recovery_target_inclusive = true\n");
+						 "recovery_target_inclusive = false\n");
 	appendPQExpBufferStr(recoveryconfcontents,
 						 "recovery_target_action = promote\n");
 	appendPQExpBufferStr(recoveryconfcontents, "recovery_target_name = ''\n");
@@ -1262,7 +1277,7 @@ setup_recovery(const struct LogicalRepInfo *dbinfo, const char *datadir, const c
 	{
 		appendPQExpBufferStr(recoveryconfcontents, "# dry run mode");
 		appendPQExpBuffer(recoveryconfcontents,
-						  "recovery_target_lsn = '%X/%X'\n",
+						  "recovery_target_lsn = '%X/%08X'\n",
 						  LSN_FORMAT_ARGS((XLogRecPtr) InvalidXLogRecPtr));
 	}
 	else
@@ -1366,7 +1381,7 @@ create_logical_replication_slot(PGconn *conn, struct LogicalRepInfo *dbinfo)
 
 	Assert(conn != NULL);
 
-	pg_log_info("creating the replication slot \"%s\" in database \"%s\"",
+	pg_log_info("creating the replication slot \"%s\" in database \"%s\" on publisher",
 				slot_name, dbinfo->dbname);
 
 	slot_name_esc = PQescapeLiteral(conn, slot_name, strlen(slot_name));
@@ -1876,7 +1891,7 @@ set_replication_progress(PGconn *conn, const struct LogicalRepInfo *dbinfo, cons
 	if (dry_run)
 	{
 		suboid = InvalidOid;
-		lsnstr = psprintf("%X/%X", LSN_FORMAT_ARGS((XLogRecPtr) InvalidXLogRecPtr));
+		lsnstr = psprintf("%X/%08X", LSN_FORMAT_ARGS((XLogRecPtr) InvalidXLogRecPtr));
 	}
 	else
 	{

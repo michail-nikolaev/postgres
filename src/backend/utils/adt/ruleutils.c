@@ -1620,7 +1620,6 @@ pg_get_statisticsobjdef(PG_FUNCTION_ARGS)
 
 /*
  * Internal version for use by ALTER TABLE.
- * Includes a tablespace clause in the result.
  * Returns a palloc'd C string; no pretty-printing.
  */
 char *
@@ -6187,7 +6186,9 @@ get_basic_select_query(Query *query, deparse_context *context)
 		save_ingroupby = context->inGroupBy;
 		context->inGroupBy = true;
 
-		if (query->groupingSets == NIL)
+		if (query->groupByAll)
+			appendStringInfoString(buf, "ALL");
+		else if (query->groupingSets == NIL)
 		{
 			sep = "";
 			foreach(l, query->groupClause)
@@ -8750,8 +8751,16 @@ get_parameter(Param *param, deparse_context *context)
 	subplan = find_param_generator(param, context, &column);
 	if (subplan)
 	{
-		appendStringInfo(context->buf, "(%s%s).col%d",
+		const char *nameprefix;
+
+		if (subplan->isInitPlan)
+			nameprefix = "InitPlan ";
+		else
+			nameprefix = "SubPlan ";
+
+		appendStringInfo(context->buf, "(%s%s%s).col%d",
 						 subplan->useHashTable ? "hashed " : "",
+						 nameprefix,
 						 subplan->plan_name, column + 1);
 
 		return;
@@ -9588,11 +9597,19 @@ get_rule_expr(Node *node, deparse_context *context,
 				}
 				else
 				{
+					const char *nameprefix;
+
 					/* No referencing Params, so show the SubPlan's name */
-					if (subplan->useHashTable)
-						appendStringInfo(buf, "hashed %s)", subplan->plan_name);
+					if (subplan->isInitPlan)
+						nameprefix = "InitPlan ";
 					else
-						appendStringInfo(buf, "%s)", subplan->plan_name);
+						nameprefix = "SubPlan ";
+					if (subplan->useHashTable)
+						appendStringInfo(buf, "hashed %s%s)",
+										 nameprefix, subplan->plan_name);
+					else
+						appendStringInfo(buf, "%s%s)",
+										 nameprefix, subplan->plan_name);
 				}
 			}
 			break;
@@ -9612,11 +9629,18 @@ get_rule_expr(Node *node, deparse_context *context,
 				foreach(lc, asplan->subplans)
 				{
 					SubPlan    *splan = lfirst_node(SubPlan, lc);
+					const char *nameprefix;
 
-					if (splan->useHashTable)
-						appendStringInfo(buf, "hashed %s", splan->plan_name);
+					if (splan->isInitPlan)
+						nameprefix = "InitPlan ";
 					else
-						appendStringInfoString(buf, splan->plan_name);
+						nameprefix = "SubPlan ";
+					if (splan->useHashTable)
+						appendStringInfo(buf, "hashed %s%s", nameprefix,
+										 splan->plan_name);
+					else
+						appendStringInfo(buf, "%s%s", nameprefix,
+										 splan->plan_name);
 					if (lnext(asplan->subplans, lc))
 						appendStringInfoString(buf, " or ");
 				}
@@ -9911,7 +9935,7 @@ get_rule_expr(Node *node, deparse_context *context,
 					Node	   *e = (Node *) lfirst(arg);
 
 					if (tupdesc == NULL ||
-						!TupleDescAttr(tupdesc, i)->attisdropped)
+						!TupleDescCompactAttr(tupdesc, i)->attisdropped)
 					{
 						appendStringInfoString(buf, sep);
 						/* Whole-row Vars need special treatment here */
@@ -9924,7 +9948,7 @@ get_rule_expr(Node *node, deparse_context *context,
 				{
 					while (i < tupdesc->natts)
 					{
-						if (!TupleDescAttr(tupdesc, i)->attisdropped)
+						if (!TupleDescCompactAttr(tupdesc, i)->attisdropped)
 						{
 							appendStringInfoString(buf, sep);
 							appendStringInfoString(buf, "NULL");
@@ -11090,7 +11114,12 @@ get_windowfunc_expr_helper(WindowFunc *wfunc, deparse_context *context,
 		get_rule_expr((Node *) wfunc->aggfilter, context, false);
 	}
 
-	appendStringInfoString(buf, ") OVER ");
+	appendStringInfoString(buf, ") ");
+
+	if (wfunc->ignore_nulls == PARSER_IGNORE_NULLS)
+		appendStringInfoString(buf, "IGNORE NULLS ");
+
+	appendStringInfoString(buf, "OVER ");
 
 	if (context->windowClause)
 	{
@@ -13265,6 +13294,7 @@ generate_function_name(Oid funcid, int nargs, List *argnames, Oid *argtypes,
 	bool		use_variadic;
 	char	   *nspname;
 	FuncDetailCode p_result;
+	int			fgc_flags;
 	Oid			p_funcid;
 	Oid			p_rettype;
 	bool		p_retset;
@@ -13323,6 +13353,7 @@ generate_function_name(Oid funcid, int nargs, List *argnames, Oid *argtypes,
 		p_result = func_get_detail(list_make1(makeString(proname)),
 								   NIL, argnames, nargs, argtypes,
 								   !use_variadic, true, false,
+								   &fgc_flags,
 								   &p_funcid, &p_rettype,
 								   &p_retset, &p_nvargs, &p_vatype,
 								   &p_true_typeids, NULL);

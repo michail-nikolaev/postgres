@@ -19,10 +19,13 @@
 
 #include "access/nbtree.h"
 #include "access/reloptions.h"
+#include "access/relscan.h"
 #include "commands/progress.h"
 #include "miscadmin.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
+
 
 #define LOOK_AHEAD_REQUIRED_RECHECKS 	3
 #define LOOK_AHEAD_DEFAULT_DISTANCE 	5
@@ -59,13 +62,12 @@ static bool _bt_check_compare(IndexScanDesc scan, ScanDirection dir,
 							  IndexTuple tuple, int tupnatts, TupleDesc tupdesc,
 							  bool advancenonrequired, bool forcenonrequired,
 							  bool *continuescan, int *ikey);
+static bool _bt_rowcompare_cmpresult(ScanKey subkey, int cmpresult);
 static bool _bt_check_rowcompare(ScanKey skey,
 								 IndexTuple tuple, int tupnatts, TupleDesc tupdesc,
 								 ScanDirection dir, bool forcenonrequired, bool *continuescan);
 static void _bt_checkkeys_look_ahead(IndexScanDesc scan, BTReadPageState *pstate,
 									 int tupnatts, TupleDesc tupdesc);
-static int	_bt_keep_natts(Relation rel, IndexTuple lastleft,
-						   IndexTuple firstright, BTScanInsert itup_key);
 
 
 /*
@@ -1445,7 +1447,6 @@ _bt_advance_array_keys(IndexScanDesc scan, BTReadPageState *pstate,
 		BTArrayKeyInfo *array = NULL;
 		Datum		tupdatum;
 		bool		required = false,
-					required_opposite_direction_only = false,
 					tupnull;
 		int32		result;
 		int			set_elem = 0;
@@ -1469,8 +1470,7 @@ _bt_advance_array_keys(IndexScanDesc scan, BTReadPageState *pstate,
 				  (cur->sk_flags & (SK_BT_REQBKWD))) ||
 				 (ScanDirectionIsBackward(dir) &&
 				  (cur->sk_flags & (SK_BT_REQFWD)))))
-				has_required_opposite_direction_only =
-					required_opposite_direction_only = true;
+				has_required_opposite_direction_only = true;
 		}
 
 		/* Optimization: skip over known-satisfied scan keys */
@@ -2419,7 +2419,7 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 	lasttup = (IndexTuple) PageGetItem(pstate->page, iid);
 
 	/* Determine the first attribute whose values change on caller's page */
-	firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup);
+	firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup, NULL);
 
 	for (; startikey < so->numberOfKeys; startikey++)
 	{
@@ -2435,15 +2435,103 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 		 * Determine if it's safe to set pstate.startikey to an offset to a
 		 * key that comes after this key, by examining this key
 		 */
-		if (!(key->sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD)))
-		{
-			/* Scan key isn't marked required (corner case) */
-			break;				/* unsafe */
-		}
 		if (key->sk_flags & SK_ROW_HEADER)
 		{
-			/* RowCompare inequalities currently aren't supported */
-			break;				/* "unsafe" */
+			/* RowCompare inequality (header key) */
+			ScanKey		subkey = (ScanKey) DatumGetPointer(key->sk_argument);
+			bool		satisfied = false;
+
+			for (;;)
+			{
+				int			cmpresult;
+				bool		firstsatisfies = false;
+
+				if (subkey->sk_attno > firstchangingattnum) /* >, not >= */
+					break;		/* unsafe, preceding attr has multiple
+								 * distinct values */
+
+				if (subkey->sk_flags & SK_ISNULL)
+					break;		/* unsafe, unsatisfiable NULL subkey arg */
+
+				firstdatum = index_getattr(firsttup, subkey->sk_attno,
+										   tupdesc, &firstnull);
+				lastdatum = index_getattr(lasttup, subkey->sk_attno,
+										  tupdesc, &lastnull);
+
+				if (firstnull || lastnull)
+					break;		/* unsafe, NULL value won't satisfy subkey */
+
+				/*
+				 * Compare the first tuple's datum for this row compare member
+				 */
+				cmpresult = DatumGetInt32(FunctionCall2Coll(&subkey->sk_func,
+															subkey->sk_collation,
+															firstdatum,
+															subkey->sk_argument));
+				if (subkey->sk_flags & SK_BT_DESC)
+					INVERT_COMPARE_RESULT(cmpresult);
+
+				if (cmpresult != 0 || (subkey->sk_flags & SK_ROW_END))
+				{
+					firstsatisfies = _bt_rowcompare_cmpresult(subkey,
+															  cmpresult);
+					if (!firstsatisfies)
+					{
+						/* Unsafe, firstdatum does not satisfy subkey */
+						break;
+					}
+				}
+
+				/*
+				 * Compare the last tuple's datum for this row compare member
+				 */
+				cmpresult = DatumGetInt32(FunctionCall2Coll(&subkey->sk_func,
+															subkey->sk_collation,
+															lastdatum,
+															subkey->sk_argument));
+				if (subkey->sk_flags & SK_BT_DESC)
+					INVERT_COMPARE_RESULT(cmpresult);
+
+				if (cmpresult != 0 || (subkey->sk_flags & SK_ROW_END))
+				{
+					if (!firstsatisfies)
+					{
+						/*
+						 * It's only safe to set startikey beyond the row
+						 * compare header key when both firsttup and lasttup
+						 * satisfy the key as a whole based on the same
+						 * deciding subkey/attribute.  That can't happen now.
+						 */
+						break;	/* unsafe */
+					}
+
+					satisfied = _bt_rowcompare_cmpresult(subkey, cmpresult);
+					break;		/* safe iff 'satisfied' is true */
+				}
+
+				/* Move on to next row member/subkey */
+				if (subkey->sk_flags & SK_ROW_END)
+					break;		/* defensive */
+				subkey++;
+
+				/*
+				 * We deliberately don't check if the next subkey has the same
+				 * strategy as this iteration's subkey (which happens when
+				 * subkeys for both ASC and DESC columns are used together),
+				 * nor if any subkey is marked required.  This is safe because
+				 * in general all prior index attributes must have only one
+				 * distinct value (across all of the tuples on the page) in
+				 * order for us to even consider any subkey's attribute.
+				 */
+			}
+
+			if (satisfied)
+			{
+				/* Safe, row compare satisfied by every tuple on page */
+				continue;
+			}
+
+			break;				/* unsafe */
 		}
 		if (key->sk_strategy != BTEqualStrategyNumber)
 		{
@@ -2912,6 +3000,42 @@ _bt_check_compare(IndexScanDesc scan, ScanDirection dir,
 }
 
 /*
+ * Call here when a row compare member returns a non-zero result, or with the
+ * result for the final ROW_END row compare member (no matter the cmpresult).
+ *
+ * cmpresult indicates the overall result of the row comparison (must already
+ * be commuted for DESC subkeys), and subkey is the deciding row member.
+ */
+static bool
+_bt_rowcompare_cmpresult(ScanKey subkey, int cmpresult)
+{
+	bool		satisfied;
+
+	switch (subkey->sk_strategy)
+	{
+		case BTLessStrategyNumber:
+			satisfied = (cmpresult < 0);
+			break;
+		case BTLessEqualStrategyNumber:
+			satisfied = (cmpresult <= 0);
+			break;
+		case BTGreaterEqualStrategyNumber:
+			satisfied = (cmpresult >= 0);
+			break;
+		case BTGreaterStrategyNumber:
+			satisfied = (cmpresult > 0);
+			break;
+		default:
+			/* EQ and NE cases aren't allowed here */
+			elog(ERROR, "unexpected strategy number %d", subkey->sk_strategy);
+			satisfied = false;	/* keep compiler quiet */
+			break;
+	}
+
+	return satisfied;
+}
+
+/*
  * Test whether an indextuple satisfies a row-comparison scan condition.
  *
  * Return true if so, false if not.  If not, also clear *continuescan if
@@ -3091,31 +3215,8 @@ _bt_check_rowcompare(ScanKey skey, IndexTuple tuple, int tupnatts,
 		subkey++;
 	}
 
-	/*
-	 * At this point cmpresult indicates the overall result of the row
-	 * comparison, and subkey points to the deciding column (or the last
-	 * column if the result is "=").
-	 */
-	switch (subkey->sk_strategy)
-	{
-			/* EQ and NE cases aren't allowed here */
-		case BTLessStrategyNumber:
-			result = (cmpresult < 0);
-			break;
-		case BTLessEqualStrategyNumber:
-			result = (cmpresult <= 0);
-			break;
-		case BTGreaterEqualStrategyNumber:
-			result = (cmpresult >= 0);
-			break;
-		case BTGreaterStrategyNumber:
-			result = (cmpresult > 0);
-			break;
-		default:
-			elog(ERROR, "unexpected strategy number %d", subkey->sk_strategy);
-			result = 0;			/* keep compiler quiet */
-			break;
-	}
+	/* Final subkey/column determines if row compare is satisfied */
+	result = _bt_rowcompare_cmpresult(subkey, cmpresult);
 
 	if (!result && !forcenonrequired)
 	{
@@ -3292,7 +3393,6 @@ _bt_killitems(IndexScanDesc scan)
 		buf = _bt_getbuf(rel, so->currPos.currPage, BT_READ);
 
 		latestlsn = BufferGetLSNAtomic(buf);
-		Assert(!XLogRecPtrIsInvalid(so->currPos.lsn));
 		Assert(so->currPos.lsn <= latestlsn);
 		if (so->currPos.lsn != latestlsn)
 		{
@@ -3754,7 +3854,7 @@ _bt_truncate(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 	Assert(!BTreeTupleIsPivot(lastleft) && !BTreeTupleIsPivot(firstright));
 
 	/* Determine how many attributes must be kept in truncated tuple */
-	keepnatts = _bt_keep_natts(rel, lastleft, firstright, itup_key);
+	keepnatts = _bt_keep_natts(rel, lastleft, firstright, itup_key, NULL);
 
 #ifdef DEBUG_NO_TRUNCATE
 	/* Force truncation to be ineffective for testing purposes */
@@ -3872,17 +3972,24 @@ _bt_truncate(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 /*
  * _bt_keep_natts - how many key attributes to keep when truncating.
  *
+ * This is exported to be used as comparison function during concurrent
+ * unique index build in case _bt_keep_natts_fast is not suitable because
+ * collation is not "allequalimage"/deduplication-safe.
+ *
  * Caller provides two tuples that enclose a split point.  Caller's insertion
  * scankey is used to compare the tuples; the scankey's argument values are
  * not considered here.
+ *
+ * hasnulls value set to true in case of any null column in any tuple.
  *
  * This can return a number of attributes that is one greater than the
  * number of key attributes for the index relation.  This indicates that the
  * caller must use a heap TID as a unique-ifier in new pivot tuple.
  */
-static int
+int
 _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
-			   BTScanInsert itup_key)
+			   BTScanInsert itup_key,
+			   bool *hasnulls)
 {
 	int			nkeyatts = IndexRelationGetNumberOfKeyAttributes(rel);
 	TupleDesc	itupdesc = RelationGetDescr(rel);
@@ -3908,6 +4015,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 
 		datum1 = index_getattr(lastleft, attnum, itupdesc, &isNull1);
 		datum2 = index_getattr(firstright, attnum, itupdesc, &isNull2);
+		if (hasnulls)
+			(*hasnulls) |= (isNull1 || isNull2);
 
 		if (isNull1 != isNull2)
 			break;
@@ -3927,7 +4036,7 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
 	 * expected in an allequalimage index.
 	 */
 	Assert(!itup_key->allequalimage ||
-		   keepnatts == _bt_keep_natts_fast(rel, lastleft, firstright));
+		   keepnatts == _bt_keep_natts_fast(rel, lastleft, firstright, NULL));
 
 	return keepnatts;
 }
@@ -3938,7 +4047,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
  * This is exported so that a candidate split point can have its effect on
  * suffix truncation inexpensively evaluated ahead of time when finding a
  * split location.  A naive bitwise approach to datum comparisons is used to
- * save cycles.
+ * save cycles. Also, it may be used as comparison function during concurrent
+ * build of unique index.
  *
  * The approach taken here usually provides the same answer as _bt_keep_natts
  * will (for the same pair of tuples from a heapkeyspace index), since the
@@ -3946,6 +4056,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
  * unless they're bitwise equal after detoasting.  When an index only has
  * "equal image" columns, routine is guaranteed to give the same result as
  * _bt_keep_natts would.
+ *
+ * hasnulls value set to true in case of any null column in any tuple.
  *
  * Callers can rely on the fact that attributes considered equal here are
  * definitely also equal according to _bt_keep_natts, even when the index uses
@@ -3955,7 +4067,8 @@ _bt_keep_natts(Relation rel, IndexTuple lastleft, IndexTuple firstright,
  * more balanced split point.
  */
 int
-_bt_keep_natts_fast(Relation rel, IndexTuple lastleft, IndexTuple firstright)
+_bt_keep_natts_fast(Relation rel, IndexTuple lastleft, IndexTuple firstright,
+					bool *hasnulls)
 {
 	TupleDesc	itupdesc = RelationGetDescr(rel);
 	int			keysz = IndexRelationGetNumberOfKeyAttributes(rel);
@@ -3972,6 +4085,8 @@ _bt_keep_natts_fast(Relation rel, IndexTuple lastleft, IndexTuple firstright)
 
 		datum1 = index_getattr(lastleft, attnum, itupdesc, &isNull1);
 		datum2 = index_getattr(firstright, attnum, itupdesc, &isNull2);
+		if (hasnulls)
+			*hasnulls |= (isNull1 | isNull2);
 		att = TupleDescCompactAttr(itupdesc, attnum - 1);
 
 		if (isNull1 != isNull2)
