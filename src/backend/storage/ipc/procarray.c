@@ -1812,11 +1812,9 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			in_recovery)
 		{
 			/*
-			 * We can ignore this backend if it's running CREATE INDEX
-			 * CONCURRENTLY or REINDEX CONCURRENTLY on a "safe" index -- but
-			 * only on vacuums of user-defined tables.
+			 * Ignore this backend if it's requested, but only for user tables.
 			 */
-			if (!(statusFlags & PROC_IN_SAFE_IC))
+			if (!(statusFlags & PROC_AFFECTS_ONLY_CATALOG))
 				h->data_oldest_nonremovable =
 					TransactionIdOlder(h->data_oldest_nonremovable, xmin);
 

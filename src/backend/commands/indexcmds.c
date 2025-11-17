@@ -114,7 +114,7 @@ static bool ReindexRelationConcurrently(const ReindexStmt *stmt,
 										Oid relationOid,
 										const ReindexParams *params);
 static void update_relispartition(Oid relationId, bool newval);
-static inline void set_indexsafe_procflags(void);
+static inline void set_procflags(bool safe_index);
 
 /*
  * callback argument type for RangeVarCallbackForReindexIndex()
@@ -1644,9 +1644,10 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
+	/* Update proc flags to:
+	 * force xmin of backend to affect only catalog horizon
+	 * tell concurrent index builds to ignore us, if index qualifies */
+	set_procflags(safe_index);
 
 	/*
 	 * The index is now visible, so we can report the OID.  While on it,
@@ -1716,9 +1717,10 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
+	/* Update proc flags to:
+	 * force xmin of backend to affect only catalog horizon
+	 * tell concurrent index builds to ignore us, if index qualifies */
+	set_procflags(safe_index);
 
 	/*
 	 * Phase 3 of concurrent index build
@@ -1776,9 +1778,10 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Tell concurrent index builds to ignore us, if index qualifies */
-	if (safe_index)
-		set_indexsafe_procflags();
+	/* Update proc flags to:
+	 * force xmin of backend to affect only catalog horizon
+	 * tell concurrent index builds to ignore us, if index qualifies */
+	set_procflags(safe_index);
 
 	/* We should now definitely not be advertising any xmin. */
 	Assert(MyProc->xmin == InvalidTransactionId);
@@ -4102,9 +4105,10 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Tell concurrent indexing to ignore us, if index qualifies */
-		if (newidx->safe)
-			set_indexsafe_procflags();
+		/* Update proc flags to:
+		 * force xmin of backend to affect only catalog horizon
+		 * tell concurrent index builds to ignore us, if index qualifies */
+		set_procflags(newidx->safe);
 
 		/* Set ActiveSnapshot since functions in the indexes may need it */
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -4162,9 +4166,10 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Tell concurrent indexing to ignore us, if index qualifies */
-		if (newidx->safe)
-			set_indexsafe_procflags();
+		/* Update proc flags to:
+		 * force xmin of backend to affect only catalog horizon
+		 * tell concurrent index builds to ignore us, if index qualifies */
+		set_procflags(newidx->safe);
 
 		/*
 		 * Take the "reference snapshot" that will be used by validate_index()
@@ -4237,7 +4242,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * any index operations, we can set the PROC_IN_SAFE_IC flag here
 	 * unconditionally.
 	 */
-	set_indexsafe_procflags();
+	set_procflags(true);
 
 	forboth(lc, indexIds, lc2, newIndexIds)
 	{
@@ -4593,7 +4598,7 @@ update_relispartition(Oid relationId, bool newval)
 }
 
 /*
- * Set the PROC_IN_SAFE_IC flag in MyProc->statusFlags.
+ * Set the PROC_IN_SAFE_IC flag and PROC_AFFECTS_ONLY_CATALOG in MyProc->statusFlags.
  *
  * When doing concurrent index builds, we can set this flag
  * to tell other processes concurrently running CREATE
@@ -4611,7 +4616,7 @@ update_relispartition(Oid relationId, bool newval)
  * set for each transaction.)
  */
 static inline void
-set_indexsafe_procflags(void)
+set_procflags(bool safe_index)
 {
 	/*
 	 * This should only be called before installing xid or xmin in MyProc;
@@ -4621,7 +4626,9 @@ set_indexsafe_procflags(void)
 		   MyProc->xmin == InvalidTransactionId);
 
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags |= PROC_IN_SAFE_IC;
+	if (safe_index)
+		MyProc->statusFlags |= PROC_IN_SAFE_IC;
+	MyProc->statusFlags |= PROC_AFFECTS_ONLY_CATALOG;
 	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
 	LWLockRelease(ProcArrayLock);
 }

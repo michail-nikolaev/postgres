@@ -66,16 +66,19 @@ struct XidCache
 #define		PROC_AFFECTS_ALL_HORIZONS	0x20	/* this proc's xmin must be
 												 * included in vacuum horizons
 												 * in all databases */
+#define		PROC_AFFECTS_ONLY_CATALOG	0x40	/* this proc's xmin must be
+												 * included only in catalog vacuum
+												 * horizons only  */
 
 /* flags reset at EOXact */
 #define		PROC_VACUUM_STATE_MASK \
-	(PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_VACUUM_FOR_WRAPAROUND)
+	(PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_VACUUM_FOR_WRAPAROUND | PROC_AFFECTS_ONLY_CATALOG)
 
 /*
  * Xmin-related flags. Make sure any flags that affect how the process' Xmin
  * value is interpreted by VACUUM are included here.
  */
-#define		PROC_XMIN_FLAGS (PROC_IN_VACUUM | PROC_IN_SAFE_IC)
+#define		PROC_XMIN_FLAGS (PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_AFFECTS_ONLY_CATALOG)
 
 /*
  * We allow a limited number of "weak" relation locks (AccessShareLock,

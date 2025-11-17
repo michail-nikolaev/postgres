@@ -2113,10 +2113,9 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	/*
 	 * The only possible status flag that can be set to the parallel worker is
-	 * PROC_IN_SAFE_IC.
+	 * PROC_IN_SAFE_IC and PROC_AFFECTS_ONLY_CATALOG.
 	 */
-	Assert((MyProc->statusFlags == 0) ||
-		   (MyProc->statusFlags == PROC_IN_SAFE_IC));
+	Assert((MyProc->statusFlags & ~(PROC_IN_SAFE_IC | PROC_AFFECTS_ONLY_CATALOG)) == 0);
 
 	/* Set debug_query_string for individual workers first */
 	sharedquery = shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT, true);
