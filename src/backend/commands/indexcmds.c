@@ -38,7 +38,6 @@
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
 #include "commands/comment.h"
-#include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
 #include "commands/progress.h"
@@ -182,6 +181,7 @@ CheckIndexCompatible(Oid oldId,
 					 bool isWithoutOverlaps)
 {
 	bool		isconstraint;
+	bool		isauxiliary;
 	Oid		   *typeIds;
 	Oid		   *collationIds;
 	Oid		   *opclassIds;
@@ -232,6 +232,7 @@ CheckIndexCompatible(Oid oldId,
 
 	amcanorder = amRoutine->amcanorder;
 	amsummarizing = amRoutine->amsummarizing;
+	isauxiliary = accessMethodId == STIR_AM_OID;
 
 	/*
 	 * Compute the operator classes, collations, and exclusion operators for
@@ -243,7 +244,8 @@ CheckIndexCompatible(Oid oldId,
 	 */
 	indexInfo = makeIndexInfo(numberOfAttributes, numberOfAttributes,
 							  accessMethodId, NIL, NIL, false, false,
-							  false, false, amsummarizing, isWithoutOverlaps);
+							  false, false, amsummarizing,
+							  isWithoutOverlaps, isauxiliary, InvalidOid);
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
 	opclassIds = palloc_array(Oid, numberOfAttributes);
@@ -553,6 +555,7 @@ DefineIndex(Oid tableId,
 {
 	bool		concurrent;
 	char	   *indexRelationName;
+	char	   *auxIndexRelationName = NULL;
 	char	   *accessMethodName;
 	Oid		   *typeIds;
 	Oid		   *collationIds;
@@ -562,6 +565,7 @@ DefineIndex(Oid tableId,
 	Oid			namespaceId;
 	Oid			tablespaceId;
 	Oid			createdConstraintId = InvalidOid;
+	Oid			auxIndexRelationId = InvalidOid;
 	List	   *indexColNames;
 	List	   *allIndexParams;
 	Relation	rel;
@@ -583,10 +587,10 @@ DefineIndex(Oid tableId,
 	int			numberOfKeyAttributes;
 	TransactionId limitXmin;
 	ObjectAddress address;
+	ObjectAddress auxAddress;
 	LockRelId	heaprelid;
 	LOCKTAG		heaplocktag;
 	LOCKMODE	lockmode;
-	Snapshot	snapshot;
 	Oid			root_save_userid;
 	int			root_save_sec_context;
 	int			root_save_nestlevel;
@@ -833,6 +837,15 @@ DefineIndex(Oid tableId,
 											stmt->excludeOpNames,
 											stmt->primary,
 											stmt->isconstraint);
+	/*
+	 * Select name for auxiliary index
+	 */
+	if (concurrent)
+		auxIndexRelationName = ChooseRelationName(indexRelationName,
+												  NULL,
+												  "ccaux",
+												  namespaceId,
+												  false);
 
 	/*
 	 * look up the access method, verify it can handle the requested features
@@ -928,7 +941,9 @@ DefineIndex(Oid tableId,
 							  !concurrent,
 							  concurrent,
 							  amissummarizing,
-							  stmt->iswithoutoverlaps);
+							  stmt->iswithoutoverlaps,
+							  false,
+							  InvalidOid);
 
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
@@ -1593,6 +1608,16 @@ DefineIndex(Oid tableId,
 		return address;
 	}
 
+	/*
+	 * In case of concurrent build - create auxiliary index record.
+	 */
+	if (concurrent)
+	{
+		auxIndexRelationId = index_concurrently_create_aux(rel, indexRelationId,
+											tablespaceId, auxIndexRelationName);
+		ObjectAddressSet(auxAddress, RelationRelationId, auxIndexRelationId);
+	}
+
 	AtEOXact_GUC(false, root_save_nestlevel);
 	SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
 
@@ -1621,11 +1646,11 @@ DefineIndex(Oid tableId,
 	/*
 	 * For a concurrent build, it's important to make the catalog entries
 	 * visible to other transactions before we start to build the index. That
-	 * will prevent them from making incompatible HOT updates.  The new index
-	 * will be marked not indisready and not indisvalid, so that no one else
-	 * tries to either insert into it or use it for queries.
+	 * will prevent them from making incompatible HOT updates. New indexes
+	 * (main and auxiliary) will be marked not indisready and not indisvalid,
+	 * so that no one else tries to either insert into it or use it for queries.
 	 *
-	 * We must commit our current transaction so that the index becomes
+	 * We must commit our current transaction so that the indexes becomes
 	 * visible; then start another.  Note that all the data structures we just
 	 * built are lost in the commit.  The only data we keep past here are the
 	 * relation IDs.
@@ -1635,7 +1660,7 @@ DefineIndex(Oid tableId,
 	 * cannot block, even if someone else is waiting for access, because we
 	 * already have the same lock within our transaction.
 	 *
-	 * Note: we don't currently bother with a session lock on the index,
+	 * Note: we don't currently bother with a session lock on the indexes,
 	 * because there are no operations that could change its state while we
 	 * hold lock on the parent table.  This might need to change later.
 	 */
@@ -1674,7 +1699,7 @@ DefineIndex(Oid tableId,
 	 * with the old list of indexes.  Use ShareLock to consider running
 	 * transactions that hold locks that permit writing to the table.  Note we
 	 * do not need to worry about xacts that open the table for writing after
-	 * this point; they will see the new index when they open it.
+	 * this point; they will see the new indexes when they open it.
 	 *
 	 * Note: the reason we use actual lock acquisition here, rather than just
 	 * checking the ProcArray and sleeping, is that deadlock is possible if
@@ -1686,13 +1711,43 @@ DefineIndex(Oid tableId,
 
 	/*
 	 * At this moment we are sure that there are no transactions with the
-	 * table open for write that don't have this new index in their list of
+	 * table open for write that don't have this new indexes in their list of
 	 * indexes.  We have waited out all the existing transactions and any new
-	 * transaction will have the new index in its list, but the index is still
-	 * marked as "not-ready-for-inserts".  The index is consulted while
+	 * transaction will have both new indexes in its list, but indexes are still
+	 * marked as "not-ready-for-inserts". The indexes are consulted while
 	 * deciding HOT-safety though.  This arrangement ensures that no new HOT
 	 * chains can be created where the new tuple and the old tuple in the
 	 * chain have different index keys.
+	 *
+	 * Now call build on auxiliary index. Index will be created empty without
+	 * any actual heap scan, but marked as "ready-for-inserts". The goal of
+	 * that index is accumulate new tuples while main index is actually built.
+	 */
+
+	/* Set ActiveSnapshot since functions in the indexes may need it */
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	index_concurrently_build(tableId, auxIndexRelationId);
+	/* we can do away with our snapshot */
+	PopActiveSnapshot();
+
+	CommitTransactionCommand();
+	StartTransactionCommand();
+
+	/* Tell concurrent index builds to ignore us, if index qualifies */
+	if (safe_index)
+		set_indexsafe_procflags();
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
+							 PROGRESS_CREATEIDX_PHASE_WAIT_2);
+	/*
+	 * Now we need to ensure are no transactions with the with auxiliary index
+	 * marked as "not-ready-for-inserts".
+	 */
+	WaitForLockers(heaplocktag, ShareLock, true);
+
+	/*
+	 * At this moment we are sure what all new tuples in table are inserted into
+	 * auxiliary index. Now it is time to build the target index itself.
 	 *
 	 * We now take a new snapshot, and build the index using all tuples that
 	 * are visible in this snapshot.  We can be sure that any HOT updates to
@@ -1728,43 +1783,31 @@ DefineIndex(Oid tableId,
 	 * the index marked as read-only for updates.
 	 */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
+								 PROGRESS_CREATEIDX_PHASE_WAIT_3);
 	WaitForLockers(heaplocktag, ShareLock, true);
 
 	/*
-	 * Now take the "reference snapshot" that will be used by validate_index()
-	 * to filter candidate tuples.  Beware!  There might still be snapshots in
-	 * use that treat some transaction as in-progress that our reference
-	 * snapshot treats as committed.  If such a recently-committed transaction
-	 * deleted tuples in the table, we will not include them in the index; yet
-	 * those transactions which see the deleting one as still-in-progress will
-	 * expect such tuples to be there once we mark the index as valid.
-	 *
-	 * We solve this by waiting for all endangered transactions to exit before
-	 * we mark the index as valid.
-	 *
-	 * We also set ActiveSnapshot to this snap, since functions in indexes may
-	 * need a snapshot.
+	 * Updating pg_index might involve TOAST table access, so ensure we
+	 * have a valid snapshot.
 	 */
-	snapshot = RegisterSnapshot(GetTransactionSnapshot());
-	PushActiveSnapshot(snapshot);
-
+	PushActiveSnapshot(GetTransactionSnapshot());
 	/*
-	 * Scan the index and the heap, insert any missing index entries.
+	 * Now target index is marked as "ready" for all transactions. So, auxiliary
+	 * index is not more needed. So, start removing process by reverting "ready"
+	 * flag.
 	 */
-	validate_index(tableId, indexRelationId, snapshot);
-
-	/*
-	 * Drop the reference snapshot.  We must do this before waiting out other
-	 * snapshot holders, else we will deadlock against other processes also
-	 * doing CREATE INDEX CONCURRENTLY, which would see our snapshot as one
-	 * they must wait for.  But first, save the snapshot's xmin to use as
-	 * limitXmin for GetCurrentVirtualXIDs().
-	 */
-	limitXmin = snapshot->xmin;
-
+	index_set_state_flags(auxIndexRelationId, INDEX_DROP_CLEAR_READY);
 	PopActiveSnapshot();
-	UnregisterSnapshot(snapshot);
+
+	CommitTransactionCommand();
+	StartTransactionCommand();
+	/* Tell concurrent index builds to ignore us, if index qualifies */
+	if (safe_index)
+		set_indexsafe_procflags();
+	/*
+	 * Merge content of auxiliary and target indexes - insert any missing index entries.
+	 */
+	limitXmin = validate_index(tableId, indexRelationId, auxIndexRelationId);
 
 	/*
 	 * The snapshot subsystem could still contain registered snapshots that
@@ -1787,11 +1830,12 @@ DefineIndex(Oid tableId,
 	/*
 	 * The index is now valid in the sense that it contains all currently
 	 * interesting tuples.  But since it might not contain tuples deleted just
-	 * before the reference snap was taken, we have to wait out any
-	 * transactions that might have older snapshots.
+	 * before the last snapshot during validating was taken, we have to wait
+	 * out any transactions that might have older snapshots.
 	 */
+	INJECTION_POINT("define_index_before_set_valid", NULL);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-								 PROGRESS_CREATEIDX_PHASE_WAIT_3);
+								 PROGRESS_CREATEIDX_PHASE_WAIT_4);
 	WaitForOlderSnapshots(limitXmin, true);
 
 	/*
@@ -1816,6 +1860,53 @@ DefineIndex(Oid tableId,
 	 * to replan; so relcache flush on the index itself was sufficient.)
 	 */
 	CacheInvalidateRelcacheByRelid(heaprelid.relId);
+	CommitTransactionCommand();
+	StartTransactionCommand();
+
+	/* Tell concurrent index builds to ignore us, if index qualifies */
+	if (safe_index)
+		set_indexsafe_procflags();
+
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
+							 PROGRESS_CREATEIDX_PHASE_WAIT_5);
+	/* Now wait for all transaction to see auxiliary as "non-ready for inserts" */
+	WaitForLockers(heaplocktag, AccessExclusiveLock, true);
+
+	CommitTransactionCommand();
+	StartTransactionCommand();
+
+	/*
+	 * Updating pg_index might involve TOAST table access, so ensure we
+	 * have a valid snapshot.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
+	/* Now it is time to mark auxiliary index as dead */
+	index_concurrently_set_dead(tableId, auxIndexRelationId);
+	PopActiveSnapshot();
+
+	CommitTransactionCommand();
+	StartTransactionCommand();
+
+	/* Tell concurrent index builds to ignore us, if index qualifies */
+	if (safe_index)
+		set_indexsafe_procflags();
+
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
+							 PROGRESS_CREATEIDX_PHASE_WAIT_6);
+	/* Now wait for all transaction to ignore auxiliary because it is dead */
+	WaitForLockers(heaplocktag, AccessExclusiveLock, true);
+
+	CommitTransactionCommand();
+	StartTransactionCommand();
+
+	/*
+	 * Drop auxiliary index.
+	 *
+	 * Use PERFORM_DELETION_CONCURRENT_LOCK so that index_drop() uses the
+	 * right lock level.
+	 */
+	performDeletion(&auxAddress, DROP_RESTRICT,
+							 PERFORM_DELETION_CONCURRENT_LOCK | PERFORM_DELETION_INTERNAL);
 
 	/*
 	 * Last thing to do is release the session-level lock on the parent table.
@@ -2977,6 +3068,7 @@ RangeVarCallbackForReindexIndex(const RangeVar *relation,
 	struct ReindexIndexCallbackState *state = arg;
 	LOCKMODE	table_lockmode;
 	Oid			table_oid;
+	AclResult	aclresult;
 
 	/*
 	 * Lock level here should match table lock in reindex_index() for
@@ -3001,43 +3093,42 @@ RangeVarCallbackForReindexIndex(const RangeVar *relation,
 	if (!OidIsValid(relId))
 		return;
 
-	/*
-	 * If the relation does exist, check whether it's an index.  But note that
-	 * the relation might have been dropped between the time we did the name
-	 * lookup and now.  In that case, there's nothing to do.
-	 */
+	/* If the relation does exist, check whether it's an index. */
 	relkind = get_rel_relkind(relId);
-	if (!relkind)
-		return;
 	if (relkind != RELKIND_INDEX &&
 		relkind != RELKIND_PARTITIONED_INDEX)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not an index", relation->relname)));
 
-	/* Check permissions */
-	table_oid = IndexGetRelation(relId, true);
-	if (OidIsValid(table_oid))
-	{
-		AclResult	aclresult;
+	/* Look up the index's table. */
+	table_oid = IndexGetRelation(relId, false);
 
-		aclresult = pg_class_aclcheck(table_oid, GetUserId(), ACL_MAINTAIN);
-		if (aclresult != ACLCHECK_OK)
-			aclcheck_error(aclresult, OBJECT_INDEX, relation->relname);
-	}
+	/*
+	 * In the unlikely event that, upon retry, we get the same index OID with
+	 * a different table OID, fail.  RangeVarGetRelidExtended() will have
+	 * already locked the index in this case, and it won't retry again, so we
+	 * can't lock the newly discovered table OID without risking deadlock.
+	 * Also, while this corner case is indeed possible, it is extremely
+	 * unlikely to happen in practice, so it's probably not worth any more
+	 * effort than this.
+	 */
+	if (relId == oldRelId && table_oid != state->locked_table_oid)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("index \"%s\" was concurrently dropped",
+						relation->relname)));
+
+	/* Check permissions. */
+	aclresult = pg_class_aclcheck(table_oid, GetUserId(), ACL_MAINTAIN);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, OBJECT_INDEX, relation->relname);
 
 	/* Lock heap before index to avoid deadlock. */
 	if (relId != oldRelId)
 	{
-		/*
-		 * If the OID isn't valid, it means the index was concurrently
-		 * dropped, which is not a problem for us; just return normally.
-		 */
-		if (OidIsValid(table_oid))
-		{
-			LockRelationOid(table_oid, table_lockmode);
-			state->locked_table_oid = table_oid;
-		}
+		LockRelationOid(table_oid, table_lockmode);
+		state->locked_table_oid = table_oid;
 	}
 }
 
@@ -3570,6 +3661,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	typedef struct ReindexIndexInfo
 	{
 		Oid			indexId;
+		Oid			auxIndexId;
+		Oid			junkAuxIndexId;
 		Oid			tableId;
 		Oid			amId;
 		bool		safe;		/* for set_indexsafe_procflags */
@@ -3675,8 +3768,15 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 					Oid			cellOid = lfirst_oid(lc);
 					Relation	indexRelation = index_open(cellOid,
 														   ShareUpdateExclusiveLock);
+					IndexInfo*	indexInfo = BuildDummyIndexInfo(indexRelation);
 
-					if (!indexRelation->rd_index->indisvalid)
+
+					if (indexInfo->ii_Auxiliary)
+						ereport(WARNING,(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("skipping reindex of auxiliary index \"%s.%s\"",
+									get_namespace_name(get_rel_namespace(cellOid)),
+									get_rel_name(cellOid))));
+					else if (!indexRelation->rd_index->indisvalid)
 						ereport(WARNING,
 								(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 								 errmsg("skipping reindex of invalid index \"%s.%s\"",
@@ -3728,8 +3828,15 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 						Oid			cellOid = lfirst_oid(lc2);
 						Relation	indexRelation = index_open(cellOid,
 															   ShareUpdateExclusiveLock);
+						IndexInfo*	indexInfo = BuildDummyIndexInfo(indexRelation);
 
-						if (!indexRelation->rd_index->indisvalid)
+						if (indexInfo->ii_Auxiliary)
+							ereport(WARNING,
+									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+									 errmsg("skipping reindex of auxiliary index \"%s.%s\"",
+											get_namespace_name(get_rel_namespace(cellOid)),
+											get_rel_name(cellOid))));
+						else if (!indexRelation->rd_index->indisvalid)
 							ereport(WARNING,
 									(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 									 errmsg("skipping reindex of invalid index \"%s.%s\"",
@@ -3789,6 +3896,13 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot reindex invalid index on TOAST table")));
+
+				/* Auxiliary indexes are not allowed to be rebuilt */
+				if (get_rel_relam(relationOid) == STIR_AM_OID)
+					ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("reindex of auxiliary index \"%s\" not supported",
+								get_rel_name(relationOid))));
 
 				/*
 				 * Check if parent relation can be locked and if it exists,
@@ -3893,15 +4007,20 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	foreach(lc, indexIds)
 	{
 		char	   *concurrentName;
+		char	   *auxConcurrentName;
 		ReindexIndexInfo *idx = lfirst(lc);
 		ReindexIndexInfo *newidx;
 		Oid			newIndexId;
+		Oid			auxIndexId;
+		Oid			junkAuxIndexId;
 		Relation	indexRel;
 		Relation	heapRel;
 		Oid			save_userid;
 		int			save_sec_context;
 		int			save_nestlevel;
 		Relation	newIndexRel;
+		Relation	auxIndexRel;
+		Relation	junkAuxIndexRel;
 		LockRelId  *lockrelid;
 		Oid			tablespaceid;
 
@@ -3952,6 +4071,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 											"ccnew",
 											get_rel_namespace(indexRel->rd_index->indrelid),
 											false);
+		auxConcurrentName = ChooseRelationName(get_rel_name(idx->indexId),
+											NULL,
+											"ccaux",
+											get_rel_namespace(indexRel->rd_index->indrelid),
+											false);
 
 		/* Choose the new tablespace, indexes of toast tables are not moved */
 		if (OidIsValid(params->tablespaceOid) &&
@@ -3965,12 +4089,22 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 													idx->indexId,
 													tablespaceid,
 													concurrentName);
+		auxIndexId = index_concurrently_create_aux(heapRel,
+												   newIndexId,
+												   tablespaceid,
+												   auxConcurrentName);
+
+		/* Search for auxiliary index for reindexed index, to drop it */
+		junkAuxIndexId = get_auxiliary_index(idx->indexId);
 
 		/*
 		 * Now open the relation of the new index, a session-level lock is
 		 * also needed on it.
 		 */
 		newIndexRel = index_open(newIndexId, ShareUpdateExclusiveLock);
+		auxIndexRel = index_open(auxIndexId, ShareUpdateExclusiveLock);
+		if (OidIsValid(junkAuxIndexId))
+			junkAuxIndexRel = index_open(junkAuxIndexId, ShareUpdateExclusiveLock);
 
 		/*
 		 * Save the list of OIDs and locks in private context
@@ -3979,6 +4113,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 		newidx = palloc_object(ReindexIndexInfo);
 		newidx->indexId = newIndexId;
+		newidx->auxIndexId = auxIndexId;
+		newidx->junkAuxIndexId = junkAuxIndexId;
 		newidx->safe = idx->safe;
 		newidx->tableId = idx->tableId;
 		newidx->amId = idx->amId;
@@ -3997,10 +4133,22 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		lockrelid = palloc_object(LockRelId);
 		*lockrelid = newIndexRel->rd_lockInfo.lockRelId;
 		relationLocks = lappend(relationLocks, lockrelid);
+		lockrelid = palloc_object(LockRelId);
+		*lockrelid = auxIndexRel->rd_lockInfo.lockRelId;
+		relationLocks = lappend(relationLocks, lockrelid);
+		if (OidIsValid(junkAuxIndexId))
+		{
+			lockrelid = palloc_object(LockRelId);
+			*lockrelid = junkAuxIndexRel->rd_lockInfo.lockRelId;
+			relationLocks = lappend(relationLocks, lockrelid);
+		}
 
 		MemoryContextSwitchTo(oldcontext);
 
 		index_close(indexRel, NoLock);
+		if (OidIsValid(junkAuxIndexId))
+			index_close(junkAuxIndexRel, NoLock);
+		index_close(auxIndexRel, NoLock);
 		index_close(newIndexRel, NoLock);
 
 		/* Roll back any GUC changes executed by index functions */
@@ -4081,13 +4229,60 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * doing that, wait until no running transactions could have the table of
 	 * the index open with the old list of indexes.  See "phase 2" in
 	 * DefineIndex() for more details.
-	 */
+	*/
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-								 PROGRESS_CREATEIDX_PHASE_WAIT_1);
+							 PROGRESS_CREATEIDX_PHASE_WAIT_1);
 	WaitForLockersMultiple(lockTags, ShareLock, true);
 	CommitTransactionCommand();
 
+	/*
+	 * Now build all auxiliary indexes and mark them as "ready-for-inserts".
+	 */
+	foreach(lc, newIndexIds)
+	{
+		ReindexIndexInfo *newidx = lfirst(lc);
+
+		StartTransactionCommand();
+
+		/*
+		 * Check for user-requested abort.  This is inside a transaction so as
+		 * xact.c does not issue a useless WARNING, and ensures that
+		 * session-level locks are cleaned up on abort.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
+		/* Tell concurrent indexing to ignore us, if index qualifies */
+		if (newidx->safe)
+			set_indexsafe_procflags();
+
+		/* Set ActiveSnapshot since functions in the indexes may need it */
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+		/* Build auxiliary index, it is fast - without any actual heap scan, just an empty index. */
+		index_concurrently_build(newidx->tableId, newidx->auxIndexId);
+
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+
+	StartTransactionCommand();
+
+	/*
+	 * Because we don't take a snapshot in this transaction, there's no need
+	 * to set the PROC_IN_SAFE_IC flag here.
+	 */
+
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
+								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
+	/*
+	 * Wait until all auxiliary indexes are taken into account by all
+	 * transactions.
+	 */
+	WaitForLockersMultiple(lockTags, ShareLock, true);
+	CommitTransactionCommand();
+
+	/* Now it is time to perform target index build. */
 	foreach(lc, newIndexIds)
 	{
 		ReindexIndexInfo *newidx = lfirst(lc);
@@ -4134,6 +4329,45 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * need to set the PROC_IN_SAFE_IC flag here.
 	 */
 
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
+								 PROGRESS_CREATEIDX_PHASE_WAIT_3);
+	WaitForLockersMultiple(lockTags, ShareLock, true);
+	CommitTransactionCommand();
+
+	/*
+	 * At this moment all target indexes are marked as "ready-to-insert". So,
+	 * we are free to start process of dropping auxiliary indexes - including
+	 * just indexes detected earlier.
+	 */
+	foreach(lc, newIndexIds)
+	{
+		ReindexIndexInfo *newidx = lfirst(lc);
+		StartTransactionCommand();
+		/*
+		 * Check for user-requested abort.  This is inside a transaction so as
+		 * xact.c does not issue a useless WARNING, and ensures that
+		 * session-level locks are cleaned up on abort.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
+		/* Tell concurrent indexing to ignore us, if index qualifies */
+		if (newidx->safe)
+			set_indexsafe_procflags();
+
+		/*
+		 * Updating pg_index might involve TOAST table access, so ensure we
+		 * have a valid snapshot.
+		 */
+		PushActiveSnapshot(GetTransactionSnapshot());
+		index_set_state_flags(newidx->auxIndexId, INDEX_DROP_CLEAR_READY);
+		/* Ensure just index is marked as non-ready */
+		if (OidIsValid(newidx->junkAuxIndexId))
+			index_set_state_flags(newidx->junkAuxIndexId, INDEX_DROP_CLEAR_READY);
+		PopActiveSnapshot();
+
+		CommitTransactionCommand();
+	}
+
 	/*
 	 * Phase 3 of REINDEX CONCURRENTLY
 	 *
@@ -4141,17 +4375,10 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * were created during the previous phase.  See "phase 3" in DefineIndex()
 	 * for more details.
 	 */
-
-	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
-	WaitForLockersMultiple(lockTags, ShareLock, true);
-	CommitTransactionCommand();
-
 	foreach(lc, newIndexIds)
 	{
 		ReindexIndexInfo *newidx = lfirst(lc);
 		TransactionId limitXmin;
-		Snapshot	snapshot;
 
 		StartTransactionCommand();
 
@@ -4167,13 +4394,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 			set_indexsafe_procflags();
 
 		/*
-		 * Take the "reference snapshot" that will be used by validate_index()
-		 * to filter candidate tuples.
-		 */
-		snapshot = RegisterSnapshot(GetTransactionSnapshot());
-		PushActiveSnapshot(snapshot);
-
-		/*
 		 * Update progress for the index to build, with the correct parent
 		 * table involved.
 		 */
@@ -4184,16 +4404,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		progress_vals[3] = newidx->amId;
 		pgstat_progress_update_multi_param(4, progress_index, progress_vals);
 
-		validate_index(newidx->tableId, newidx->indexId, snapshot);
-
-		/*
-		 * We can now do away with our active snapshot, we still need to save
-		 * the xmin limit to wait for older snapshots.
-		 */
-		limitXmin = snapshot->xmin;
-
-		PopActiveSnapshot();
-		UnregisterSnapshot(snapshot);
+		limitXmin = validate_index(newidx->tableId, newidx->indexId, newidx->auxIndexId);
+		Assert(!TransactionIdIsValid(MyProc->xmin));
 
 		/*
 		 * To ensure no deadlocks, we must commit and start yet another
@@ -4206,14 +4418,14 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/*
 		 * The index is now valid in the sense that it contains all currently
 		 * interesting tuples.  But since it might not contain tuples deleted
-		 * just before the reference snap was taken, we have to wait out any
+		 * just before the latest snap was taken, we have to wait out any
 		 * transactions that might have older snapshots.
 		 *
 		 * Because we don't take a snapshot or Xid in this transaction,
 		 * there's no need to set the PROC_IN_SAFE_IC flag here.
 		 */
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-									 PROGRESS_CREATEIDX_PHASE_WAIT_3);
+									 PROGRESS_CREATEIDX_PHASE_WAIT_4);
 		WaitForOlderSnapshots(limitXmin, true);
 
 		CommitTransactionCommand();
@@ -4229,7 +4441,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * the same time to make sure we only get constraint violations from the
 	 * indexes with the correct names.
 	 */
-
+	INJECTION_POINT("reindex_relation_concurrently_before_swap", NULL);
 	StartTransactionCommand();
 
 	/*
@@ -4303,13 +4515,14 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	/*
 	 * Phase 5 of REINDEX CONCURRENTLY
 	 *
-	 * Mark the old indexes as dead.  First we must wait until no running
-	 * transaction could be using the index for a query.  See also
+	 * Mark the old and auxiliary indexes as dead. First we must wait until no
+	 * running transaction could be using the index for a query.  See also
 	 * index_drop() for more details.
 	 */
 
+	INJECTION_POINT("reindex_relation_concurrently_before_set_dead", NULL);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-								 PROGRESS_CREATEIDX_PHASE_WAIT_4);
+								 PROGRESS_CREATEIDX_PHASE_WAIT_5);
 	WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
 
 	foreach(lc, indexIds)
@@ -4334,6 +4547,30 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		PopActiveSnapshot();
 	}
 
+	foreach(lc, newIndexIds)
+	{
+		ReindexIndexInfo *newidx = lfirst(lc);
+
+		/*
+		 * Check for user-requested abort.  This is inside a transaction so as
+		 * xact.c does not issue a useless WARNING, and ensures that
+		 * session-level locks are cleaned up on abort.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Updating pg_index might involve TOAST table access, so ensure we
+		 * have a valid snapshot.
+		 */
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+		index_concurrently_set_dead(newidx->tableId, newidx->auxIndexId);
+		if (OidIsValid(newidx->junkAuxIndexId))
+			index_concurrently_set_dead(newidx->tableId, newidx->junkAuxIndexId);
+
+		PopActiveSnapshot();
+	}
+
 	/* Commit this transaction to make the updates visible. */
 	CommitTransactionCommand();
 	StartTransactionCommand();
@@ -4347,11 +4584,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	/*
 	 * Phase 6 of REINDEX CONCURRENTLY
 	 *
-	 * Drop the old indexes.
+	 * Drop the old and auxiliary indexes.
 	 */
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
-								 PROGRESS_CREATEIDX_PHASE_WAIT_5);
+								 PROGRESS_CREATEIDX_PHASE_WAIT_6);
 	WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
 
 	PushActiveSnapshot(GetTransactionSnapshot());
@@ -4369,6 +4606,26 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 			object.objectSubId = 0;
 
 			add_exact_object_address(&object, objects);
+		}
+
+		foreach(lc, newIndexIds)
+		{
+			ReindexIndexInfo *idx = lfirst(lc);
+			ObjectAddress object;
+
+			object.classId = RelationRelationId;
+			object.objectId = idx->auxIndexId;
+			object.objectSubId = 0;
+
+			add_exact_object_address(&object, objects);
+
+			if (OidIsValid(idx->junkAuxIndexId))
+			{
+
+				object.objectId = idx->junkAuxIndexId;
+				object.objectSubId = 0;
+				add_exact_object_address(&object, objects);
+			}
 		}
 
 		/*

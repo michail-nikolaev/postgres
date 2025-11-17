@@ -402,14 +402,15 @@ typedef struct StatsData
 	 *   directly successful transactions (they were successfully completed on
 	 *                                     the first try).
 	 *
-	 * A failed transaction is defined as unsuccessfully retried transactions.
-	 * It can be one of two types:
-	 *
-	 * failed (the number of failed transactions) =
+	 * 'failed' (the number of failed transactions) =
 	 *   'serialization_failures' (they got a serialization error and were not
-	 *                             successfully retried) +
+	 *                        successfully retried) +
 	 *   'deadlock_failures' (they got a deadlock error and were not
-	 *                        successfully retried).
+	 *                        successfully retried) +
+	 *   'other_sql_failures'  (they failed on the first try or after retries
+	 *                        due to a SQL error other than serialization or
+	 *                        deadlock; they are counted as a failed transaction
+	 *                        only when --continue-on-error is specified).
 	 *
 	 * If the transaction was retried after a serialization or a deadlock
 	 * error this does not guarantee that this retry was successful. Thus
@@ -421,7 +422,7 @@ typedef struct StatsData
 	 *
 	 * 'retried' (number of all retried transactions) =
 	 *   successfully retried transactions +
-	 *   failed transactions.
+	 *   unsuccessful retried transactions.
 	 *----------
 	 */
 	int64		cnt;			/* number of successful transactions, not
@@ -440,6 +441,11 @@ typedef struct StatsData
 	int64		deadlock_failures;	/* number of transactions that were not
 									 * successfully retried after a deadlock
 									 * error */
+	int64		other_sql_failures; /* number of failed transactions for
+									 * reasons other than
+									 * serialization/deadlock failure, which
+									 * is counted if --continue-on-error is
+									 * specified */
 	SimpleStats latency;
 	SimpleStats lag;
 } StatsData;
@@ -457,6 +463,7 @@ typedef enum EStatus
 {
 	ESTATUS_NO_ERROR = 0,
 	ESTATUS_META_COMMAND_ERROR,
+	ESTATUS_CONN_ERROR,
 
 	/* SQL errors */
 	ESTATUS_SERIALIZATION_ERROR,
@@ -770,6 +777,7 @@ static int64 total_weight = 0;
 static bool verbose_errors = false; /* print verbose messages of all errors */
 
 static bool exit_on_abort = false;	/* exit when any client is aborted */
+static bool continue_on_error = false;	/* continue after errors */
 
 /* Builtin test scripts */
 typedef struct BuiltinScript
@@ -949,6 +957,7 @@ usage(void)
 		   "  -T, --time=NUM           duration of benchmark test in seconds\n"
 		   "  -v, --vacuum-all         vacuum all four standard tables before tests\n"
 		   "  --aggregate-interval=NUM aggregate data over NUM seconds\n"
+		   "  --continue-on-error      continue running after an SQL error\n"
 		   "  --exit-on-abort          exit when any client is aborted\n"
 		   "  --failures-detailed      report the failures grouped by basic types\n"
 		   "  --log-prefix=PREFIX      prefix for transaction time log file\n"
@@ -1467,6 +1476,7 @@ initStats(StatsData *sd, pg_time_usec_t start)
 	sd->retried = 0;
 	sd->serialization_failures = 0;
 	sd->deadlock_failures = 0;
+	sd->other_sql_failures = 0;
 	initSimpleStats(&sd->latency);
 	initSimpleStats(&sd->lag);
 }
@@ -1515,6 +1525,9 @@ accumStats(StatsData *stats, bool skipped, double lat, double lag,
 			break;
 		case ESTATUS_DEADLOCK_ERROR:
 			stats->deadlock_failures++;
+			break;
+		case ESTATUS_OTHER_SQL_ERROR:
+			stats->other_sql_failures++;
 			break;
 		default:
 			/* internal error which should never occur */
@@ -3059,7 +3072,14 @@ commandFailed(CState *st, const char *cmd, const char *message)
 static void
 commandError(CState *st, const char *message)
 {
-	Assert(sql_script[st->use_file].commands[st->command]->type == SQL_COMMAND);
+	/*
+	 * Errors should only be detected during an SQL command or the
+	 * \endpipeline meta command. Any other case triggers an assertion
+	 * failure.
+	 */
+	Assert(sql_script[st->use_file].commands[st->command]->type == SQL_COMMAND ||
+		   sql_script[st->use_file].commands[st->command]->meta == META_ENDPIPELINE);
+
 	pg_log_info("client %d got an error in command %d (SQL) of script %d; %s",
 				st->id, st->command, st->use_file, message);
 }
@@ -3224,11 +3244,43 @@ sendCommand(CState *st, Command *command)
 }
 
 /*
- * Get the error status from the error code.
+ * Read and discard all available results from the connection.
+ */
+static void
+discardAvailableResults(CState *st)
+{
+	PGresult   *res = NULL;
+
+	for (;;)
+	{
+		res = PQgetResult(st->con);
+
+		/*
+		 * Read and discard results until PQgetResult() returns NULL (no more
+		 * results) or a connection failure is detected. If the pipeline
+		 * status is PQ_PIPELINE_ABORTED, more results may still be available
+		 * even after PQgetResult() returns NULL, so continue reading in that
+		 * case.
+		 */
+		if ((res == NULL && PQpipelineStatus(st->con) != PQ_PIPELINE_ABORTED) ||
+			PQstatus(st->con) == CONNECTION_BAD)
+			break;
+
+		PQclear(res);
+	}
+	PQclear(res);
+}
+
+/*
+ * Determine the error status based on the connection status and error code.
  */
 static EStatus
-getSQLErrorStatus(const char *sqlState)
+getSQLErrorStatus(CState *st, const char *sqlState)
 {
+	discardAvailableResults(st);
+	if (PQstatus(st->con) == CONNECTION_BAD)
+		return ESTATUS_CONN_ERROR;
+
 	if (sqlState != NULL)
 	{
 		if (strcmp(sqlState, ERRCODE_T_R_SERIALIZATION_FAILURE) == 0)
@@ -3248,6 +3300,17 @@ canRetryError(EStatus estatus)
 {
 	return (estatus == ESTATUS_SERIALIZATION_ERROR ||
 			estatus == ESTATUS_DEADLOCK_ERROR);
+}
+
+/*
+ * Returns true if --continue-on-error is specified and this error allows
+ * processing to continue.
+ */
+static bool
+canContinueOnError(EStatus estatus)
+{
+	return (continue_on_error &&
+			estatus == ESTATUS_OTHER_SQL_ERROR);
 }
 
 /*
@@ -3349,17 +3412,31 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 				st->num_syncs--;
 				if (st->num_syncs == 0 && PQexitPipelineMode(st->con) != 1)
 					pg_log_error("client %d failed to exit pipeline mode: %s", st->id,
-								 PQerrorMessage(st->con));
+								 PQresultErrorMessage(res));
 				break;
+
+			case PGRES_COPY_IN:
+			case PGRES_COPY_OUT:
+			case PGRES_COPY_BOTH:
+				pg_log_error("COPY is not supported in pgbench, aborting");
+
+				/*
+				 * We need to exit the copy state.  Otherwise, PQgetResult()
+				 * will always return an empty PGresult as an effect of
+				 * getCopyResult(), leading to an infinite loop in the error
+				 * cleanup done below.
+				 */
+				PQendcopy(st->con);
+				goto error;
 
 			case PGRES_NONFATAL_ERROR:
 			case PGRES_FATAL_ERROR:
-				st->estatus = getSQLErrorStatus(PQresultErrorField(res,
-																   PG_DIAG_SQLSTATE));
-				if (canRetryError(st->estatus))
+				st->estatus = getSQLErrorStatus(st, PQresultErrorField(res,
+																	   PG_DIAG_SQLSTATE));
+				if (canRetryError(st->estatus) || canContinueOnError(st->estatus))
 				{
 					if (verbose_errors)
-						commandError(st, PQerrorMessage(st->con));
+						commandError(st, PQresultErrorMessage(res));
 					goto error;
 				}
 				/* fall through */
@@ -3368,7 +3445,7 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 				/* anything else is unexpected */
 				pg_log_error("client %d script %d aborted in command %d query %d: %s",
 							 st->id, st->use_file, st->command, qrynum,
-							 PQerrorMessage(st->con));
+							 PQresultErrorMessage(res));
 				goto error;
 		}
 
@@ -3388,11 +3465,7 @@ readCommandResponse(CState *st, MetaCommand meta, char *varprefix)
 error:
 	PQclear(res);
 	PQclear(next_res);
-	do
-	{
-		res = PQgetResult(st->con);
-		PQclear(res);
-	} while (res);
+	discardAvailableResults(st);
 
 	return false;
 }
@@ -3495,6 +3568,8 @@ doRetry(CState *st, pg_time_usec_t *now)
 static int
 discardUntilSync(CState *st)
 {
+	bool		received_sync = false;
+
 	/* send a sync */
 	if (!PQpipelineSync(st->con))
 	{
@@ -3509,10 +3584,21 @@ discardUntilSync(CState *st)
 		PGresult   *res = PQgetResult(st->con);
 
 		if (PQresultStatus(res) == PGRES_PIPELINE_SYNC)
+			received_sync = true;
+		else if (received_sync)
 		{
-			PQclear(res);
-			res = PQgetResult(st->con);
+			/*
+			 * PGRES_PIPELINE_SYNC must be followed by another
+			 * PGRES_PIPELINE_SYNC or NULL; otherwise, assert failure.
+			 */
 			Assert(res == NULL);
+
+			/*
+			 * Reset ongoing sync count to 0 since all PGRES_PIPELINE_SYNC
+			 * results have been discarded.
+			 */
+			st->num_syncs = 0;
+			PQclear(res);
 			break;
 		}
 		PQclear(res);
@@ -4007,7 +4093,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					if (PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
 						st->state = CSTATE_END_COMMAND;
 				}
-				else if (canRetryError(st->estatus))
+				else if (canRetryError(st->estatus) || canContinueOnError(st->estatus))
 					st->state = CSTATE_ERROR;
 				else
 					st->state = CSTATE_ABORTED;
@@ -4528,7 +4614,8 @@ static int64
 getFailures(const StatsData *stats)
 {
 	return (stats->serialization_failures +
-			stats->deadlock_failures);
+			stats->deadlock_failures +
+			stats->other_sql_failures);
 }
 
 /*
@@ -4548,6 +4635,8 @@ getResultString(bool skipped, EStatus estatus)
 				return "serialization";
 			case ESTATUS_DEADLOCK_ERROR:
 				return "deadlock";
+			case ESTATUS_OTHER_SQL_ERROR:
+				return "other";
 			default:
 				/* internal error which should never occur */
 				pg_fatal("unexpected error status: %d", estatus);
@@ -4603,6 +4692,7 @@ doLog(TState *thread, CState *st,
 			int64		skipped = 0;
 			int64		serialization_failures = 0;
 			int64		deadlock_failures = 0;
+			int64		other_sql_failures = 0;
 			int64		retried = 0;
 			int64		retries = 0;
 
@@ -4643,10 +4733,12 @@ doLog(TState *thread, CState *st,
 			{
 				serialization_failures = agg->serialization_failures;
 				deadlock_failures = agg->deadlock_failures;
+				other_sql_failures = agg->other_sql_failures;
 			}
-			fprintf(logfile, " " INT64_FORMAT " " INT64_FORMAT,
+			fprintf(logfile, " " INT64_FORMAT " " INT64_FORMAT " " INT64_FORMAT,
 					serialization_failures,
-					deadlock_failures);
+					deadlock_failures,
+					other_sql_failures);
 
 			fputc('\n', logfile);
 
@@ -5586,7 +5678,7 @@ skip_sql_comments(char *sql_command)
  * struct.
  */
 static Command *
-create_sql_command(PQExpBuffer buf, const char *source)
+create_sql_command(PQExpBuffer buf)
 {
 	Command    *my_command;
 	char	   *p = skip_sql_comments(buf->data);
@@ -5979,7 +6071,7 @@ ParseScript(const char *script, const char *desc, int weight)
 		sr = psql_scan(sstate, &line_buf, &prompt);
 
 		/* If we collected a new SQL command, process that */
-		command = create_sql_command(&line_buf, desc);
+		command = create_sql_command(&line_buf);
 
 		/* store new command */
 		if (command)
@@ -6285,6 +6377,7 @@ printProgressReport(TState *threads, int64 test_start, pg_time_usec_t now,
 		cur.serialization_failures +=
 			threads[i].stats.serialization_failures;
 		cur.deadlock_failures += threads[i].stats.deadlock_failures;
+		cur.other_sql_failures += threads[i].stats.other_sql_failures;
 	}
 
 	/* we count only actually executed transactions */
@@ -6427,7 +6520,8 @@ printResults(StatsData *total,
 
 	/*
 	 * Remaining stats are nonsensical if we failed to execute any xacts due
-	 * to others than serialization or deadlock errors
+	 * to other than serialization or deadlock errors and --continue-on-error
+	 * is not set.
 	 */
 	if (total_cnt <= 0)
 		return;
@@ -6443,6 +6537,9 @@ printResults(StatsData *total,
 		printf("number of deadlock failures: " INT64_FORMAT " (%.3f%%)\n",
 			   total->deadlock_failures,
 			   100.0 * total->deadlock_failures / total_cnt);
+		printf("number of other failures: " INT64_FORMAT " (%.3f%%)\n",
+			   total->other_sql_failures,
+			   100.0 * total->other_sql_failures / total_cnt);
 	}
 
 	/* it can be non-zero only if max_tries is not equal to one */
@@ -6545,6 +6642,10 @@ printResults(StatsData *total,
 						printf(" - number of deadlock failures: " INT64_FORMAT " (%.3f%%)\n",
 							   sstats->deadlock_failures,
 							   (100.0 * sstats->deadlock_failures /
+								script_total_cnt));
+						printf(" - number of other failures: " INT64_FORMAT " (%.3f%%)\n",
+							   sstats->other_sql_failures,
+							   (100.0 * sstats->other_sql_failures /
 								script_total_cnt));
 					}
 
@@ -6705,6 +6806,7 @@ main(int argc, char **argv)
 		{"verbose-errors", no_argument, NULL, 15},
 		{"exit-on-abort", no_argument, NULL, 16},
 		{"debug", no_argument, NULL, 17},
+		{"continue-on-error", no_argument, NULL, 18},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -7057,6 +7159,10 @@ main(int argc, char **argv)
 				break;
 			case 17:			/* debug */
 				pg_logging_increase_verbosity();
+				break;
+			case 18:			/* continue-on-error */
+				benchmarking_option_set = true;
+				continue_on_error = true;
 				break;
 			default:
 				/* getopt_long already emitted a complaint */
@@ -7413,6 +7519,7 @@ main(int argc, char **argv)
 		stats.retried += thread->stats.retried;
 		stats.serialization_failures += thread->stats.serialization_failures;
 		stats.deadlock_failures += thread->stats.deadlock_failures;
+		stats.other_sql_failures += thread->stats.other_sql_failures;
 		latency_late += thread->latency_late;
 		conn_total_duration += thread->conn_duration;
 

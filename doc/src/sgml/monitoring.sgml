@@ -1137,7 +1137,7 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      Here are examples of how wait events can be viewed:
 
 <programlisting>
-SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event is NOT NULL;
+SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event IS NOT NULL;
  pid  | wait_event_type | wait_event
 ------+-----------------+------------
  2540 | Lock            | relation
@@ -1150,7 +1150,7 @@ SELECT a.pid, a.wait_event, w.description
   FROM pg_stat_activity a JOIN
        pg_wait_events w ON (a.wait_event_type = w.type AND
                             a.wait_event = w.name)
-  WHERE a.wait_event is NOT NULL and a.state = 'active';
+  WHERE a.wait_event IS NOT NULL AND a.state = 'active';
 -[ RECORD 1 ]------------------------------------------------------&zwsp;------------
 pid         | 686674
 wait_event  | WALInitSync
@@ -1287,6 +1287,10 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       <para>
        This standby's <literal>xmin</literal> horizon reported
        by <xref linkend="guc-hot-standby-feedback"/>.
+       This field will be null if a replication slot is used (in this case,
+       the standby's <literal>xmin</literal> is shown in
+       <link linkend="view-pg-replication-slots">pg_replication_slots</link>)
+       or if <varname>hot_standby_feedback</varname> is disabled.
       </para></entry>
      </row>
 
@@ -1616,6 +1620,17 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         transactions to the decoding output plugin while decoding changes from
         WAL for this slot. This and other streaming counters for this slot can
         be used to tune <literal>logical_decoding_work_mem</literal>.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>mem_exceeded_count</structfield><type>bigint</type>
+       </para>
+       <para>
+        Number of times the memory used by logical decoding has exceeded
+        <literal>logical_decoding_work_mem</literal>.
        </para>
       </entry>
      </row>
@@ -2179,6 +2194,17 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>seq_sync_error_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times an error occurred in the sequence synchronization
+       worker. A single worker synchronizes all sequences, so one error
+       increment may represent failures across multiple sequences.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>sync_error_count</structfield> <type>bigint</type>
       </para>
       <para>
@@ -2219,6 +2245,17 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        Number of times that an updated row value violated a
        <literal>NOT DEFERRABLE</literal> unique constraint during the
        application of changes. See <xref linkend="conflict-update-exists"/>
+       for details about this conflict.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>confl_update_deleted</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times the tuple to be updated was concurrently deleted by
+       another source during the application of changes. See <xref linkend="conflict-update-deleted"/>
        for details about this conflict.
       </para></entry>
      </row>
@@ -3299,6 +3336,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_fpi_bytes</structfield> <type>numeric</type>
+      </para>
+      <para>
+       Total amount of WAL full page images in bytes
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>wal_buffers_full</structfield> <type>bigint</type>
       </para>
       <para>
@@ -3980,6 +4026,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Estimated number of rows inserted since this table was last vacuumed
+       (not counting <command>VACUUM FULL</command>)
       </para></entry>
      </row>
 
@@ -4066,7 +4113,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>total_vacuum_time</structfield> <type>double precision</type>
       </para>
       <para>
-       Total time this table has been manually vacuumed, in milliseconds.
+       Total time this table has been manually vacuumed, in milliseconds
+       (not counting <command>VACUUM FULL</command>).
        (This includes the time spent sleeping due to cost-based delays.)
       </para></entry>
      </row>
@@ -4101,6 +4149,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        in milliseconds. (This includes the time spent sleeping due to
        cost-based delays.)
       </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which these statistics were last reset
+       </para></entry>
      </row>
     </tbody>
    </tgroup>
@@ -4221,6 +4278,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        Number of live table rows fetched by simple index scans using this
        index
       </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which these statistics were last reset
+       </para></entry>
      </row>
     </tbody>
    </tgroup>
@@ -4419,6 +4485,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        Number of buffer hits in this table's TOAST table indexes (if any)
       </para></entry>
      </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which these statistics were last reset
+       </para></entry>
+     </row>
     </tbody>
    </tgroup>
   </table>
@@ -4518,6 +4593,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       <para>
        Number of buffer hits in this index
       </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which these statistics were last reset
+       </para></entry>
      </row>
     </tbody>
    </tgroup>
@@ -4686,6 +4770,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        Total time spent in this function itself, not including
        other functions called by it, in milliseconds
       </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which these statistics were last reset
+       </para></entry>
      </row>
     </tbody>
    </tgroup>
@@ -5649,7 +5742,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
       </para>
       <para>
        Total time spent sleeping due to cost-based delay (see
-       <xref linkend="runtime-config-resource-vacuum-cost"/>, in milliseconds
+       <xref linkend="runtime-config-resource-vacuum-cost"/>), in milliseconds
        (if <xref linkend="guc-track-cost-delay-timing"/> is enabled, otherwise
        zero).
       </para></entry>
@@ -6315,6 +6408,18 @@ FROM pg_stat_get_backend_idset() AS backendid;
       </entry>
      </row>
      <row>
+      <entry><literal>waiting for writers to use auxiliary index</literal></entry>
+      <entry>
+       <command>CREATE INDEX CONCURRENTLY</command> or <command>REINDEX CONCURRENTLY</command> is waiting for transactions
+       with write locks that can potentially see the table to finish, to ensure use of auxiliary index for new tuples in
+       future transactions.
+       This phase is skipped when not in concurrent mode.
+       Columns <structname>lockers_total</structname>, <structname>lockers_done</structname>
+       and <structname>current_locker_pid</structname> contain the progress
+       information for this phase.
+      </entry>
+     </row>
+     <row>
       <entry><literal>building index</literal></entry>
       <entry>
        The index is being built by the access method-specific code.  In this phase,
@@ -6354,13 +6459,12 @@ FROM pg_stat_get_backend_idset() AS backendid;
       </entry>
      </row>
      <row>
-      <entry><literal>index validation: scanning table</literal></entry>
+      <entry><literal>index validation: merging indexes</literal></entry>
       <entry>
-       <command>CREATE INDEX CONCURRENTLY</command> is scanning the table
-       to validate the index tuples collected in the previous two phases.
+       <command>CREATE INDEX CONCURRENTLY</command> merging content of auxiliary index with the target index.
        This phase is skipped when not in concurrent mode.
-       Columns <structname>blocks_total</structname> (set to the total size of the table)
-       and <structname>blocks_done</structname> contain the progress information for this phase.
+       Columns <structname>tuples_total</structname> (set to the number of tuples to be merged)
+       and <structname>tuples_done</structname> contain the progress information for this phase.
       </entry>
      </row>
      <row>
@@ -6377,8 +6481,9 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry><literal>waiting for readers before marking dead</literal></entry>
       <entry>
-       <command>REINDEX CONCURRENTLY</command> is waiting for transactions
-       with read locks on the table to finish, before marking the old index dead.
+       <command>CREATE INDEX CONCURRENTLY</command> is waiting for transactions
+        with read locks on the table to finish, before marking the auxiliary index as dead.
+       <command>REINDEX CONCURRENTLY</command> is also waiting before marking the old index as dead.
        This phase is skipped when not in concurrent mode.
        Columns <structname>lockers_total</structname>, <structname>lockers_done</structname>
        and <structname>current_locker_pid</structname> contain the progress
@@ -6776,6 +6881,16 @@ FROM pg_stat_get_backend_idset() AS backendid;
       <para>
        Number of tablespaces streamed. This counter only
        advances when the phase is <literal>streaming database files</literal>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>backup_type</structfield> <type>text</type>
+      </para>
+      <para>
+        Backup type. Either <literal>full</literal> or
+        <literal>incremental</literal>.
       </para></entry>
      </row>
     </tbody>

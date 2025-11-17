@@ -2896,7 +2896,7 @@ RelationForgetRelation(Oid rid)
 
 	RelationIdCacheLookup(rid, relation);
 
-	if (!PointerIsValid(relation))
+	if (!relation)
 		return;					/* not in cache, nothing to do */
 
 	if (!RelationHasReferenceCountZero(relation))
@@ -2941,7 +2941,7 @@ RelationCacheInvalidateEntry(Oid relationId)
 
 	RelationIdCacheLookup(relationId, relation);
 
-	if (PointerIsValid(relation))
+	if (relation)
 	{
 		relcacheInvalsReceived++;
 		RelationFlushRelation(relation);
@@ -3184,7 +3184,7 @@ AssertPendingSyncs_RelationCache(void)
 		if ((LockTagType) locallock->tag.lock.locktag_type !=
 			LOCKTAG_RELATION)
 			continue;
-		relid = ObjectIdGetDatum(locallock->tag.lock.locktag_field2);
+		relid = locallock->tag.lock.locktag_field2;
 		r = RelationIdGetRelation(relid);
 		if (!RelationIsValid(r))
 			continue;
@@ -4658,12 +4658,6 @@ CheckNNConstraintFetch(Relation relation)
 			break;
 		}
 
-		check[found].ccenforced = conform->conenforced;
-		check[found].ccvalid = conform->convalidated;
-		check[found].ccnoinherit = conform->connoinherit;
-		check[found].ccname = MemoryContextStrdup(CacheMemoryContext,
-												  NameStr(conform->conname));
-
 		/* Grab and test conbin is actually set */
 		val = fastgetattr(htup,
 						  Anum_pg_constraint_conbin,
@@ -4676,7 +4670,13 @@ CheckNNConstraintFetch(Relation relation)
 			/* detoast and convert to cstring in caller's context */
 			char	   *s = TextDatumGetCString(val);
 
+			check[found].ccenforced = conform->conenforced;
+			check[found].ccvalid = conform->convalidated;
+			check[found].ccnoinherit = conform->connoinherit;
+			check[found].ccname = MemoryContextStrdup(CacheMemoryContext,
+													  NameStr(conform->conname));
 			check[found].ccbin = MemoryContextStrdup(CacheMemoryContext, s);
+
 			pfree(s);
 			found++;
 		}
@@ -6991,5 +6991,5 @@ ResOwnerReleaseRelation(Datum res)
 	Assert(rel->rd_refcnt > 0);
 	rel->rd_refcnt -= 1;
 
-	RelationCloseCleanup((Relation) res);
+	RelationCloseCleanup((Relation) DatumGetPointer(res));
 }

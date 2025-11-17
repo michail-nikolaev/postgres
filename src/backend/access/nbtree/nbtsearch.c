@@ -37,7 +37,7 @@ static bool _bt_readpage(IndexScanDesc scan, ScanDirection dir,
 static void _bt_saveitem(BTScanOpaque so, int itemIndex,
 						 OffsetNumber offnum, IndexTuple itup);
 static int	_bt_setuppostingitems(BTScanOpaque so, int itemIndex,
-								  OffsetNumber offnum, ItemPointer heapTid,
+								  OffsetNumber offnum, const ItemPointerData *heapTid,
 								  IndexTuple itup);
 static inline void _bt_savepostingitem(BTScanOpaque so, int itemIndex,
 									   OffsetNumber offnum,
@@ -892,9 +892,9 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	OffsetNumber offnum;
 	BTScanInsertData inskey;
 	ScanKey		startKeys[INDEX_MAX_KEYS];
-	ScanKeyData notnullkeys[INDEX_MAX_KEYS];
+	ScanKeyData notnullkey;
 	int			keysz = 0;
-	StrategyNumber strat_total;
+	StrategyNumber strat_total = InvalidStrategy;
 	BlockNumber blkno = InvalidBlockNumber,
 				lastcurrblkno;
 
@@ -1034,7 +1034,6 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	 * need to be kept in sync.
 	 *----------
 	 */
-	strat_total = BTEqualStrategyNumber;
 	if (so->numberOfKeys > 0)
 	{
 		AttrNumber	curattr;
@@ -1122,16 +1121,15 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 					 ScanDirectionIsForward(dir) :
 					 ScanDirectionIsBackward(dir)))
 				{
-					/* Yes, so build the key in notnullkeys[keysz] */
-					bkey = &notnullkeys[keysz];
+					/* Final startKeys[] entry will be deduced NOT NULL key */
+					bkey = &notnullkey;
 					ScanKeyEntryInitialize(bkey,
 										   (SK_SEARCHNOTNULL | SK_ISNULL |
 											(impliesNN->sk_flags &
 											 (SK_BT_DESC | SK_BT_NULLS_FIRST))),
 										   curattr,
-										   ((impliesNN->sk_flags & SK_BT_NULLS_FIRST) ?
-											BTGreaterStrategyNumber :
-											BTLessStrategyNumber),
+										   ScanDirectionIsForward(dir) ?
+										   BTGreaterStrategyNumber : BTLessStrategyNumber,
 										   InvalidOid,
 										   InvalidOid,
 										   InvalidOid,
@@ -1290,6 +1288,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 			 * our row compare header key must be the final startKeys[] entry.
 			 */
 			Assert(subkey->sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD));
+			Assert(subkey->sk_strategy == bkey->sk_strategy);
+			Assert(subkey->sk_strategy == strat_total);
 			Assert(i == keysz - 1);
 
 			/*
@@ -1346,9 +1346,9 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 				Assert(subkey->sk_strategy == bkey->sk_strategy);
 				Assert(keysz < INDEX_MAX_KEYS);
 
-				memcpy(inskey.scankeys + keysz, subkey,
-					   sizeof(ScanKeyData));
+				memcpy(inskey.scankeys + keysz, subkey, sizeof(ScanKeyData));
 				keysz++;
+
 				if (subkey->sk_flags & SK_ROW_END)
 					break;
 			}
@@ -1380,7 +1380,7 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 				}
 			}
 
-			/* done adding to inskey (row comparison keys always come last) */
+			/* Done (row compare header key is always last startKeys[] key) */
 			break;
 		}
 
@@ -2081,7 +2081,7 @@ _bt_saveitem(BTScanOpaque so, int itemIndex,
  */
 static int
 _bt_setuppostingitems(BTScanOpaque so, int itemIndex, OffsetNumber offnum,
-					  ItemPointer heapTid, IndexTuple itup)
+					  const ItemPointerData *heapTid, IndexTuple itup)
 {
 	BTScanPosItem *currItem = &so->currPos.items[itemIndex];
 
@@ -2248,12 +2248,9 @@ _bt_steppage(IndexScanDesc scan, ScanDirection dir)
  *
  * _bt_first caller passes us an offnum returned by _bt_binsrch, which might
  * be an out of bounds offnum such as "maxoff + 1" in certain corner cases.
- * _bt_checkkeys will stop the scan as soon as an equality qual fails (when
- * its scan key was marked required), so _bt_first _must_ pass us an offnum
- * exactly at the beginning of where equal tuples are to be found.  When we're
- * passed an offnum past the end of the page, we might still manage to stop
- * the scan on this page by calling _bt_checkkeys against the high key.  See
- * _bt_readpage for full details.
+ * When we're passed an offnum past the end of the page, we might still manage
+ * to stop the scan on this page by calling _bt_checkkeys against the high
+ * key.  See _bt_readpage for full details.
  *
  * On entry, so->currPos must be pinned and locked (so offnum stays valid).
  * Parallel scan callers must have seized the scan before calling here.

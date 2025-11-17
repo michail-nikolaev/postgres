@@ -42,6 +42,7 @@
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_largeobject.h"
+#include "catalog/pg_largeobject_metadata.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_policy.h"
@@ -721,7 +722,6 @@ static void QueuePartitionConstraintValidation(List **wqueue, Relation scanrel,
 											   List *partConstraint,
 											   bool validate_default);
 static void CloneRowTriggersToPartition(Relation parent, Relation partition);
-static void DetachAddConstraintIfNeeded(List **wqueue, Relation partRel);
 static void DropClonedTriggersFromPartition(Oid partitionId);
 static ObjectAddress ATExecDetachPartition(List **wqueue, AlteredTableInfo *tab,
 										   Relation rel, RangeVar *name,
@@ -1532,6 +1532,8 @@ RemoveRelations(DropStmt *drop)
 	ListCell   *cell;
 	int			flags = 0;
 	LOCKMODE	lockmode = AccessExclusiveLock;
+	MemoryContext private_context,
+				  oldcontext;
 
 	/* DROP CONCURRENTLY uses a weaker lock, and has some restrictions */
 	if (drop->concurrent)
@@ -1592,9 +1594,20 @@ RemoveRelations(DropStmt *drop)
 			relkind = 0;		/* keep compiler quiet */
 			break;
 	}
+	/*
+	 * Create a memory context that will survive forced transaction commits we
+	 * may need to do below (in case of concurrent index drop).
+	 * Since it is a child of PortalContext, it will go away eventually even if
+	 * we suffer an error; there's no need for special abort cleanup logic.
+	 */
+	private_context = AllocSetContextCreate(PortalContext,
+											"RemoveRelations",
+											ALLOCSET_SMALL_SIZES);
 
+	oldcontext = MemoryContextSwitchTo(private_context);
 	/* Lock and validate each relation; build a list of object addresses */
 	objects = new_object_addresses();
+	MemoryContextSwitchTo(oldcontext);
 
 	foreach(cell, drop->objects)
 	{
@@ -1647,6 +1660,34 @@ RemoveRelations(DropStmt *drop)
 		}
 
 		/*
+		 * Concurrent index drop requires to be the first transaction. But in
+		 * case we have junk auxiliary index - we want to drop it too (and also
+		 * in a concurrent way). In this case perform silent internal deletion
+		 * of auxiliary index, and restore transaction state. It is fine to do it
+		 * in the loop because there is only single element in drop->objects.
+		 */
+		if ((flags & PERFORM_DELETION_CONCURRENTLY) != 0 &&
+			state.actual_relkind == RELKIND_INDEX)
+		{
+			Oid junkAuxIndexOid = get_auxiliary_index(relOid);
+			if (OidIsValid(junkAuxIndexOid))
+			{
+				ObjectAddress object;
+				object.classId = RelationRelationId;
+				object.objectId = junkAuxIndexOid;
+				object.objectSubId = 0;
+				performDeletion(&object, DROP_RESTRICT,
+										 PERFORM_DELETION_CONCURRENTLY |
+										 PERFORM_DELETION_INTERNAL |
+										 PERFORM_DELETION_QUIETLY);
+				CommitTransactionCommand();
+				StartTransactionCommand();
+				PushActiveSnapshot(GetTransactionSnapshot());
+				PreventInTransactionBlock(true, "DROP INDEX CONCURRENTLY");
+			}
+		}
+
+		/*
 		 * Concurrent index drop cannot be used with partitioned indexes,
 		 * either.
 		 */
@@ -1674,12 +1715,17 @@ RemoveRelations(DropStmt *drop)
 		obj.objectId = relOid;
 		obj.objectSubId = 0;
 
+		oldcontext = MemoryContextSwitchTo(private_context);
 		add_exact_object_address(&obj, objects);
+		MemoryContextSwitchTo(oldcontext);
 	}
 
+	/* Deletion may involve multiple commits, so, switch to memory context */
+	oldcontext = MemoryContextSwitchTo(private_context);
 	performMultipleDeletions(objects, drop->behavior, flags);
+	MemoryContextSwitchTo(oldcontext);
 
-	free_object_addresses(objects);
+	MemoryContextDelete(private_context);
 }
 
 /*
@@ -2389,12 +2435,15 @@ truncate_check_rel(Oid relid, Form_pg_class reltuple)
 	/*
 	 * Most system catalogs can't be truncated at all, or at least not unless
 	 * allow_system_table_mods=on. As an exception, however, we allow
-	 * pg_largeobject to be truncated as part of pg_upgrade, because we need
-	 * to change its relfilenode to match the old cluster, and allowing a
-	 * TRUNCATE command to be executed is the easiest way of doing that.
+	 * pg_largeobject and pg_largeobject_metadata to be truncated as part of
+	 * pg_upgrade, because we need to change its relfilenode to match the old
+	 * cluster, and allowing a TRUNCATE command to be executed is the easiest
+	 * way of doing that.
 	 */
 	if (!allowSystemTableMods && IsSystemClass(relid, reltuple)
-		&& (!IsBinaryUpgrade || relid != LargeObjectRelationId))
+		&& (!IsBinaryUpgrade ||
+			(relid != LargeObjectRelationId &&
+			 relid != LargeObjectMetadataRelationId)))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("permission denied: \"%s\" is a system catalog",
@@ -8278,6 +8327,31 @@ ATExecAddIdentity(Relation rel, const char *colName,
 				 errmsg("column \"%s\" of relation \"%s\" must be declared NOT NULL before identity can be added",
 						colName, RelationGetRelationName(rel))));
 
+	/*
+	 * On the other hand, if a not-null constraint exists, then verify that
+	 * it's compatible.
+	 */
+	if (attTup->attnotnull)
+	{
+		HeapTuple	contup;
+		Form_pg_constraint conForm;
+
+		contup = findNotNullConstraintAttnum(RelationGetRelid(rel),
+											 attnum);
+		if (!HeapTupleIsValid(contup))
+			elog(ERROR, "cache lookup failed for not-null constraint on column \"%s\" of relation \"%s\"",
+				 colName, RelationGetRelationName(rel));
+
+		conForm = (Form_pg_constraint) GETSTRUCT(contup);
+		if (!conForm->convalidated)
+			ereport(ERROR,
+					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("incompatible NOT VALID constraint \"%s\" on relation \"%s\"",
+						   NameStr(conForm->conname), RelationGetRelationName(rel)),
+					errhint("You might need to validate it using %s.",
+							"ALTER TABLE ... VALIDATE CONSTRAINT"));
+	}
+
 	if (attTup->attidentity)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -8985,7 +9059,7 @@ ATExecSetStatistics(Relation rel, const char *colName, int16 colNum, Node *newVa
 	memset(repl_null, false, sizeof(repl_null));
 	memset(repl_repl, false, sizeof(repl_repl));
 	if (!newtarget_default)
-		repl_val[Anum_pg_attribute_attstattarget - 1] = newtarget;
+		repl_val[Anum_pg_attribute_attstattarget - 1] = Int16GetDatum(newtarget);
 	else
 		repl_null[Anum_pg_attribute_attstattarget - 1] = true;
 	repl_repl[Anum_pg_attribute_attstattarget - 1] = true;
@@ -15487,6 +15561,14 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		Oid			relid;
 
 		relid = IndexGetRelation(oldId, false);
+
+		/*
+		 * As above, make sure we have lock on the index's table if it's not
+		 * the same table.
+		 */
+		if (relid != tab->relid)
+			LockRelationOid(relid, AccessExclusiveLock);
+
 		ATPostAlterTypeParse(oldId, relid, InvalidOid,
 							 (char *) lfirst(def_item),
 							 wqueue, lockmode, tab->rewrite);
@@ -15503,6 +15585,20 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		Oid			relid;
 
 		relid = StatisticsGetRelation(oldId, false);
+
+		/*
+		 * As above, make sure we have lock on the statistics object's table
+		 * if it's not the same table.  However, we take
+		 * ShareUpdateExclusiveLock here, aligning with the lock level used in
+		 * CreateStatistics and RemoveStatisticsById.
+		 *
+		 * CAUTION: this should be done after all cases that grab
+		 * AccessExclusiveLock, else we risk causing deadlock due to needing
+		 * to promote our table lock.
+		 */
+		if (relid != tab->relid)
+			LockRelationOid(relid, ShareUpdateExclusiveLock);
+
 		ATPostAlterTypeParse(oldId, relid, InvalidOid,
 							 (char *) lfirst(def_item),
 							 wqueue, lockmode, tab->rewrite);
@@ -15726,7 +15822,7 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, char *cmd,
 		{
 			AlterDomainStmt *stmt = (AlterDomainStmt *) stm;
 
-			if (stmt->subtype == 'C')	/* ADD CONSTRAINT */
+			if (stmt->subtype == AD_AddConstraint)
 			{
 				Constraint *con = castNode(Constraint, stmt->def);
 				AlterTableCmd *cmd = makeNode(AlterTableCmd);
@@ -15969,7 +16065,7 @@ ATExecAlterColumnGenericOptions(Relation rel,
 									options,
 									fdw->fdwvalidator);
 
-	if (PointerIsValid(DatumGetPointer(datum)))
+	if (DatumGetPointer(datum) != NULL)
 		repl_val[Anum_pg_attribute_attfdwoptions - 1] = datum;
 	else
 		repl_null[Anum_pg_attribute_attfdwoptions - 1] = true;
@@ -18647,7 +18743,7 @@ ATExecGenericOptions(Relation rel, List *options)
 									options,
 									fdw->fdwvalidator);
 
-	if (PointerIsValid(DatumGetPointer(datum)))
+	if (DatumGetPointer(datum) != NULL)
 		repl_val[Anum_pg_foreign_table_ftoptions - 1] = datum;
 	else
 		repl_null[Anum_pg_foreign_table_ftoptions - 1] = true;
@@ -19785,6 +19881,8 @@ ComputePartitionAttrs(ParseState *pstate, Relation rel, List *partParams, AttrNu
 			/* Expression */
 			Node	   *expr = pelem->expr;
 			char		partattname[16];
+			Bitmapset  *expr_attrs = NULL;
+			int			i;
 
 			Assert(expr != NULL);
 			atttype = exprType(expr);
@@ -19808,43 +19906,36 @@ ComputePartitionAttrs(ParseState *pstate, Relation rel, List *partParams, AttrNu
 			while (IsA(expr, CollateExpr))
 				expr = (Node *) ((CollateExpr *) expr)->arg;
 
-			if (IsA(expr, Var) &&
-				((Var *) expr)->varattno > 0)
+			/*
+			 * Examine all the columns in the partition key expression. When
+			 * the whole-row reference is present, examine all the columns of
+			 * the partitioned table.
+			 */
+			pull_varattnos(expr, 1, &expr_attrs);
+			if (bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, expr_attrs))
 			{
-				/*
-				 * User wrote "(column)" or "(column COLLATE something)".
-				 * Treat it like simple attribute anyway.
-				 */
-				partattrs[attn] = ((Var *) expr)->varattno;
+				expr_attrs = bms_add_range(expr_attrs,
+										   1 - FirstLowInvalidHeapAttributeNumber,
+										   RelationGetNumberOfAttributes(rel) - FirstLowInvalidHeapAttributeNumber);
+				expr_attrs = bms_del_member(expr_attrs, 0 - FirstLowInvalidHeapAttributeNumber);
 			}
-			else
+
+			i = -1;
+			while ((i = bms_next_member(expr_attrs, i)) >= 0)
 			{
-				Bitmapset  *expr_attrs = NULL;
-				int			i;
+				AttrNumber	attno = i + FirstLowInvalidHeapAttributeNumber;
 
-				partattrs[attn] = 0;	/* marks the column as expression */
-				*partexprs = lappend(*partexprs, expr);
-
-				/*
-				 * transformPartitionSpec() should have already rejected
-				 * subqueries, aggregates, window functions, and SRFs, based
-				 * on the EXPR_KIND_ for partition expressions.
-				 */
+				Assert(attno != 0);
 
 				/*
 				 * Cannot allow system column references, since that would
 				 * make partition routing impossible: their values won't be
 				 * known yet when we need to do that.
 				 */
-				pull_varattnos(expr, 1, &expr_attrs);
-				for (i = FirstLowInvalidHeapAttributeNumber; i < 0; i++)
-				{
-					if (bms_is_member(i - FirstLowInvalidHeapAttributeNumber,
-									  expr_attrs))
-						ereport(ERROR,
-								(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-								 errmsg("partition key expressions cannot contain system column references")));
-				}
+				if (attno < 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+							 errmsg("partition key expressions cannot contain system column references")));
 
 				/*
 				 * Stored generated columns cannot work: They are computed
@@ -19854,20 +19945,35 @@ ComputePartitionAttrs(ParseState *pstate, Relation rel, List *partParams, AttrNu
 				 * SET EXPRESSION would need to check whether the column is
 				 * used in partition keys).  Seems safer to prohibit for now.
 				 */
-				i = -1;
-				while ((i = bms_next_member(expr_attrs, i)) >= 0)
-				{
-					AttrNumber	attno = i + FirstLowInvalidHeapAttributeNumber;
+				if (TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+							 errmsg("cannot use generated column in partition key"),
+							 errdetail("Column \"%s\" is a generated column.",
+									   get_attname(RelationGetRelid(rel), attno, false)),
+							 parser_errposition(pstate, pelem->location)));
+			}
 
-					if (attno > 0 &&
-						TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated)
-						ereport(ERROR,
-								(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-								 errmsg("cannot use generated column in partition key"),
-								 errdetail("Column \"%s\" is a generated column.",
-										   get_attname(RelationGetRelid(rel), attno, false)),
-								 parser_errposition(pstate, pelem->location)));
-				}
+			if (IsA(expr, Var) &&
+				((Var *) expr)->varattno > 0)
+			{
+
+				/*
+				 * User wrote "(column)" or "(column COLLATE something)".
+				 * Treat it like simple attribute anyway.
+				 */
+				partattrs[attn] = ((Var *) expr)->varattno;
+			}
+			else
+			{
+				partattrs[attn] = 0;	/* marks the column as expression */
+				*partexprs = lappend(*partexprs, expr);
+
+				/*
+				 * transformPartitionSpec() should have already rejected
+				 * subqueries, aggregates, window functions, and SRFs, based
+				 * on the EXPR_KIND_ for partition expressions.
+				 */
 
 				/*
 				 * Preprocess the expression before checking for mutability.
@@ -20916,12 +21022,6 @@ ATExecDetachPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		char	   *partrelname;
 
 		/*
-		 * Add a new constraint to the partition being detached, which
-		 * supplants the partition constraint (unless there is one already).
-		 */
-		DetachAddConstraintIfNeeded(wqueue, partRel);
-
-		/*
 		 * We're almost done now; the only traces that remain are the
 		 * pg_inherits tuple and the partition's relpartbounds.  Before we can
 		 * remove those, we need to wait until all transactions that know that
@@ -21378,49 +21478,6 @@ ATExecDetachPartitionFinalize(Relation rel, RangeVar *name)
 }
 
 /*
- * DetachAddConstraintIfNeeded
- *		Subroutine for ATExecDetachPartition.  Create a constraint that
- *		takes the place of the partition constraint, but avoid creating
- *		a dupe if a constraint already exists which implies the needed
- *		constraint.
- */
-static void
-DetachAddConstraintIfNeeded(List **wqueue, Relation partRel)
-{
-	List	   *constraintExpr;
-
-	constraintExpr = RelationGetPartitionQual(partRel);
-	constraintExpr = (List *) eval_const_expressions(NULL, (Node *) constraintExpr);
-
-	/*
-	 * Avoid adding a new constraint if the needed constraint is implied by an
-	 * existing constraint
-	 */
-	if (!PartConstraintImpliedByRelConstraint(partRel, constraintExpr))
-	{
-		AlteredTableInfo *tab;
-		Constraint *n;
-
-		tab = ATGetQueueEntry(wqueue, partRel);
-
-		/* Add constraint on partition, equivalent to the partition constraint */
-		n = makeNode(Constraint);
-		n->contype = CONSTR_CHECK;
-		n->conname = NULL;
-		n->location = -1;
-		n->is_no_inherit = false;
-		n->raw_expr = NULL;
-		n->cooked_expr = nodeToString(make_ands_explicit(constraintExpr));
-		n->is_enforced = true;
-		n->initially_valid = true;
-		n->skip_validation = true;
-		/* It's a re-add, since it nominally already exists */
-		ATAddCheckNNConstraint(wqueue, tab, partRel, n,
-							   true, false, true, ShareUpdateExclusiveLock);
-	}
-}
-
-/*
  * DropClonedTriggersFromPartition
  *		subroutine for ATExecDetachPartition to remove any triggers that were
  *		cloned to the partition when it was created-as-partition or attached.
@@ -21728,7 +21785,8 @@ refuseDupeIndexAttach(Relation parentIdx, Relation partIdx, Relation partitionTb
 				 errmsg("cannot attach index \"%s\" as a partition of index \"%s\"",
 						RelationGetRelationName(partIdx),
 						RelationGetRelationName(parentIdx)),
-				 errdetail("Another index is already attached for partition \"%s\".",
+				 errdetail("Another index \"%s\" is already attached for partition \"%s\".",
+						   get_rel_name(existingIdx),
 						   RelationGetRelationName(partitionTbl))));
 }
 
