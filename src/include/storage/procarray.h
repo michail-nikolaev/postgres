@@ -100,4 +100,10 @@ extern void ProcArraySetReplicationSlotXmin(TransactionId xmin,
 extern void ProcArrayGetReplicationSlotXmin(TransactionId *xmin,
 											TransactionId *catalog_xmin);
 
+extern Size PinnedRelationDataHorizonShmemSize(void);
+extern void PinnedRelationDataHorizonShmemInit(void);
+extern FullTransactionId GetPinnedOldestNonRemovableTransactionId(Oid relid);
+extern void PinRelationDataHorizon(List *relids, List *lockTags);
+extern void UnpinRelationDataHorizons(void);
+
 #endif							/* PROCARRAY_H */

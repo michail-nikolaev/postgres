@@ -625,6 +625,7 @@ collect_visibility_data(Oid relid, bool include_pd)
 static TransactionId
 GetStrictOldestNonRemovableTransactionId(Relation rel)
 {
+	// TODO
 	RunningTransactions runningTransactions;
 
 	if (RecoveryInProgress())
@@ -644,6 +645,16 @@ GetStrictOldestNonRemovableTransactionId(Relation rel)
 		LWLockRelease(ProcArrayLock);
 		LWLockRelease(XidGenLock);
 		return runningTransactions->oldestRunningXid;
+	}
+	else if (rel->pinned_relation_data_horizon)
+	{
+		TransactionId pinned = XidFromFullTransactionId(rel->pinned_relation_data_horizon->maybe_needed);
+		runningTransactions = GetRunningTransactionData();
+		Assert(TransactionIdPrecedesOrEquals(pinned, runningTransactions->oldestDatabaseRunningXid));
+		LWLockRelease(ProcArrayLock);
+		LWLockRelease(XidGenLock);
+
+		return TransactionIdOlder(pinned, runningTransactions->oldestRunningXid);
 	}
 	else if (!RELATION_IS_LOCAL(rel))
 	{

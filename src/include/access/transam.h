@@ -432,6 +432,21 @@ FullTransactionIdNewer(FullTransactionId a, FullTransactionId b)
 	return b;
 }
 
+/* return the newer of the two IDs */
+static inline FullTransactionId
+FullTransactionIdOlder(FullTransactionId a, FullTransactionId b)
+{
+	if (!FullTransactionIdIsValid(a))
+		return b;
+
+	if (!FullTransactionIdIsValid(b))
+		return a;
+
+	if (FullTransactionIdPrecedes(a, b))
+		return a;
+	return b;
+}
+
 /*
  * Compute FullTransactionId for the given TransactionId, assuming xid was
  * between [oldestXid, nextXid] at the time when TransamVariables->nextXid was

@@ -76,6 +76,7 @@
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rowsecurity.h"
 #include "storage/lmgr.h"
+#include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -1063,6 +1064,7 @@ RelationBuildDesc(Oid targetRelId, bool insertIt)
 	Oid			relid;
 	HeapTuple	pg_class_tuple;
 	Form_pg_class relp;
+	FullTransactionId pinned;
 
 	/*
 	 * This function and its subroutines can allocate a good deal of transient
@@ -1277,6 +1279,18 @@ retry:
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
+
+	/* Is some data horizon is pinned? */
+	pinned = GetPinnedOldestNonRemovableTransactionId(targetRelId);
+	if (FullTransactionIdIsValid(pinned))
+	{
+		relation->pinned_relation_data_horizon = (GlobalVisState *) MemoryContextAllocZero(CacheMemoryContext,
+												sizeof(GlobalVisState));
+		relation->pinned_relation_data_horizon->definitely_needed = pinned;
+		relation->pinned_relation_data_horizon->maybe_needed = pinned;
+	}
+	else relation->pinned_relation_data_horizon = NULL;
+
 
 	/*
 	 * now we can free the memory allocated for pg_class_tuple

@@ -253,6 +253,9 @@ typedef struct RelationData
 	bool		pgstat_enabled; /* should relation stats be counted */
 	/* use "struct" here to avoid needing to include pgstat.h: */
 	struct PgStat_TableStatus *pgstat_info; /* statistics collection area */
+
+	/* Is some data horizon pinned on this relation? */
+	struct GlobalVisState	*pinned_relation_data_horizon;
 } RelationData;
 
 

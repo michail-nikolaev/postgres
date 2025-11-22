@@ -44,7 +44,6 @@
 #define HEAP_PAGE_PRUNE_FREEZE				(1 << 1)
 
 typedef struct BulkInsertStateData *BulkInsertState;
-typedef struct GlobalVisState GlobalVisState;
 typedef struct TupleTableSlot TupleTableSlot;
 struct VacuumCutoffs;
 

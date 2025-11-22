@@ -2270,6 +2270,8 @@ PgXmlStrictness
 Pg_abi_values
 Pg_finfo_record
 Pg_magic_struct
+PinnedRelation
+PinnedRelationDataHorizon
 PipeProtoChunk
 PipeProtoHeader
 PlaceHolderInfo

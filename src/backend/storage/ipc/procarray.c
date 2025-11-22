@@ -59,9 +59,15 @@
 #include "port/pg_lfind.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
+
+#include "common/fe_memutils.h"
+#include "storage/ipc.h"
+#include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -98,80 +104,6 @@ typedef struct ProcArrayStruct
 	/* indexes into allProcs[], has PROCARRAY_MAXPROCS entries */
 	int			pgprocnos[FLEXIBLE_ARRAY_MEMBER];
 } ProcArrayStruct;
-
-/*
- * State for the GlobalVisTest* family of functions. Those functions can
- * e.g. be used to decide if a deleted row can be removed without violating
- * MVCC semantics: If the deleted row's xmax is not considered to be running
- * by anyone, the row can be removed.
- *
- * To avoid slowing down GetSnapshotData(), we don't calculate a precise
- * cutoff XID while building a snapshot (looking at the frequently changing
- * xmins scales badly). Instead we compute two boundaries while building the
- * snapshot:
- *
- * 1) definitely_needed, indicating that rows deleted by XIDs >=
- *    definitely_needed are definitely still visible.
- *
- * 2) maybe_needed, indicating that rows deleted by XIDs < maybe_needed can
- *    definitely be removed
- *
- * When testing an XID that falls in between the two (i.e. XID >= maybe_needed
- * && XID < definitely_needed), the boundaries can be recomputed (using
- * ComputeXidHorizons()) to get a more accurate answer. This is cheaper than
- * maintaining an accurate value all the time.
- *
- * As it is not cheap to compute accurate boundaries, we limit the number of
- * times that happens in short succession. See GlobalVisTestShouldUpdate().
- *
- *
- * There are three backend lifetime instances of this struct, optimized for
- * different types of relations. As e.g. a normal user defined table in one
- * database is inaccessible to backends connected to another database, a test
- * specific to a relation can be more aggressive than a test for a shared
- * relation.  Currently we track four different states:
- *
- * 1) GlobalVisSharedRels, which only considers an XID's
- *    effects visible-to-everyone if neither snapshots in any database, nor a
- *    replication slot's xmin, nor a replication slot's catalog_xmin might
- *    still consider XID as running.
- *
- * 2) GlobalVisCatalogRels, which only considers an XID's
- *    effects visible-to-everyone if neither snapshots in the current
- *    database, nor a replication slot's xmin, nor a replication slot's
- *    catalog_xmin might still consider XID as running.
- *
- *    I.e. the difference to GlobalVisSharedRels is that
- *    snapshot in other databases are ignored.
- *
- * 3) GlobalVisDataRels, which only considers an XID's
- *    effects visible-to-everyone if neither snapshots in the current
- *    database, nor a replication slot's xmin consider XID as running.
- *
- *    I.e. the difference to GlobalVisCatalogRels is that
- *    replication slot's catalog_xmin is not taken into account.
- *
- * 4) GlobalVisTempRels, which only considers the current session, as temp
- *    tables are not visible to other sessions.
- *
- * GlobalVisTestFor(relation) returns the appropriate state
- * for the relation.
- *
- * The boundaries are FullTransactionIds instead of TransactionIds to avoid
- * wraparound dangers. There e.g. would otherwise exist no procarray state to
- * prevent maybe_needed to become old enough after the GetSnapshotData()
- * call.
- *
- * The typedef is in the header.
- */
-struct GlobalVisState
-{
-	/* XIDs >= are considered running by some backend */
-	FullTransactionId definitely_needed;
-
-	/* XIDs < are not considered to be running by any backend */
-	FullTransactionId maybe_needed;
-};
 
 /*
  * Result of ComputeXidHorizons().
@@ -1839,6 +1771,7 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 	 * No other information from shared state is needed, release the lock
 	 * immediately. The rest of the computations can be done without a lock.
 	 */
+
 	LWLockRelease(ProcArrayLock);
 
 	if (in_recovery)
@@ -1964,7 +1897,7 @@ GlobalVisHorizonKindForRel(Relation rel)
  *
  * If rel is not NULL the horizon may be considerably more recent than
  * otherwise (i.e. fewer tuples will be removable). In the NULL case a horizon
- * that is correct (but not optimal) for all relations will be returned.
+ * that is correct (but not optimal) for all relations will be returned (TODO).
  *
  * This is used by VACUUM to decide which deleted tuples must be preserved in
  * the passed in table.
@@ -1973,10 +1906,19 @@ TransactionId
 GetOldestNonRemovableTransactionId(Relation rel)
 {
 	ComputeXidHorizonsResult horizons;
+	GlobalVisHorizonKind kind = GlobalVisHorizonKindForRel(rel);
 
 	ComputeXidHorizons(&horizons);
 
-	switch (GlobalVisHorizonKindForRel(rel))
+	if (rel && rel->pinned_relation_data_horizon)
+	{
+		TransactionId pinned = XidFromFullTransactionId(rel->pinned_relation_data_horizon->maybe_needed);
+		Assert(kind == VISHORIZON_DATA);
+		Assert(TransactionIdIsValid(pinned));
+		return TransactionIdOlder(pinned, horizons.data_oldest_nonremovable);
+	}
+
+	switch (kind)
 	{
 		case VISHORIZON_SHARED:
 			return horizons.shared_oldest_nonremovable;
@@ -4076,7 +4018,7 @@ DisplayXidCache(void)
 
 /*
  * If rel != NULL, return test state appropriate for relation, otherwise
- * return state usable for all relations.  The latter may consider XIDs as
+ * return state usable for all relations (TODO).  The latter may consider XIDs as
  * not-yet-visible-to-everyone that a state for a specific relation would
  * already consider visible-to-everyone.
  *
@@ -4089,11 +4031,12 @@ GlobalVisState *
 GlobalVisTestFor(Relation rel)
 {
 	GlobalVisState *state = NULL;
+	GlobalVisHorizonKind kind = GlobalVisHorizonKindForRel(rel);
 
 	/* XXX: we should assert that a snapshot is pushed or registered */
 	Assert(RecentXmin);
 
-	switch (GlobalVisHorizonKindForRel(rel))
+	switch (kind)
 	{
 		case VISHORIZON_SHARED:
 			state = &GlobalVisSharedRels;
@@ -4107,6 +4050,13 @@ GlobalVisTestFor(Relation rel)
 		case VISHORIZON_TEMP:
 			state = &GlobalVisTempRels;
 			break;
+	}
+
+	if (rel && rel->pinned_relation_data_horizon)
+	{
+		if (FullTransactionIdPrecedes(rel->pinned_relation_data_horizon->maybe_needed, state->maybe_needed)) {
+			state = rel->pinned_relation_data_horizon;
+		}
 	}
 
 	Assert(FullTransactionIdIsValid(state->definitely_needed) &&
@@ -5246,4 +5196,214 @@ KnownAssignedXidsReset(void)
 	pArray->headKnownAssignedXids = 0;
 
 	LWLockRelease(ProcArrayLock);
+}
+
+typedef struct PinnedRelation
+{
+	Oid		relid;
+	Oid		dbid;
+} PinnedRelation;
+
+typedef struct PinnedRelationDataHorizon
+{
+	PinnedRelation	relation;
+	FullTransactionId	oldestNonRemovableTransactionId;
+} PinnedRelationDataHorizon;
+
+/*
+ * Each relation being processed by INDEX CONCURRENTLY must be in the hashtable.
+ */
+static HTAB		*pinnedRelationDataHorizonHash = NULL;;
+
+// TODO: need list
+static List*		pinnedRelationDataHorizon_relids = NIL;
+
+static void PinnedRelationDataHorizonShmemExitCallback(int code, Datum arg);
+
+Size
+PinnedRelationDataHorizonShmemSize(void)
+{
+	return hash_estimate_size(MaxBackends, sizeof(PinnedRelationDataHorizon));
+}
+
+void
+PinnedRelationDataHorizonShmemInit(void)
+{
+	HASHCTL		info;
+
+	info.keysize = sizeof(PinnedRelation);
+	info.entrysize = sizeof(PinnedRelationDataHorizon);
+	pinnedRelationDataHorizonHash = ShmemInitHash("Pinned Relation Data Horizon Hash",
+									 MaxBackends,
+									 MaxBackends,
+									 &info,
+									 HASH_ELEM | HASH_BLOBS |
+									 HASH_FIXED_SIZE);
+}
+
+FullTransactionId
+GetPinnedOldestNonRemovableTransactionId(Oid relid)
+{
+	PinnedRelation   key;
+	PinnedRelationDataHorizon *entry;
+
+	if (RecoveryInProgress())
+		return InvalidFullTransactionId;
+
+	memset(&key, 0, sizeof(key));
+	key.relid = relid;
+	key.dbid = MyDatabaseId;
+
+	LWLockAcquire(PinnedRelationDataHorizonLock, LW_SHARED);
+
+	entry = (PinnedRelationDataHorizon *)
+		hash_search(pinnedRelationDataHorizonHash, &key, HASH_FIND, NULL);
+
+	LWLockRelease(PinnedRelationDataHorizonLock);
+
+	if (entry)
+		return entry->oldestNonRemovableTransactionId;
+
+	return InvalidFullTransactionId;
+}
+
+/**
+ * TODO: comment about WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
+ */
+void
+PinRelationDataHorizon(List *relids, List *lockTags)
+{
+	PinnedRelation key;
+	PinnedRelationDataHorizon* entry;
+	bool		found = false;
+	static bool before_shmem_exit_callback_setup = false;
+	FullTransactionId oldestNonRemovableTransactionId = InvalidFullTransactionId;
+	ComputeXidHorizonsResult horizons;
+	MemoryContext oldcontext;
+
+	/*
+	* Make sure that we do not leave an entry in pinnedRelationDataHorizonHash if exiting
+	* due to FATAL.
+	*/
+	if (!before_shmem_exit_callback_setup)
+	{
+		before_shmem_exit(PinnedRelationDataHorizonShmemExitCallback, 0);
+		before_shmem_exit_callback_setup = true;
+	}
+
+	/* Ensure we have xmin */
+	PushActiveSnapshot(GetTransactionSnapshot());
+	/* Lets recompute horizons to make sure it as high as possible */
+	ComputeXidHorizons(&horizons);
+	oldestNonRemovableTransactionId = FullXidRelativeTo(horizons.latest_completed, MyProc->xmin);
+	/*
+	* At that moment horizon can't go higher than oldestNonRemovableTransactionId
+	* while we keeping snapshot, all other backends have older
+	* or equal xmins in their local memory.
+	*/
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	LWLockAcquire(PinnedRelationDataHorizonLock, LW_EXCLUSIVE);
+	foreach_oid(relid, relids)
+	{
+		if (list_member_oid(pinnedRelationDataHorizon_relids, relid))
+		{
+			/* It is pinned and pinned by us - so, it is okay */
+			continue;
+		}
+
+		memset(&key, 0, sizeof(key));
+		key.relid = relid;
+		key.dbid = MyDatabaseId;
+
+		entry = (PinnedRelationDataHorizon *)
+		hash_search(pinnedRelationDataHorizonHash, &key, HASH_FIND, &found);
+
+		entry = (PinnedRelationDataHorizon *)
+			hash_search(pinnedRelationDataHorizonHash, &key, HASH_ENTER, &found);
+		if (found)
+		{
+			ereport(ERROR,
+						(errmsg("relation \"%d\" is already has pinned data horizon by another backend", relid)));
+		}
+
+		entry->oldestNonRemovableTransactionId = oldestNonRemovableTransactionId;
+
+		/*
+		 * Enable the callback to remove the entry in case of exit. We should not
+		 * do this earlier, otherwise an attempt to insert already existing entry
+		 * could make us remove that entry (inserted by another backend) during
+		 * ERROR handling.
+		 */
+		Assert(!list_member_oid(pinnedRelationDataHorizon_relids, relid));
+		pinnedRelationDataHorizon_relids = lappend_oid(pinnedRelationDataHorizon_relids, relid);
+	}
+	LWLockRelease(PinnedRelationDataHorizonLock);
+	MemoryContextSwitchTo(oldcontext);
+
+
+	/* At that moment all new computed horizon still can't be higher than pinned xmin. */
+
+	/*
+	 * Make sure that other backends are aware of the new hash entry as soon
+	 * as they open our table.
+	 */
+	foreach_oid(relid, relids)
+		CacheInvalidateRelcacheImmediate(relid);
+
+	WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
+
+	/*
+	 * At that moment all relation readers/writers know about pinned xmin.
+	 * We free to release our snapshot now.
+	 */
+	PopActiveSnapshot();
+}
+
+void
+UnpinRelationDataHorizons(void)
+{
+	MemoryContext oldcontext;
+	LWLockAcquire(PinnedRelationDataHorizonLock, LW_EXCLUSIVE);
+	/* Remove the relation from the hash if we managed to insert one. */
+	foreach_oid(relid, pinnedRelationDataHorizon_relids)
+	{
+		PinnedRelation key;
+		PinnedRelationDataHorizon *entry = NULL;
+
+		memset(&key, 0, sizeof(key));
+		key.relid = relid;
+		key.dbid = MyDatabaseId;
+
+		entry = hash_search(pinnedRelationDataHorizonHash, &key, HASH_REMOVE, NULL);
+		Assert(entry);
+
+		/*
+		 * Make others refresh their information whether they should still
+		 * treat the table as catalog from the perspective of writing WAL.
+		 *
+		 * XXX Unlike entering the entry into the hashtable, we do not bother
+		 * with locking and unlocking the table here.
+		 */
+		CacheInvalidateRelcacheImmediate(relid);
+	}
+
+	/*
+	 * By clearing repacked_rel we also disable
+	 * cluster_before_shmem_exit_callback().
+	 */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	list_free(pinnedRelationDataHorizon_relids);
+	MemoryContextSwitchTo(oldcontext);
+
+	pinnedRelationDataHorizon_relids = NIL;
+	LWLockRelease(PinnedRelationDataHorizonLock);
+}
+
+/*
+ * A wrapper to call UnpinRelationDataHorizon() as a before_shmem_exit callback.
+ */
+static void
+PinnedRelationDataHorizonShmemExitCallback(int code, Datum arg)
+{
+	UnpinRelationDataHorizons();
 }

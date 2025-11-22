@@ -114,7 +114,7 @@ static bool ReindexRelationConcurrently(const ReindexStmt *stmt,
 										Oid relationOid,
 										const ReindexParams *params);
 static void update_relispartition(Oid relationId, bool newval);
-static inline void set_procflags(bool safe_index);
+static inline void set_procflags(bool safe_index, bool xmin_only_catalog);
 
 /*
  * callback argument type for RangeVarCallbackForReindexIndex()
@@ -584,15 +584,19 @@ DefineIndex(Oid tableId,
 	ObjectAddress address;
 	LockRelId	heaprelid;
 	LOCKTAG		heaplocktag;
+	List		*relids;
 	LOCKMODE	lockmode;
 	Snapshot	snapshot;
 	Oid			root_save_userid;
 	int			root_save_sec_context;
 	int			root_save_nestlevel;
+	MemoryContext	old_context,
+					private_context;
 
 	root_save_nestlevel = NewGUCNestLevel();
 
 	RestrictSearchPath();
+
 
 	/*
 	 * Some callers need us to run with an empty default_tablespace; this is a
@@ -1612,9 +1616,23 @@ DefineIndex(Oid tableId,
 		return address;
 	}
 
+	private_context = AllocSetContextCreate(PortalContext,
+										"CreateIndexConcurrently",
+										ALLOCSET_SMALL_SIZES);
+	old_context = MemoryContextSwitchTo(private_context);
+
 	/* save lockrelid and locktag for below, then close rel */
 	heaprelid = rel->rd_lockInfo.lockRelId;
+
 	SET_LOCKTAG_RELATION(heaplocktag, heaprelid.dbId, heaprelid.relId);
+	relids = list_make1_oid(heaprelid.relId);
+
+	if (OidIsValid(rel->rd_toastoid))
+	{
+		relids = list_make1_oid(rel->rd_toastoid);
+	}
+	MemoryContextSwitchTo(old_context);
+
 	table_close(rel, NoLock);
 
 	/*
@@ -1644,10 +1662,7 @@ DefineIndex(Oid tableId,
 	CommitTransactionCommand();
 	StartTransactionCommand();
 
-	/* Update proc flags to:
-	 * force xmin of backend to affect only catalog horizon
-	 * tell concurrent index builds to ignore us, if index qualifies */
-	set_procflags(safe_index);
+	set_procflags(true, false);
 
 	/*
 	 * The index is now visible, so we can report the OID.  While on it,
@@ -1671,8 +1686,8 @@ DefineIndex(Oid tableId,
 	 * for an overview of how this works)
 	 *
 	 * Now we must wait until no running transaction could have the table open
-	 * with the old list of indexes.  Use ShareLock to consider running
-	 * transactions that hold locks that permit writing to the table.  Note we
+	 * with the old list of indexes.  Use AccessExclusiveLock to consider running
+	 * transactions that hold locks that permit accessing to the table.  Note we
 	 * do not need to worry about xacts that open the table for writing after
 	 * this point; they will see the new index when they open it.
 	 *
@@ -1682,7 +1697,7 @@ DefineIndex(Oid tableId,
 	 * exclusive lock on our table.  The lock code will detect deadlock and
 	 * error out properly.
 	 */
-	WaitForLockers(heaplocktag, ShareLock, true);
+	PinRelationDataHorizon(relids, list_make1(&heaplocktag));
 
 	/*
 	 * At this moment we are sure that there are no transactions with the
@@ -1701,10 +1716,16 @@ DefineIndex(Oid tableId,
 	 * rolled back.  Thus, each visible tuple is either the end of its
 	 * HOT-chain or the extension of the chain is HOT-safe for this index.
 	 */
+	CommitTransactionCommand();
+	StartTransactionCommand();
+
+	/* Update proc flags to:
+	 * force xmin of backend to affect only catalog horizon
+	 * tell concurrent index builds to ignore us, if index qualifies */
+	set_procflags(safe_index,true);
 
 	/* Set ActiveSnapshot since functions in the indexes may need it */
 	PushActiveSnapshot(GetTransactionSnapshot());
-
 	/* Perform concurrent build of index */
 	index_concurrently_build(tableId, indexRelationId);
 
@@ -1720,7 +1741,7 @@ DefineIndex(Oid tableId,
 	/* Update proc flags to:
 	 * force xmin of backend to affect only catalog horizon
 	 * tell concurrent index builds to ignore us, if index qualifies */
-	set_procflags(safe_index);
+	set_procflags(safe_index,true);
 
 	/*
 	 * Phase 3 of concurrent index build
@@ -1781,7 +1802,7 @@ DefineIndex(Oid tableId,
 	/* Update proc flags to:
 	 * force xmin of backend to affect only catalog horizon
 	 * tell concurrent index builds to ignore us, if index qualifies */
-	set_procflags(safe_index);
+	set_procflags(safe_index,true);
 
 	/* We should now definitely not be advertising any xmin. */
 	Assert(MyProc->xmin == InvalidTransactionId);
@@ -1824,8 +1845,10 @@ DefineIndex(Oid tableId,
 	 * Last thing to do is release the session-level lock on the parent table.
 	 */
 	UnlockRelationIdForSession(&heaprelid, ShareUpdateExclusiveLock);
+	UnpinRelationDataHorizons();
 
 	pgstat_progress_end_command();
+	MemoryContextDelete(private_context);
 
 	return address;
 }
@@ -4069,6 +4092,13 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+
+	StartTransactionCommand();
+
+	set_procflags(true, false);
+	PinRelationDataHorizon(heapRelationIds, lockTags);
+	CommitTransactionCommand();
+
 	StartTransactionCommand();
 
 	/*
@@ -4088,7 +4118,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_1);
-	WaitForLockersMultiple(lockTags, ShareLock, true);
 	CommitTransactionCommand();
 
 	foreach(lc, newIndexIds)
@@ -4108,7 +4137,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/* Update proc flags to:
 		 * force xmin of backend to affect only catalog horizon
 		 * tell concurrent index builds to ignore us, if index qualifies */
-		set_procflags(newidx->safe);
+		set_procflags(newidx->safe,true);
 
 		/* Set ActiveSnapshot since functions in the indexes may need it */
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -4169,7 +4198,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/* Update proc flags to:
 		 * force xmin of backend to affect only catalog horizon
 		 * tell concurrent index builds to ignore us, if index qualifies */
-		set_procflags(newidx->safe);
+		set_procflags(newidx->safe,true);
 
 		/*
 		 * Take the "reference snapshot" that will be used by validate_index()
@@ -4242,7 +4271,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * any index operations, we can set the PROC_IN_SAFE_IC flag here
 	 * unconditionally.
 	 */
-	set_procflags(true);
+	set_procflags(true,true);
 
 	forboth(lc, indexIds, lc2, newIndexIds)
 	{
@@ -4432,6 +4461,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		}
 	}
 
+	UnpinRelationDataHorizons();
 	MemoryContextDelete(private_context);
 
 	pgstat_progress_end_command();
@@ -4616,7 +4646,7 @@ update_relispartition(Oid relationId, bool newval)
  * set for each transaction.)
  */
 static inline void
-set_procflags(bool safe_index)
+set_procflags(bool safe_index, bool xmin_only_catalog)
 {
 	/*
 	 * This should only be called before installing xid or xmin in MyProc;
@@ -4628,7 +4658,8 @@ set_procflags(bool safe_index)
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 	if (safe_index)
 		MyProc->statusFlags |= PROC_IN_SAFE_IC;
-	MyProc->statusFlags |= PROC_AFFECTS_ONLY_CATALOG;
+	if (xmin_only_catalog)
+		MyProc->statusFlags |= PROC_AFFECTS_ONLY_CATALOG;
 	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
 	LWLockRelease(ProcArrayLock);
 }

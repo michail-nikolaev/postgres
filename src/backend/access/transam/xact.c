@@ -2981,6 +2981,7 @@ AbortTransaction(void)
 			CallXactCallbacks(XACT_EVENT_PARALLEL_ABORT);
 		else
 			CallXactCallbacks(XACT_EVENT_ABORT);
+		UnpinRelationDataHorizons();
 
 		ResourceOwnerRelease(TopTransactionResourceOwner,
 							 RESOURCE_RELEASE_BEFORE_LOCKS,
