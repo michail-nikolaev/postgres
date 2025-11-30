@@ -15,6 +15,7 @@
 
 #include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/index.h"
 #include "catalog/partition.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
@@ -491,6 +492,62 @@ ExecFindPartition(ModifyTableState *mtstate,
 }
 
 /*
+ * IsIndexCompatibleAsArbiter
+ * 		Checks if the indexes are identical in terms of being used
+ * 		as arbiters for the INSERT ON CONFLICT operation by comparing
+ * 		them to the provided arbiter index.
+ *
+ * Only indexes of the same relation are supported.
+ *
+ * Returns the true if indexes are compatible.
+ */
+static bool
+IsIndexCompatibleAsArbiter(Relation	arbiterIndexRelation,
+						   IndexInfo  *arbiterIndexInfo,
+						   Relation	indexRelation,
+						   IndexInfo  *indexInfo)
+{
+	int	i;
+
+	Assert(arbiterIndexRelation->rd_index->indrelid == indexRelation->rd_index->indrelid);
+
+	if (arbiterIndexInfo->ii_Unique != indexInfo->ii_Unique)
+		return false;
+
+	if (arbiterIndexInfo->ii_NullsNotDistinct != indexInfo->ii_NullsNotDistinct)
+		return false;
+
+	/* and same number of key attributes */
+	if (arbiterIndexInfo->ii_NumIndexKeyAttrs != indexInfo->ii_NumIndexKeyAttrs)
+		return false;
+
+	/* No support currently for comparing exclusion indexes. */
+	if (arbiterIndexInfo->ii_ExclusionOps != NULL || indexInfo->ii_ExclusionOps != NULL)
+		return false;
+
+	for (i = 0; i < arbiterIndexInfo->ii_NumIndexKeyAttrs; i++)
+	{
+		if (arbiterIndexRelation->rd_indcollation[i] != indexRelation->rd_indcollation[i])
+			return false;
+
+		if (arbiterIndexRelation->rd_opfamily[i] != indexRelation->rd_opfamily[i])
+			return false;
+
+		if (arbiterIndexRelation->rd_index->indkey.values[i] != indexRelation->rd_index->indkey.values[i])
+			return false;
+	}
+
+	if (list_difference(RelationGetIndexExpressions(arbiterIndexRelation),
+						RelationGetIndexExpressions(indexRelation)) != NIL)
+		return false;
+
+	if (list_difference(RelationGetIndexPredicate(arbiterIndexRelation),
+						RelationGetIndexPredicate(indexRelation)) != NIL)
+		return false;
+	return true;
+}
+
+/*
  * ExecInitPartitionInfo
  *		Lock the partition and initialize ResultRelInfo.  Also setup other
  *		information for the partition and store it in the next empty slot in
@@ -690,7 +747,9 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 		TupleDesc	partrelDesc = RelationGetDescr(partrel);
 		ExprContext *econtext = mtstate->ps.ps_ExprContext;
 		ListCell   *lc;
-		List	   *arbiterIndexes = NIL;
+		List	   *arbiterIndexes = NIL,
+				   *arbiterIndexesOffset = NIL;
+		int		   additional_arbiters = 0;
 
 		/*
 		 * If there is a list of arbiter indexes, map it to a list of indexes
@@ -698,36 +757,80 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 		 * list and searching for ancestry relationships to each index in the
 		 * ancestor table.
 		 */
-		if (rootResultRelInfo->ri_onConflictArbiterIndexes != NIL)
-		{
-			List	   *childIdxs;
+		if (rootResultRelInfo->ri_onConflictArbiterIndexes != NIL) {
+			List	   *childIdxs,
+					   *nonAncestorIdxOffset = NIL;
 
 			childIdxs = RelationGetIndexList(leaf_part_rri->ri_RelationDesc);
 
 			foreach(lc, childIdxs)
 			{
 				Oid			childIdx = lfirst_oid(lc);
+				int			i = foreach_current_index(lc);
 				List	   *ancestors;
-				ListCell   *lc2;
 
 				ancestors = get_partition_ancestors(childIdx);
-				foreach(lc2, rootResultRelInfo->ri_onConflictArbiterIndexes)
+				if (ancestors)
 				{
-					if (list_member_oid(ancestors, lfirst_oid(lc2)))
-						arbiterIndexes = lappend_oid(arbiterIndexes, childIdx);
+					foreach_oid(oid, rootResultRelInfo->ri_onConflictArbiterIndexes)
+					{
+						if (list_member_oid(ancestors, oid))
+						{
+							arbiterIndexes = lappend_oid(arbiterIndexes, childIdx);
+							arbiterIndexesOffset = lappend_int(arbiterIndexesOffset, i);
+						}
+					}
 				}
+				else /* No ancestor was found for that index. Save it for rechecking later. */
+					nonAncestorIdxOffset = lappend_int(nonAncestorIdxOffset, i);
+
 				list_free(ancestors);
 			}
+
+			/*
+			 * If any non-ancestor indexes are found, we need to compare them with other
+			 * indexes of the relation that will be used as arbiters. This is necessary
+			 * when a partitioned index is processed by REINDEX CONCURRENTLY. Both indexes
+			 * must be considered as arbiters to ensure that all concurrent transactions
+			 * use the same set of arbiters.
+			 */
+			if (nonAncestorIdxOffset && arbiterIndexesOffset)
+			{
+				foreach_int(childIdxOffset, nonAncestorIdxOffset)
+				{
+					Relation nonAncestorIndexRelation = leaf_part_rri->ri_IndexRelationDescs[childIdxOffset];
+					IndexInfo *nonAncestorIndexInfo = leaf_part_rri->ri_IndexRelationInfo[childIdxOffset];
+					Assert(!list_member_oid(arbiterIndexes, nonAncestorIndexRelation->rd_index->indexrelid));
+
+					/* It is too early to use non-ready indexes as arbiters */
+					if (!nonAncestorIndexInfo->ii_ReadyForInserts)
+						continue;
+
+					foreach_int(arbiterIdxOffset, arbiterIndexesOffset)
+					{
+						Relation arbiterIndexRelation = leaf_part_rri->ri_IndexRelationDescs[arbiterIdxOffset];
+						IndexInfo *arbiterIndexInfo = leaf_part_rri->ri_IndexRelationInfo[arbiterIdxOffset];
+
+						/* If non-ancestor index are compatible to arbiter - use it as arbiter too. */
+						if (IsIndexCompatibleAsArbiter(arbiterIndexRelation, arbiterIndexInfo,
+													   nonAncestorIndexRelation, nonAncestorIndexInfo))
+						{
+							arbiterIndexes = lappend_oid(arbiterIndexes,
+														 nonAncestorIndexRelation->rd_index->indexrelid);
+							additional_arbiters++;
+						}
+					}
+				}
+			}
+			list_free(nonAncestorIdxOffset);
 		}
 
 		/*
 		 * If the resulting lists are of inequal length, something is wrong.
-		 * XXX This may happen because we don't match the lists correctly when
-		 * a partitioned index is being processed by REINDEX CONCURRENTLY.
-		 * FIXME later.
+		 * But we need to consider additional arbiter indexes also.
 		 */
 		if (list_length(rootResultRelInfo->ri_onConflictArbiterIndexes) !=
-			list_length(arbiterIndexes))
+			list_length(arbiterIndexes) - additional_arbiters)
 			elog(ERROR, "invalid arbiter index list");
 		leaf_part_rri->ri_onConflictArbiterIndexes = arbiterIndexes;
 

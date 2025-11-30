@@ -51,6 +51,7 @@ tests += {
       'index-concurrently-upsert',
       'reindex-concurrently-upsert',
       'index-concurrently-upsert-predicate',
+      'reindex-concurrently-upsert-partitioned'
     ],
     'runningcheck': false, # see syscache-update-pruned
     # Some tests wait for all snapshots, so avoid parallel execution
