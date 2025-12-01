@@ -32,7 +32,8 @@ static void plugin_truncate(struct LogicalDecodingContext *ctx,
 							Relation relations[],
 							ReorderBufferChange *change);
 static void store_change(LogicalDecodingContext *ctx,
-						 ConcurrentChangeKind kind, HeapTuple tuple);
+						 ConcurrentChangeKind kind, HeapTuple tuple,
+						 TransactionId xid);
 
 void
 _PG_output_plugin_init(OutputPluginCallbacks *cb)
@@ -124,7 +125,7 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 				if (newtuple == NULL)
 					elog(ERROR, "Incomplete insert info.");
 
-				store_change(ctx, CHANGE_INSERT, newtuple);
+				store_change(ctx, CHANGE_INSERT, newtuple, change->txn->xid);
 			}
 			break;
 		case REORDER_BUFFER_CHANGE_UPDATE:
@@ -141,9 +142,11 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 					elog(ERROR, "Incomplete update info.");
 
 				if (oldtuple != NULL)
-					store_change(ctx, CHANGE_UPDATE_OLD, oldtuple);
+					store_change(ctx, CHANGE_UPDATE_OLD, oldtuple,
+								 change->txn->xid);
 
-				store_change(ctx, CHANGE_UPDATE_NEW, newtuple);
+				store_change(ctx, CHANGE_UPDATE_NEW, newtuple,
+							 change->txn->xid);
 			}
 			break;
 		case REORDER_BUFFER_CHANGE_DELETE:
@@ -156,7 +159,7 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 				if (oldtuple == NULL)
 					elog(ERROR, "Incomplete delete info.");
 
-				store_change(ctx, CHANGE_DELETE, oldtuple);
+				store_change(ctx, CHANGE_DELETE, oldtuple, change->txn->xid);
 			}
 			break;
 		default:
@@ -190,13 +193,13 @@ plugin_truncate(struct LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	if (i == nrelations)
 		return;
 
-	store_change(ctx, CHANGE_TRUNCATE, NULL);
+	store_change(ctx, CHANGE_TRUNCATE, NULL, InvalidTransactionId);
 }
 
 /* Store concurrent data change. */
 static void
 store_change(LogicalDecodingContext *ctx, ConcurrentChangeKind kind,
-			 HeapTuple tuple)
+			 HeapTuple tuple, TransactionId xid)
 {
 	RepackDecodingState *dstate;
 	char	   *change_raw;
@@ -266,6 +269,7 @@ store_change(LogicalDecodingContext *ctx, ConcurrentChangeKind kind,
 	dst = dst_start + SizeOfConcurrentChange;
 	memcpy(dst, tuple->t_data, tuple->t_len);
 
+	change.xid = xid;
 	/* The data has been copied. */
 	if (flattened)
 		pfree(tuple);

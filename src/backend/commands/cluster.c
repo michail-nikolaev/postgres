@@ -55,6 +55,7 @@
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -145,6 +146,7 @@ static void apply_concurrent_delete(Relation rel, HeapTuple tup_target,
 									ConcurrentChange *change);
 static HeapTuple find_target_tuple(Relation rel, ScanKey key, int nkeys,
 								   HeapTuple tup_key,
+								   Snapshot snapshot,
 								   IndexInsertState *iistate,
 								   TupleTableSlot *ident_slot,
 								   IndexScanDesc *scan_p);
@@ -982,7 +984,14 @@ rebuild_relation(RepackCommand cmd, Relation OldHeap, Relation index,
 
 	/* The historic snapshot won't be needed anymore. */
 	if (snapshot)
+	{
+		TransactionId xmin = snapshot->xmin;
 		PopActiveSnapshot();
+		Assert(concurrent);
+		// TODO: seems like it not required: need to check SnapBuildInitialSnapshotForRepack
+		WaitForOlderSnapshots(xmin, false);
+	}
+
 
 	if (concurrent)
 	{
@@ -1273,29 +1282,34 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * not to be aggressive about this.
 	 */
 	memset(&params, 0, sizeof(VacuumParams));
-	vacuum_get_cutoffs(OldHeap, params, &cutoffs);
-
-	/*
-	 * FreezeXid will become the table's new relfrozenxid, and that mustn't go
-	 * backwards, so take the max.
-	 */
+	if (!concurrent)
 	{
 		TransactionId relfrozenxid = OldHeap->rd_rel->relfrozenxid;
+		MultiXactId relminmxid = OldHeap->rd_rel->relminmxid;
 
+		vacuum_get_cutoffs(OldHeap, params, &cutoffs);
+		/*
+		 * FreezeXid will become the table's new relfrozenxid, and that mustn't go
+		 * backwards, so take the max.
+		 */
 		if (TransactionIdIsValid(relfrozenxid) &&
 			TransactionIdPrecedes(cutoffs.FreezeLimit, relfrozenxid))
 			cutoffs.FreezeLimit = relfrozenxid;
-	}
-
-	/*
-	 * MultiXactCutoff, similarly, shouldn't go backwards either.
-	 */
-	{
-		MultiXactId relminmxid = OldHeap->rd_rel->relminmxid;
-
+		/*
+		 * MultiXactCutoff, similarly, shouldn't go backwards either.
+		 */
 		if (MultiXactIdIsValid(relminmxid) &&
 			MultiXactIdPrecedes(cutoffs.MultiXactCutoff, relminmxid))
 			cutoffs.MultiXactCutoff = relminmxid;
+	}
+	else
+	{
+		/*
+		 * In concurrent mode we reuse all the xmin/xmax,
+		 * so just use current values for simplicity.
+		 */
+		cutoffs.FreezeLimit = OldHeap->rd_rel->relfrozenxid;
+		cutoffs.MultiXactCutoff = OldHeap->rd_rel->relminmxid;
 	}
 
 	/*
@@ -2679,6 +2693,16 @@ apply_concurrent_changes(RepackDecodingState *dstate, Relation rel,
 			continue;
 		}
 
+		if (TransactionIdIsInProgress(change.xid))
+		{
+			/* xid is committed for sure because we got that update from reorderbuffer.
+			 * but there is a possibility procarray is not yet updated and current backend still see it as
+			 * in-progress. Let's wait for procarray to be updated. */
+			XactLockTableWait(change.xid, NULL, NULL, XLTW_None);
+			Assert(!TransactionIdIsInProgress(change.xid));
+			Assert(TransactionIdDidCommit(change.xid));
+		}
+
 		/*
 		 * Extract the tuple from the change. The tuple is copied here because
 		 * it might be assigned to 'tup_old', in which case it needs to
@@ -2716,9 +2740,13 @@ apply_concurrent_changes(RepackDecodingState *dstate, Relation rel,
 			}
 
 			/*
-			 * Find the tuple to be updated or deleted.
+			 * Find the tuple to be updated or deleted using SnapshotSelf.
+			 * That way we receive the last alive version in case of HOT chain.
+			 * It is guaranteed there is no any non-yet committed, but updated version
+			 * because we here replaying all-committed transactions without any concurrency
+			 * involved.
 			 */
-			tup_exist = find_target_tuple(rel, key, nkeys, tup_key,
+			tup_exist = find_target_tuple(rel, key, nkeys, tup_key, SnapshotSelf,
 										  iistate, ident_slot, &ind_scan);
 			if (tup_exist == NULL)
 				elog(ERROR, "Failed to find target tuple");
@@ -2747,6 +2775,7 @@ apply_concurrent_changes(RepackDecodingState *dstate, Relation rel,
 		 */
 		if (change.kind != CHANGE_UPDATE_OLD)
 		{
+			// TODO: not sure it is required at all: we are replaying committed transactions stamping them with committed XID
 			CommandCounterIncrement();
 			UpdateActiveSnapshotCommandId();
 		}
@@ -2775,9 +2804,11 @@ apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
 	 * Like simple_heap_insert(), but make sure that the INSERT is not
 	 * logically decoded - see reform_and_rewrite_tuple() for more
 	 * information.
+	 *
+	 * Use already committed xid to stamp the tuple.
 	 */
-	heap_insert(rel, tup, GetCurrentCommandId(true), HEAP_INSERT_NO_LOGICAL,
-				NULL);
+	heap_insert(rel, tup, change->xid, GetCurrentCommandId(true),
+				HEAP_INSERT_NO_LOGICAL, NULL);
 
 	/*
 	 * Update indexes.
@@ -2785,6 +2816,7 @@ apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
 	 * In case functions in the index need the active snapshot and caller
 	 * hasn't set one.
 	 */
+	PushActiveSnapshot(GetLatestSnapshot());
 	ExecStoreHeapTuple(tup, index_slot, false);
 	recheck = ExecInsertIndexTuples(iistate->rri,
 									index_slot,
@@ -2795,6 +2827,7 @@ apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
 									NIL,	/* arbiterIndexes */
 									false	/* onlySummarizing */
 		);
+	PopActiveSnapshot();
 
 	/*
 	 * If recheck is required, it must have been preformed on the source
@@ -2823,9 +2856,11 @@ apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
 	 *
 	 * Do it like in simple_heap_update(), except for 'wal_logical' (and
 	 * except for 'wait').
+	 *
+	 * Use already committed xid to stamp the tuple.
 	 */
 	res = heap_update(rel, &tup_target->t_self, tup,
-					  GetCurrentCommandId(true),
+					  change->xid, GetCurrentCommandId(true),
 					  InvalidSnapshot,
 					  false,	/* no wait - only we are doing changes */
 					  &tmfd, &lockmode, &update_indexes,
@@ -2837,6 +2872,7 @@ apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
 
 	if (update_indexes != TU_None)
 	{
+		PushActiveSnapshot(GetLatestSnapshot());
 		recheck = ExecInsertIndexTuples(iistate->rri,
 										index_slot,
 										iistate->estate,
@@ -2846,6 +2882,7 @@ apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
 										NIL,	/* arbiterIndexes */
 		/* onlySummarizing */
 										update_indexes == TU_Summarizing);
+		PopActiveSnapshot();
 		list_free(recheck);
 	}
 
@@ -2864,9 +2901,11 @@ apply_concurrent_delete(Relation rel, HeapTuple tup_target,
 	 *
 	 * Do it like in simple_heap_delete(), except for 'wal_logical' (and
 	 * except for 'wait').
+	 *
+	 * Use already committed xid to stamp the tuple.
 	 */
-	res = heap_delete(rel, &tup_target->t_self, GetCurrentCommandId(true),
-					  InvalidSnapshot, false,
+	res = heap_delete(rel, &tup_target->t_self, change->xid,
+					  GetCurrentCommandId(true), InvalidSnapshot, false,
 					  &tmfd,
 					  false,	/* no wait - only we are doing changes */
 					  false /* wal_logical */ );
@@ -2890,7 +2929,7 @@ apply_concurrent_delete(Relation rel, HeapTuple tup_target,
  */
 static HeapTuple
 find_target_tuple(Relation rel, ScanKey key, int nkeys, HeapTuple tup_key,
-				  IndexInsertState *iistate,
+				  Snapshot snapshot, IndexInsertState *iistate,
 				  TupleTableSlot *ident_slot, IndexScanDesc *scan_p)
 {
 	IndexScanDesc scan;
@@ -2899,7 +2938,7 @@ find_target_tuple(Relation rel, ScanKey key, int nkeys, HeapTuple tup_key,
 	HeapTuple	result = NULL;
 
 	/* XXX no instrumentation for now */
-	scan = index_beginscan(rel, iistate->ident_index, GetActiveSnapshot(),
+	scan = index_beginscan(rel, iistate->ident_index, snapshot,
 						   NULL, nkeys, 0);
 	*scan_p = scan;
 	index_rescan(scan, key, nkeys, NULL, 0);

@@ -311,7 +311,8 @@ toast_save_datum(Relation rel, Datum value,
 
 		toasttup = heap_form_tuple(toasttupDesc, t_values, t_isnull);
 
-		heap_insert(toastrel, toasttup, mycid, options, NULL);
+		heap_insert(toastrel, toasttup, GetCurrentTransactionId(), mycid,
+					options, NULL);
 
 		/*
 		 * Create the index entry.  We cheat a little here by not using

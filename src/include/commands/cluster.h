@@ -61,6 +61,8 @@ typedef struct ConcurrentChange
 	/* See the enum above. */
 	ConcurrentChangeKind kind;
 
+	/* Transaction that changes the data. */
+	TransactionId xid;
 	/*
 	 * The actual tuple.
 	 *
