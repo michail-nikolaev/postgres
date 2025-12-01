@@ -27,7 +27,6 @@ setup
 {
 	SELECT injection_points_set_local();
 	SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
-	SELECT injection_points_attach('pre-invalidate-catalog-snapshot-end', 'notice');
 }
 step s1_attach_invalidate_catalog_snapshot
 {
@@ -91,19 +90,43 @@ step s4_wakeup_define_index_before_set_valid
 }
 
 session s5
-step s5_noop
-{
+setup {
+	CREATE OR REPLACE PROCEDURE test.wait_for_injection_point()
+	LANGUAGE plpgsql
+	AS $$
+	DECLARE
+		v_waiting_pid INTEGER;
+	BEGIN
+		SELECT pid INTO v_waiting_pid
+		FROM pg_stat_activity
+		WHERE wait_event_type = 'InjectionPoint'
+		  AND wait_event = 'invalidate-catalog-snapshot-end'
+		LIMIT 1;
+
+		IF v_waiting_pid IS NOT NULL THEN
+			RETURN;
+		END IF;
+
+		PERFORM pg_sleep(100);
+
+		CALL test.wait_for_injection_point();
+	END;
+	$$;
 }
 step s5_wakeup_s1_from_invalidate_catalog_snapshot
 {
+	CALL test.wait_for_injection_point();
 	SELECT injection_points_detach('invalidate-catalog-snapshot-end');
 	SELECT injection_points_wakeup('invalidate-catalog-snapshot-end');
+}
+teardown
+{
+  DROP PROCEDURE test.wait_for_injection_point;
 }
 
 permutation
 	s1_attach_invalidate_catalog_snapshot
 	s4_wakeup_s1_setup
-	s5_noop(s1_start_upsert notices 1)
 	s3_start_create_index(s1_start_upsert, s2_start_upsert)
 	s1_start_upsert
 	s4_wakeup_define_index_before_set_valid
