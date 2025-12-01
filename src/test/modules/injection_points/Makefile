@@ -20,7 +20,9 @@ ISOLATION = basic \
 	    index-concurrently-upsert \
 	    reindex-concurrently-upsert \
 	    reindex-concurrently-upsert-on-constraint \
-	    index-concurrently-upsert-predicate
+	    index-concurrently-upsert-predicate \
+	    repack
+ISOLATION_OPTS = --temp-config $(top_srcdir)/src/test/modules/injection_points/logical.conf
 
 TAP_TESTS = 1
 

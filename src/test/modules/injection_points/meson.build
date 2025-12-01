@@ -47,6 +47,7 @@ tests += {
     'specs': [
       'basic',
       'inplace',
+      'repack',
       'syscache-update-pruned',
       'index-concurrently-upsert',
       'reindex-concurrently-upsert',
@@ -56,6 +57,8 @@ tests += {
     'runningcheck': false, # see syscache-update-pruned
     # Some tests wait for all snapshots, so avoid parallel execution
     'runningcheck-parallel': false,
+    # 'repack' requires wal_level = 'logical'.
+    'regress_args': ['--temp-config', files('logical.conf')],
   },
   'tap': {
     'env': {

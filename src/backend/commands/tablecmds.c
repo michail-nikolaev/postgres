@@ -5992,6 +5992,7 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 			finish_heap_swap(tab->relid, OIDNewHeap,
 							 false, false, true,
 							 !OidIsValid(tab->newTableSpace),
+							 true,
 							 RecentXmin,
 							 ReadNextMultiXactId(),
 							 persistence);

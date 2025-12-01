@@ -26,6 +26,7 @@
 #include "access/xlogrecovery.h"
 #include "access/xlogwait.h"
 #include "commands/async.h"
+#include "commands/cluster.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
