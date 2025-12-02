@@ -28,6 +28,7 @@
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "tcop/tcopprot.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
@@ -677,6 +678,8 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	buildstate.accum.ginstate = &buildstate.ginstate;
 	ginInitBA(&buildstate.accum);
 
+	Assert(!indexInfo->ii_Concurrent || indexInfo->ii_ParallelWorkers || !TransactionIdIsValid(MyProc->xid));
+
 	/* Report table scan phase started */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 								 PROGRESS_GIN_PHASE_INDEXBUILD_TABLESCAN);
@@ -739,11 +742,13 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			tuplesort_begin_index_gin(heap, index,
 									  maintenance_work_mem, coordinate,
 									  TUPLESORT_NONE);
+		InvalidateCatalogSnapshot();
 
 		/* scan the relation in parallel and merge per-worker results */
 		reltuples = _gin_parallel_merge(state);
 
 		_gin_end_parallel(state->bs_leader, state);
+		Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 	}
 	else						/* no parallel index build */
 	{
@@ -753,6 +758,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		 */
 		reltuples = table_index_build_scan(heap, index, indexInfo, false, true,
 										   ginBuildCallback, &buildstate, NULL);
+		InvalidateCatalogSnapshot();
 
 		/* dump remaining entries to the index */
 		oldCtx = MemoryContextSwitchTo(buildstate.tmpCtx);
@@ -766,6 +772,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 						   list, nlist, &buildstate.buildStats);
 		}
 		MemoryContextSwitchTo(oldCtx);
+		Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 	}
 
 	MemoryContextDelete(buildstate.funcCtx);
@@ -938,6 +945,7 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	bool		leaderparticipates = true;
+	bool		need_pop_active_snapshot = true;
 	int			querylen;
 
 #ifdef DISABLE_LEADER_PARTICIPATION
@@ -962,9 +970,16 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	 * live according to that.
 	 */
 	if (!isconcurrent)
+	{
+		Assert(ActiveSnapshotSet());
 		snapshot = SnapshotAny;
+		need_pop_active_snapshot = false;
+	}
 	else
+	{
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_GIN_SHARED workspace.
@@ -1007,6 +1022,8 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		if (IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
@@ -1081,6 +1098,8 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		_gin_end_parallel(ginleader, NULL);
 		return;
 	}
@@ -1097,6 +1116,8 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	 * sure that the failure-to-start case will not hang forever.
 	 */
 	WaitForParallelWorkersToAttach(pcxt);
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 }
 
 /*

@@ -1194,6 +1194,8 @@ heapam_index_build_range_scan(Relation heapRelation,
 	ExprContext *econtext;
 	Snapshot	snapshot;
 	bool		need_unregister_snapshot = false;
+	bool		need_pop_active_snapshot = false;
+	bool		reset_snapshots = false;
 	TransactionId OldestXmin;
 	BlockNumber previous_blkno = InvalidBlockNumber;
 	BlockNumber root_blkno = InvalidBlockNumber;
@@ -1228,9 +1230,6 @@ heapam_index_build_range_scan(Relation heapRelation,
 	/* Arrange for econtext's scan tuple to be the tuple under test */
 	econtext->ecxt_scantuple = slot;
 
-	/* Set up execution state for predicate, if any. */
-	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
-
 	/*
 	 * Prepare for scan of the base relation.  In a normal index build, we use
 	 * SnapshotAny because we must retrieve all tuples and do our own time
@@ -1240,6 +1239,15 @@ heapam_index_build_range_scan(Relation heapRelation,
 	 */
 	OldestXmin = InvalidTransactionId;
 
+	/*
+	 * For unique index we need consistent snapshot for the whole scan.
+	 * In case of parallel scan some additional infrastructure required
+	 * to perform scan with SO_RESET_SNAPSHOT which is not yet ready.
+	 */
+	reset_snapshots = indexInfo->ii_Concurrent &&
+					  !indexInfo->ii_Unique &&
+					  !is_system_catalog; /* just for the case */
+
 	/* okay to ignore lazy VACUUMs here */
 	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
 		OldestXmin = GetOldestNonRemovableTransactionId(heapRelation);
@@ -1248,24 +1256,41 @@ heapam_index_build_range_scan(Relation heapRelation,
 	{
 		/*
 		 * Serial index build.
-		 *
-		 * Must begin our own heap scan in this case.  We may also need to
-		 * register a snapshot whose lifetime is under our direct control.
 		 */
 		if (!TransactionIdIsValid(OldestXmin))
 		{
-			snapshot = RegisterSnapshot(GetTransactionSnapshot());
-			need_unregister_snapshot = true;
+			snapshot = GetTransactionSnapshot();
+			/*
+			 * Must begin our own heap scan in this case.  We may also need to
+			 * register a snapshot whose lifetime is under our direct control.
+			 * In case of resetting of snapshot during the scan registration is
+			 * not allowed because snapshot is going to be changed every so
+			 * often.
+			 */
+			if (!reset_snapshots)
+			{
+				snapshot = RegisterSnapshot(snapshot);
+				need_unregister_snapshot = true;
+			}
+			Assert(!ActiveSnapshotSet());
+			PushActiveSnapshot(snapshot);
+			/* store link to snapshot because it may be copied */
+			snapshot = GetActiveSnapshot();
+			need_pop_active_snapshot = true;
 		}
 		else
+		{
+			Assert(!indexInfo->ii_Concurrent);
 			snapshot = SnapshotAny;
+		}
 
 		scan = table_beginscan_strat(heapRelation,	/* relation */
 									 snapshot,	/* snapshot */
 									 0, /* number of keys */
 									 NULL,	/* scan key */
 									 true,	/* buffer access strategy OK */
-									 allow_sync);	/* syncscan OK? */
+									 allow_sync,	/* syncscan OK? */
+									 reset_snapshots /* reset snapshots? */);
 	}
 	else
 	{
@@ -1279,6 +1304,8 @@ heapam_index_build_range_scan(Relation heapRelation,
 		Assert(!IsBootstrapProcessingMode());
 		Assert(allow_sync);
 		snapshot = scan->rs_snapshot;
+		PushActiveSnapshot(snapshot);
+		need_pop_active_snapshot = true;
 	}
 
 	hscan = (HeapScanDesc) scan;
@@ -1293,6 +1320,13 @@ heapam_index_build_range_scan(Relation heapRelation,
 	Assert(snapshot == SnapshotAny ? TransactionIdIsValid(OldestXmin) :
 		   !TransactionIdIsValid(OldestXmin));
 	Assert(snapshot == SnapshotAny || !anyvisible);
+	Assert(snapshot == SnapshotAny || ActiveSnapshotSet());
+
+	/* Set up execution state for predicate, if any. */
+	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+	/* Clear reference to snapshot since it may be changed by the scan itself. */
+	if (reset_snapshots)
+		snapshot = InvalidSnapshot;
 
 	/* Publish number of blocks to scan */
 	if (progress)
@@ -1728,6 +1762,8 @@ heapam_index_build_range_scan(Relation heapRelation,
 
 	table_endscan(scan);
 
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 	/* we can now forget our snapshot, if set and registered by us */
 	if (need_unregister_snapshot)
 		UnregisterSnapshot(snapshot);
@@ -1800,7 +1836,8 @@ heapam_index_validate_scan(Relation heapRelation,
 								 0, /* number of keys */
 								 NULL,	/* scan key */
 								 true,	/* buffer access strategy OK */
-								 false);	/* syncscan not OK */
+								 false,	/* syncscan not OK */
+								 false);
 	hscan = (HeapScanDesc) scan;
 
 	pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL,

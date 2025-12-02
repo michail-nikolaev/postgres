@@ -1216,11 +1216,12 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		state->bs_sortstate =
 			tuplesort_begin_index_brin(maintenance_work_mem, coordinate,
 									   TUPLESORT_NONE);
-
+		InvalidateCatalogSnapshot();
 		/* scan the relation and merge per-worker results */
 		reltuples = _brin_parallel_merge(state);
 
 		_brin_end_parallel(state->bs_leader, state);
+		Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 	}
 	else						/* no parallel index build */
 	{
@@ -1233,6 +1234,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		reltuples = table_index_build_scan(heap, index, indexInfo, false, true,
 										   brinbuildCallback, state, NULL);
 
+		InvalidateCatalogSnapshot();
 		/*
 		 * process the final batch
 		 *
@@ -1252,6 +1254,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		brin_fill_empty_ranges(state,
 							   state->bs_currRangeStart,
 							   state->bs_maxRangeStart);
+		Assert(!indexInfo->ii_Concurrent || !TransactionIdIsValid(MyProc->xmin));
 	}
 
 	/* release resources */
@@ -2388,6 +2391,7 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	bool		leaderparticipates = true;
+	bool		need_pop_active_snapshot = true;
 	int			querylen;
 
 #ifdef DISABLE_LEADER_PARTICIPATION
@@ -2413,9 +2417,16 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	 * live according to that.
 	 */
 	if (!isconcurrent)
+	{
+		Assert(ActiveSnapshotSet());
 		snapshot = SnapshotAny;
+		need_pop_active_snapshot = false;
+	}
 	else
+	{
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 
 	/*
 	 * Estimate size for our own PARALLEL_KEY_BRIN_SHARED workspace.
@@ -2458,6 +2469,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		if (IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
@@ -2537,6 +2550,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (need_pop_active_snapshot)
+			PopActiveSnapshot();
 		_brin_end_parallel(brinleader, NULL);
 		return;
 	}
@@ -2553,6 +2568,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	 * sure that the failure-to-start case will not hang forever.
 	 */
 	WaitForParallelWorkersToAttach(pcxt);
+	if (need_pop_active_snapshot)
+		PopActiveSnapshot();
 }
 
 /*
