@@ -51,6 +51,7 @@ tests += {
       't/005_pitr.pl',
       't/006_verify_gin.pl',
       't/007_repack_concurrently.pl',
+      't/008_repack_concurrently.pl',
     ],
   },
 }
