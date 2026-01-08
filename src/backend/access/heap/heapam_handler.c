@@ -33,6 +33,7 @@
 #include "catalog/index.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "commands/cluster.h"
 #include "commands/progress.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -686,12 +687,12 @@ static void
 heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
-								 Snapshot snapshot,
 								 TransactionId *xid_cutoff,
 								 MultiXactId *multi_cutoff,
 								 double *num_tuples,
 								 double *tups_vacuumed,
-								 double *tups_recently_dead)
+								 double *tups_recently_dead,
+								 void *tableam_data)
 {
 	RewriteState rwstate = NULL;
 	IndexScanDesc indexScan;
@@ -707,7 +708,10 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bool	   *isnull;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
-	bool		concurrent = snapshot != NULL;
+	ConcurrentChangeContext *ctx = (ConcurrentChangeContext *) tableam_data;
+	bool		concurrent = ctx != NULL;
+	Snapshot	snapshot = NULL;
+	BlockNumber range_end = InvalidBlockNumber;
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
@@ -744,8 +748,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 * that still need to be copied, we scan with SnapshotAny and use
 	 * HeapTupleSatisfiesVacuum for the visibility test.
 	 *
-	 * In the CONCURRENTLY case, we do regular MVCC visibility tests, using
-	 * the snapshot passed by the caller.
+	 * In the CONCURRENTLY case, we do regular MVCC visibility tests. The
+	 * snapshot changes several times during the scan so that we do not block
+	 * the progress of the xmin horizon for VACUUM too much.
 	 */
 	if (OldIndex != NULL && !use_sort)
 	{
@@ -773,10 +778,15 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_SEQ_SCAN_HEAP);
 
-		tableScan = table_beginscan(OldHeap,
-									snapshot ? snapshot : SnapshotAny,
-									0, (ScanKey) NULL);
+		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL);
 		heapScan = (HeapScanDesc) tableScan;
+
+		/*
+		 * In CONCURRENTLY mode we scan the table by ranges of blocks and the
+		 * algorithm below expects forward direction. (No other direction
+		 * should be set here regardless concurrently anyway.)
+		 */
+		Assert(heapScan->rs_dir == ForwardScanDirection || !concurrent);
 		indexScan = NULL;
 
 		/* Set total heap blocks */
@@ -786,6 +796,24 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	slot = table_slot_create(OldHeap, NULL);
 	hslot = (BufferHeapTupleTableSlot *) slot;
+
+	if (concurrent)
+	{
+		/*
+		 * Do not block the progress of xmin horizons.
+		 *
+		 * TODO Analyze thoroughly if this might have bad consequences.
+		 */
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+
+		/*
+		 * Wait until the worker has the initial snapshot and retrieve it.
+		 */
+		snapshot = repack_get_snapshot(ctx);
+
+		PushActiveSnapshot(snapshot);
+	}
 
 	/*
 	 * Scan through the OldHeap, either in OldIndex order or sequentially;
@@ -803,6 +831,13 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		if (indexScan != NULL)
 		{
+			/*
+			 * Index scan should not be used in the CONCURRENTLY case because
+			 * it returns tuples in random order, so we could not split the
+			 * scan into a series of page ranges.
+			 */
+			Assert(!concurrent);
+
 			if (!index_getnext_slot(indexScan, ForwardScanDirection, slot))
 				break;
 
@@ -824,6 +859,18 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				 */
 				pgstat_progress_update_param(PROGRESS_REPACK_HEAP_BLKS_SCANNED,
 											 heapScan->rs_nblocks);
+
+				if (concurrent)
+				{
+					PopActiveSnapshot();
+
+					/*
+					 * For the last range, there are no restriction on block
+					 * numbers, so the concurrent data changes pertaining to
+					 * this range can decoded (and applied) anytime after this
+					 * loop.
+					 */
+				}
 				break;
 			}
 
@@ -922,6 +969,75 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				continue;
 			}
 		}
+		else
+		{
+			BlockNumber blkno;
+			bool		visible;
+
+			/*
+			 * With CONCURRENTLY, we use each snapshot only for certain range
+			 * of pages, so that VACUUM does not get block for too long. So
+			 * first check if the tuple falls into the current range.
+			 */
+			blkno = BufferGetBlockNumber(buf);
+
+			/* The first block of the scan? */
+			if (!BlockNumberIsValid(ctx->first_block))
+			{
+				Assert(!BlockNumberIsValid(range_end));
+
+				ctx->first_block = blkno;
+				range_end = repack_blocks_per_snapshot;
+			}
+			else
+			{
+				Assert(BlockNumberIsValid(range_end));
+
+				/* End of the current range? */
+				if (blkno >= range_end)
+				{
+					XLogRecPtr	end_of_wal;
+
+					PopActiveSnapshot();
+
+					/*
+					 * XXX It might be worth Assert(CatalogSnapshot == NULL)
+					 * here, however that symbol is not external.
+					 */
+
+					/*
+					 * Decode all the concurrent data changes committed so far
+					 * - these will be applicable to the current range.
+					 */
+					end_of_wal = GetFlushRecPtr(NULL);
+					repack_get_concurrent_changes(ctx, end_of_wal, range_end,
+												  true, false);
+
+					/*
+					 * Define the next range.
+					 */
+					range_end = blkno + repack_blocks_per_snapshot;
+
+					/*
+					 * Get the snapshot for the next range - it should have
+					 * been built at the position right after the last change
+					 * decoded. Data present in the next range of blocks will
+					 * either be visible to the snapshot or appear in the next
+					 * batch of decoded changes.
+					 */
+					snapshot = repack_get_snapshot(ctx);
+					PushActiveSnapshot(snapshot);
+				}
+			}
+
+			/* Finally check the tuple visibility. */
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			visible = HeapTupleSatisfiesVisibility(tuple, snapshot, buf);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (!visible)
+				continue;
+		}
 
 		*num_tuples += 1;
 		if (tuplesort != NULL)
@@ -954,6 +1070,18 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			ct_val[1] = *num_tuples;
 			pgstat_progress_update_multi_param(2, ct_index, ct_val);
 		}
+	}
+
+	if (concurrent)
+	{
+		XLogRecPtr	end_of_wal;
+
+		/* Decode the changes belonging to the last range. */
+		end_of_wal = GetFlushRecPtr(NULL);
+		repack_get_concurrent_changes(ctx, end_of_wal, InvalidBlockNumber,
+									  false, false);
+
+		PushActiveSnapshot(GetTransactionSnapshot());
 	}
 
 	if (indexScan != NULL)
