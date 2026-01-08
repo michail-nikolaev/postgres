@@ -1,5 +1,5 @@
 
-# Copyright (c) 2025, PostgreSQL Global Development Group
+# Copyright (c) 2026, PostgreSQL Global Development Group
 
 # Test INSERT ON CONFLICT DO UPDATE behavior concurrent with
 # CREATE INDEX CONCURRENTLY and REINDEX CONCURRENTLY.
@@ -793,7 +793,7 @@ done_testing();
 sub wait_for_injection_point
 {
 	my ($node, $point_name, $timeout) = @_;
-	$timeout //= $PostgreSQL::Test::Utils::timeout_default;
+	$timeout //= $PostgreSQL::Test::Utils::timeout_default / 2;
 
 	for (my $elapsed = 0; $elapsed < $timeout * 10; $elapsed++)
 	{
@@ -833,19 +833,23 @@ sub ok_injection_point
 }
 
 # Helper: Wait for a specific backend to become idle.
-# Returns true if idle, false if timeout.
+# Returns true if idle, false if waiting for injection point or timeout.
 sub wait_for_idle
 {
 	my ($node, $pid, $timeout) = @_;
-	$timeout //= $PostgreSQL::Test::Utils::timeout_default;
+	$timeout //= $PostgreSQL::Test::Utils::timeout_default / 2;
 
 	for (my $elapsed = 0; $elapsed < $timeout * 10; $elapsed++)
 	{
-		my $state = $node->safe_psql(
+		my $result = $node->safe_psql(
 			'postgres', qq[
-			SELECT state FROM pg_stat_activity WHERE pid = $pid;
+			SELECT state, wait_event_type FROM pg_stat_activity WHERE pid = $pid;
 		]);
+		my ($state, $wait_event_type) = split(/\|/, $result, 2);
+		$state //= '';
+		$wait_event_type //= '';
 		return 1 if $state eq 'idle';
+		return 0 if $wait_event_type eq 'InjectionPoint';
 		sleep(0.1);
 	}
 	return 0;
