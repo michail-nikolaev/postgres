@@ -14,6 +14,7 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "commands/cluster.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "libpq/pqmq.h"
@@ -174,6 +175,10 @@ mq_putmessage(char msgtype, const char *s, size_t len)
 			if (IsLogicalParallelApplyWorker())
 				SendProcSignal(pq_mq_parallel_leader_pid,
 							   PROCSIG_PARALLEL_APPLY_MESSAGE,
+							   pq_mq_parallel_leader_proc_number);
+			else if (IsRepackWorker())
+				SendProcSignal(pq_mq_parallel_leader_pid,
+							   PROCSIG_REPACK_MESSAGE,
 							   pq_mq_parallel_leader_proc_number);
 			else
 			{
