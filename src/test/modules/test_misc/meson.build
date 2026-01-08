@@ -20,7 +20,5 @@ tests += {
       't/009_log_temp_files.pl',
       't/010_index_concurrently_upsert.pl',
     ],
-    # The injection points are cluster-wide, so disable installcheck
-    'runningcheck': false,
   },
 }

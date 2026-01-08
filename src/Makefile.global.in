@@ -469,6 +469,7 @@ cd $(srcdir) && \
    TESTLOGDIR='$(CURDIR)/tmp_check/log' \
    TESTDATADIR='$(CURDIR)/tmp_check' \
    PATH="$(bindir):$(CURDIR):$$PATH" \
+   is_installcheck='yes' \
    PGPORT='6$(DEF_PGPORT)' top_builddir='$(CURDIR)/$(top_builddir)' \
    PG_REGRESS='$(CURDIR)/$(top_builddir)/src/test/regress/pg_regress' \
    share_contrib_dir='$(DESTDIR)$(datadir)/$(datamoduledir)' \
@@ -483,6 +484,7 @@ cd $(srcdir) && \
    TESTLOGDIR='$(CURDIR)/tmp_check/log' \
    TESTDATADIR='$(CURDIR)/tmp_check' \
    PATH="$(bindir):$(CURDIR):$$PATH" \
+   is_installcheck='yes' \
    PGPORT='6$(DEF_PGPORT)' \
    PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' \
    $(PROVE) $(PG_PROVE_FLAGS) $(PROVE_FLAGS) $(if $(PROVE_TESTS),$(PROVE_TESTS),t/*.pl)
@@ -497,6 +499,7 @@ cd $(srcdir) && \
    TESTLOGDIR='$(CURDIR)/tmp_check/log' \
    TESTDATADIR='$(CURDIR)/tmp_check' \
    $(with_temp_install) \
+   is_installcheck='no' \
    PGPORT='6$(DEF_PGPORT)' top_builddir='$(CURDIR)/$(top_builddir)' \
    PG_REGRESS='$(CURDIR)/$(top_builddir)/src/test/regress/pg_regress' \
    share_contrib_dir='$(abs_top_builddir)/tmp_install$(datadir)/$(datamoduledir)' \
@@ -705,6 +708,7 @@ pg_regress_clean_files = results/ regression.diffs regression.out tmp_check/ tmp
 pg_regress_check = \
     echo "\# +++ regress check in $(subdir) +++" && \
     $(with_temp_install) \
+    is_installcheck='no' \
     $(top_builddir)/src/test/regress/pg_regress \
     --temp-instance=./tmp_check \
     --inputdir=$(srcdir) \
@@ -713,6 +717,7 @@ pg_regress_check = \
     $(pg_regress_locale_flags) $(EXTRA_REGRESS_OPTS)
 pg_regress_installcheck = \
     echo "\# +++ regress install-check in $(subdir) +++" && \
+    is_installcheck='yes' \
     $(top_builddir)/src/test/regress/pg_regress \
     --inputdir=$(srcdir) \
     --bindir='$(bindir)' \
@@ -721,6 +726,7 @@ pg_regress_installcheck = \
 pg_isolation_regress_check = \
     echo "\# +++ isolation check in $(subdir) +++" && \
     $(with_temp_install) \
+    is_installcheck='no' \
     $(top_builddir)/src/test/isolation/pg_isolation_regress \
     --temp-instance=./tmp_check_iso \
     --inputdir=$(srcdir) --outputdir=output_iso \
@@ -729,6 +735,7 @@ pg_isolation_regress_check = \
     $(pg_regress_locale_flags) $(EXTRA_REGRESS_OPTS)
 pg_isolation_regress_installcheck = \
     echo "\# +++ isolation install-check in $(subdir) +++" && \
+    is_installcheck='yes' \
     $(top_builddir)/src/test/isolation/pg_isolation_regress \
     --inputdir=$(srcdir) --outputdir=output_iso \
     --bindir='$(bindir)' \

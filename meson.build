@@ -3811,9 +3811,11 @@ endforeach # directories with tests
 # repeat condition so meson realizes version dependency
 add_test_setup('tmp_install',
   is_default: true,
-  exclude_suites: running_suites)
+  exclude_suites: running_suites,
+  env: {'is_installcheck': 'no'})
 add_test_setup('running',
-  exclude_suites: ['setup'] + install_suites)
+  exclude_suites: ['setup'] + install_suites,
+  env: {'is_installcheck': 'yes'})
 
 
 

@@ -19,6 +19,11 @@ use Test::More;
 plan skip_all => 'Injection points not supported by this build'
   unless $ENV{enable_injection_points} eq 'yes';
 
+plan skip_all => 'The injection points are cluster-wide, so skip for installcheck'
+    unless ($ENV{is_installcheck} eq 'no');
+
+is($ENV{is_installcheck}, 'no', 'should not be executed during installcheck');
+
 # Node initialization
 my $node = PostgreSQL::Test::Cluster->new('node');
 $node->init();
