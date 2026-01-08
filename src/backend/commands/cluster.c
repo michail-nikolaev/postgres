@@ -70,8 +70,7 @@ typedef struct
 
 static bool cluster_rel_recheck(RepackCommand cmd, Relation OldHeap,
 								Oid indexOid, Oid userid, int options);
-static void rebuild_relation(RepackCommand cmd,
-							 Relation OldHeap, Relation index, bool verbose);
+static void rebuild_relation(Relation OldHeap, Relation index, bool verbose);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 							bool verbose, bool *pSwapToastByContent,
 							TransactionId *pFreezeXid, MultiXactId *pCutoffMulti);
@@ -415,7 +414,7 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	TransferPredicateLocksToHeapRelation(OldHeap);
 
 	/* rebuild_relation does all the dirty work */
-	rebuild_relation(cmd, OldHeap, index, verbose);
+	rebuild_relation(OldHeap, index, verbose);
 	/* rebuild_relation closes OldHeap, and index if valid */
 
 out:
@@ -629,8 +628,7 @@ mark_index_clustered(Relation rel, Oid indexOid, bool is_internal)
  * On exit, they are closed, but locks on them are not released.
  */
 static void
-rebuild_relation(RepackCommand cmd,
-				 Relation OldHeap, Relation index, bool verbose)
+rebuild_relation(Relation OldHeap, Relation index, bool verbose)
 {
 	Oid			tableOid = RelationGetRelid(OldHeap);
 	Oid			accessMethod = OldHeap->rd_rel->relam;
