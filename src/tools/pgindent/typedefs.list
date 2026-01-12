@@ -496,7 +496,6 @@ CompressFileHandle
 CompressionLocation
 CompressorState
 ComputeXidHorizonsResult
-ConcurrentChange
 ConcurrentChangeKind
 ConditionVariable
 ConditionVariableMinimallyPadded
@@ -636,6 +635,9 @@ DeclareCursorStmt
 DecodedBkpBlock
 DecodedXLogRecord
 DecodingOutputState
+DecodingWorker
+DecodingWorkerShared
+DecodingWorkerState
 DefElem
 DefElemAction
 DefaultACLInfo

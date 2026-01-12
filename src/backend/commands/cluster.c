@@ -12,12 +12,13 @@
  * In concurrent mode, we lock the table with only ShareUpdateExclusiveLock,
  * then do an initial copy as above.  However, while the tuples are being
  * copied, concurrent transactions could modify the table. To cope with those
- * changes, we rely on logical decoding to obtain them from WAL.  The changes
- * are accumulated in a tuplestore.  Once the initial copy is complete, we
- * read the changes from the tuplestore and re-apply them on the new heap.
- * Then we upgrade our ShareUpdateExclusiveLock to AccessExclusiveLock and
- * swap the relfilenodes.  This way, the time we hold a strong lock on the
- * table is much reduced, and the bloat is eliminated.
+ * changes, we rely on logical decoding to obtain them from WAL.  A bgworker
+ * consumes WAL while the initial copy is ongoing (to prevent excessive WAL
+ * from being reserved), and accumulates the changes in a file.  Once the
+ * initial copy is complete, we read the changes from the file and re-apply
+ * them on the new heap.  Then we upgrade our ShareUpdateExclusiveLock to
+ * AccessExclusiveLock and swap the relfilenodes.  This way, the time we hold
+ * a strong lock on the table is much reduced, and the bloat is eliminated.
  *
  * There is hardly anything left of Paul Brown's original implementation...
  *
@@ -45,6 +46,7 @@
 #include "access/xlog_internal.h"
 #include "access/xloginsert.h"
 #include "access/xlogutils.h"
+#include "access/xlogwait.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
@@ -61,6 +63,8 @@
 #include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
+#include "libpq/pqformat.h"
+#include "libpq/pqmq.h"
 #include "miscadmin.h"
 #include "optimizer/optimizer.h"
 #include "pgstat.h"
@@ -71,6 +75,8 @@
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/procsignal.h"
+#include "tcop/tcopprot.h"
 #include "utils/acl.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -118,6 +124,12 @@ typedef struct IndexInsertState
 static XLogSegNo repack_current_segment = 0;
 
 /*
+ * The first file exported by the decoding worker must contain a snapshot, the
+ * following ones contain the data changes.
+ */
+#define WORKER_FILE_SNAPSHOT	0
+
+/*
  * Information needed to apply concurrent data changes.
  */
 typedef struct ChangeDest
@@ -136,7 +148,112 @@ typedef struct ChangeDest
 
 	/* Needed to update indexes of rel_dst. */
 	IndexInsertState *iistate;
+
+	/*
+	 * Sequential number of the file containing the changes.
+	 *
+	 * TODO This field makes the structure name less descriptive. Should we
+	 * rename it, e.g. to ChangeApplyInfo?
+	 */
+	int		file_seq;
 } ChangeDest;
+
+/*
+ * Layout of shared memory used for communication between backend and the
+ * worker that performs logical decoding of data changes
+ */
+typedef struct DecodingWorkerShared
+{
+	/* Is the decoding initialized? */
+	bool		initialized;
+
+	/*
+	 * Once the worker has reached this LSN, it should close the current
+	 * output file and either create a new one or exit, according to the field
+	 * 'done'. If the value is InvalidXLogRecPtr, the worker should decode all
+	 * the WAL available and keep checking this field. It is ok if the worker
+	 * had already decoded records whose LSN is >= lsn_upto before this field
+	 * has been set.
+	 */
+	XLogRecPtr	lsn_upto;
+
+	/* Exit after closing the current file? */
+	bool		done;
+
+	/* The output is stored here. */
+	SharedFileSet sfs;
+
+	/* Number of the last file exported by the worker. */
+	int			last_exported;
+
+	/* Synchronize access to the fields above. */
+	slock_t		mutex;
+
+	/* Database to connect to. */
+	Oid			dbid;
+
+	/* Role to connect as. */
+	Oid			roleid;
+
+	/* Decode data changes of this relation. */
+	Oid			relid;
+
+	/* The backend uses this to wait for the worker. */
+	ConditionVariable cv;
+
+	/* Info to signal the backend. */
+	PGPROC	   *backend_proc;
+	pid_t		backend_pid;
+	ProcNumber	backend_proc_number;
+
+	/* Error queue. */
+	shm_mq	   *error_mq;
+
+	/*
+	 * Memory the queue is located int.
+	 *
+	 * For considerations on the value see the comments of
+	 * PARALLEL_ERROR_QUEUE_SIZE.
+	 */
+#define REPACK_ERROR_QUEUE_SIZE			16384
+	char		error_queue[FLEXIBLE_ARRAY_MEMBER];
+} DecodingWorkerShared;
+
+/*
+ * Generate worker's output file name. If relations of the same 'relid' happen
+ * to be processed at the same time, they must be from different databases and
+ * therefore different backends must be involved. (PID is already present in
+ * the fileset name.)
+ */
+static inline void
+DecodingWorkerFileName(char *fname, Oid relid, uint32 seq)
+{
+	snprintf(fname, MAXPGPATH, "%u-%u", relid, seq);
+}
+
+/*
+ * Backend-local information to control the decoding worker.
+ */
+typedef struct DecodingWorker
+{
+	/* The worker. */
+	BackgroundWorkerHandle *handle;
+
+	/* DecodingWorkerShared is in this segment. */
+	dsm_segment *seg;
+
+	/* Handle of the error queue. */
+	shm_mq_handle *error_mqh;
+} DecodingWorker;
+
+/* Pointer to currently running decoding worker. */
+static DecodingWorker *decoding_worker = NULL;
+
+/*
+ * Is there a message sent by a repack worker that the backend needs to
+ * receive?
+ */
+volatile sig_atomic_t RepackMessagePending = false;
 
 static bool cluster_rel_recheck(RepackCommand cmd, Relation OldHeap,
 								Oid indexOid, Oid userid, LOCKMODE lmode,
@@ -145,7 +262,7 @@ static void check_repack_concurrently_requirements(Relation rel);
 static void rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 							 bool concurrent);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-							Snapshot snapshot, LogicalDecodingContext *decoding_ctx,
+							Snapshot snapshot,
 							bool verbose,
 							bool *pSwapToastByContent,
 							TransactionId *pFreezeXid,
@@ -158,12 +275,10 @@ static List *get_tables_to_repack_partitioned(RepackCommand cmd,
 static bool cluster_is_permitted_for_relation(RepackCommand cmd,
 											  Oid relid, Oid userid);
 
-static void begin_concurrent_repack(Relation rel);
-static void end_concurrent_repack(void);
 static LogicalDecodingContext *setup_logical_decoding(Oid relid);
-static HeapTuple get_changed_tuple(char *change);
-static void apply_concurrent_changes(RepackDecodingState *dstate,
-									 ChangeDest *dest);
+static bool decode_concurrent_changes(LogicalDecodingContext *ctx,
+									  DecodingWorkerShared *shared);
+static void apply_concurrent_changes(BufFile *file, ChangeDest *dest);
 static void apply_concurrent_insert(Relation rel, HeapTuple tup,
 									IndexInsertState *iistate,
 									TupleTableSlot *index_slot);
@@ -175,9 +290,9 @@ static void apply_concurrent_delete(Relation rel, HeapTuple tup_target);
 static HeapTuple find_target_tuple(Relation rel, ChangeDest *dest,
 								   HeapTuple tup_key,
 								   TupleTableSlot *ident_slot);
-static void process_concurrent_changes(LogicalDecodingContext *decoding_ctx,
-									   XLogRecPtr end_of_wal,
-									   ChangeDest *dest);
+static void process_concurrent_changes(XLogRecPtr end_of_wal,
+									   ChangeDest *dest,
+									   bool done);
 static IndexInsertState *get_index_insert_state(Relation relation,
 												Oid ident_index_id,
 												Relation *ident_index_p);
@@ -186,7 +301,6 @@ static ScanKey build_identity_key(Oid ident_idx_oid, Relation rel_src,
 static void free_index_insert_state(IndexInsertState *iistate);
 static void cleanup_logical_decoding(LogicalDecodingContext *ctx);
 static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
-											   LogicalDecodingContext *decoding_ctx,
 											   TransactionId frozenXid,
 											   MultiXactId cutoffMulti);
 static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
@@ -196,6 +310,13 @@ static Relation process_single_relation(RepackStmt *stmt,
 										ClusterParams *params);
 static Oid	determine_clustered_index(Relation rel, bool usingindex,
 									  const char *indexname);
+static void start_decoding_worker(Oid relid);
+static void stop_decoding_worker(void);
+static void repack_worker_internal(dsm_segment *seg);
+static void export_initial_snapshot(Snapshot snapshot,
+									DecodingWorkerShared *shared);
+static Snapshot get_initial_snapshot(DecodingWorker *worker);
+static void ProcessRepackMessage(StringInfo msg);
 static const char *RepackCommandAsString(RepackCommand cmd);
 
 
@@ -619,20 +740,20 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	/* rebuild_relation does all the dirty work */
 	PG_TRY();
 	{
-		/*
-		 * For concurrent processing, make sure that our logical decoding
-		 * ignores data changes of other tables than the one we are
-		 * processing.
-		 */
-		if (concurrent)
-			begin_concurrent_repack(OldHeap);
-
 		rebuild_relation(OldHeap, index, verbose, concurrent);
 	}
 	PG_FINALLY();
 	{
 		if (concurrent)
-			end_concurrent_repack();
+		{
+			/*
+			 * Since during normal operation the worker was already asked to
+			 * exit, stopping it explicitly is especially important on ERROR.
+			 * However it still seems a good practice to make sure that the
+			 * worker never survives the REPACK command.
+			 */
+			stop_decoding_worker();
+		}
 	}
 	PG_END_TRY();
 
@@ -929,7 +1050,6 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	bool		swap_toast_by_content;
 	TransactionId frozenXid;
 	MultiXactId cutoffMulti;
-	LogicalDecodingContext *decoding_ctx = NULL;
 	Snapshot	snapshot = NULL;
 #if USE_ASSERT_CHECKING
 	LOCKMODE	lmode;
@@ -943,19 +1063,36 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	if (concurrent)
 	{
 		/*
-		 * Prepare to capture the concurrent data changes.
+		 * The worker needs to be member of the locking group we're the leader
+		 * of. We ought to become the leader before the worker starts. The
+		 * worker will join the group as soon as it starts.
 		 *
-		 * Note that this call waits for all transactions with XID already
-		 * assigned to finish. If some of those transactions is waiting for a
-		 * lock conflicting with ShareUpdateExclusiveLock on our table (e.g.
-		 * it runs CREATE INDEX), we can end up in a deadlock. Not sure this
-		 * risk is worth unlocking/locking the table (and its clustering
-		 * index) and checking again if its still eligible for REPACK
-		 * CONCURRENTLY.
+		 * This is to make sure that the deadlock described below is
+		 * detectable by deadlock.c: if the worker waits for a transaction to
+		 * complete and we are waiting for the worker output, then effectively
+		 * we (i.e. this backend) are waiting for that transaction.
 		 */
-		decoding_ctx = setup_logical_decoding(tableOid);
+		BecomeLockGroupLeader();
 
-		snapshot = SnapBuildInitialSnapshotForRepack(decoding_ctx->snapshot_builder);
+		/*
+		 * Start the worker that decodes data changes applied while we're
+		 * copying the table contents.
+		 *
+		 * Note that the worker has to wait for all transactions with XID
+		 * already assigned to finish. If some of those transactions is
+		 * waiting for a lock conflicting with ShareUpdateExclusiveLock on our
+		 * table (e.g.  it runs CREATE INDEX), we can end up in a deadlock.
+		 * Not sure this risk is worth unlocking/locking the table (and its
+		 * clustering index) and checking again if its still eligible for
+		 * REPACK CONCURRENTLY.
+		 */
+		start_decoding_worker(tableOid);
+
+		/*
+		 * Wait until the worker has the initial snapshot and retrieve it.
+		 */
+		snapshot = get_initial_snapshot(decoding_worker);
+
 		PushActiveSnapshot(snapshot);
 	}
 
@@ -980,7 +1117,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	NewHeap = table_open(OIDNewHeap, NoLock);
 
 	/* Copy the heap data into the new table in the desired order */
-	copy_table_data(NewHeap, OldHeap, index, snapshot, decoding_ctx, verbose,
+	copy_table_data(NewHeap, OldHeap, index, snapshot, verbose,
 					&swap_toast_by_content, &frozenXid, &cutoffMulti);
 
 	/* The historic snapshot won't be needed anymore. */
@@ -1001,14 +1138,11 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		if (index)
 			index_close(index, NoLock);
 
-		rebuild_relation_finish_concurrent(NewHeap, OldHeap, decoding_ctx,
-										   frozenXid, cutoffMulti);
+		rebuild_relation_finish_concurrent(NewHeap, OldHeap, frozenXid,
+										   cutoffMulti);
 
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
-
-		/* Done with decoding. */
-		cleanup_logical_decoding(decoding_ctx);
 	}
 	else
 	{
@@ -1179,8 +1313,7 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
  */
 static void
 copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-				Snapshot snapshot, LogicalDecodingContext *decoding_ctx,
-				bool verbose, bool *pSwapToastByContent,
+				Snapshot snapshot, bool verbose, bool *pSwapToastByContent,
 				TransactionId *pFreezeXid, MultiXactId *pCutoffMulti)
 {
 	Relation	relRelation;
@@ -1341,7 +1474,6 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 */
 	table_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
 									cutoffs.OldestXmin, snapshot,
-									decoding_ctx,
 									&cutoffs.FreezeLimit,
 									&cutoffs.MultiXactCutoff,
 									&num_tuples, &tups_vacuumed,
@@ -2376,58 +2508,6 @@ RepackCommandAsString(RepackCommand cmd)
 
 
 /*
- * Call this function before REPACK CONCURRENTLY starts to setup logical
- * decoding. It makes sure that other users of the table put enough
- * information into WAL.
- *
- * The point is that at various places we expect that the table we're
- * processing is treated like a system catalog. For example, we need to be
- * able to scan it using a "historic snapshot" anytime during the processing
- * (as opposed to scanning only at the start point of the decoding, as logical
- * replication does during initial table synchronization), in order to apply
- * concurrent UPDATE / DELETE commands.
- *
- * Note that TOAST table needs no attention here as it's not scanned using
- * historic snapshot.
- */
-static void
-begin_concurrent_repack(Relation rel)
-{
-	Oid			toastrelid;
-
-	/*
-	 * Avoid logical decoding of other relations by this backend. The lock we
-	 * have guarantees that the actual locator cannot be changed concurrently:
-	 * TRUNCATE needs AccessExclusiveLock.
-	 */
-	Assert(CheckRelationLockedByMe(rel, ShareUpdateExclusiveLock, false));
-	repacked_rel_locator = rel->rd_locator;
-	toastrelid = rel->rd_rel->reltoastrelid;
-	if (OidIsValid(toastrelid))
-	{
-		Relation	toastrel;
-
-		/* Avoid logical decoding of other TOAST relations. */
-		toastrel = table_open(toastrelid, AccessShareLock);
-		repacked_rel_toast_locator = toastrel->rd_locator;
-		table_close(toastrel, AccessShareLock);
-	}
-}
-
-/*
- * Call this when done with REPACK CONCURRENTLY.
- */
-static void
-end_concurrent_repack(void)
-{
-	/*
-	 * Restore normal function of (future) logical decoding for this backend.
-	 */
-	repacked_rel_locator.relNumber = InvalidOid;
-	repacked_rel_toast_locator.relNumber = InvalidOid;
-}
-
-/*
  * Is this backend performing logical decoding on behalf of REPACK
  * (CONCURRENTLY) ?
  */
@@ -2491,9 +2571,10 @@ static LogicalDecodingContext *
 setup_logical_decoding(Oid relid)
 {
 	Relation	rel;
-	TupleDesc	tupdesc;
+	Oid			toastrelid;
 	LogicalDecodingContext *ctx;
-	RepackDecodingState *dstate = palloc0_object(RepackDecodingState);
+	NameData	slotname;
+	RepackDecodingState *dstate;
 
 	/*
 	 * REPACK CONCURRENTLY is not allowed in a transaction block, so this
@@ -2502,20 +2583,20 @@ setup_logical_decoding(Oid relid)
 	Assert(!TransactionIdIsValid(GetTopTransactionIdIfAny()));
 
 	/*
-	 * A single backend should not execute multiple REPACK commands at a time,
-	 * so use PID to make the slot unique.
-	 */
-	snprintf(NameStr(dstate->slotname), NAMEDATALEN, "repack_%d", MyProcPid);
-
-	/*
 	 * Check if we can use logical decoding.
 	 */
 	CheckSlotPermissions();
 	CheckLogicalDecodingRequirements();
 
-	/* RS_TEMPORARY so that the slot gets cleaned up on ERROR. */
-	ReplicationSlotCreate(NameStr(dstate->slotname), true, RS_TEMPORARY,
-						  false, false, false);
+	/*
+	 * A single backend should not execute multiple REPACK commands at a time,
+	 * so use PID to make the slot unique.
+	 *
+	 * RS_TEMPORARY so that the slot gets cleaned up on ERROR.
+	 */
+	snprintf(NameStr(slotname), NAMEDATALEN, "repack_%d", MyProcPid);
+	ReplicationSlotCreate(NameStr(slotname), true, RS_TEMPORARY, false, false,
+						  false);
 
 	/*
 	 * Neither prepare_write nor do_write callback nor update_progress is
@@ -2537,104 +2618,109 @@ setup_logical_decoding(Oid relid)
 
 	DecodingContextFindStartpoint(ctx);
 
+	/*
+	 * decode_concurrent_changes() needs non-blocking callback.
+	 */
+	ctx->reader->routine.page_read = read_local_xlog_page_no_wait;
+
+	/*
+	 * read_local_xlog_page_no_wait() needs to be able to indicate the end of
+	 * WAL.
+	 */
+	ctx->reader->private_data = MemoryContextAllocZero(ctx->context,
+													   sizeof(ReadLocalXLogPageNoWaitPrivate));
+
+
 	/* Some WAL records should have been read. */
 	Assert(ctx->reader->EndRecPtr != InvalidXLogRecPtr);
 
+	/*
+	 * Initialize repack_current_segment so that we can notice WAL segment
+	 * boundaries.
+	 */
 	XLByteToSeg(ctx->reader->EndRecPtr, repack_current_segment,
 				wal_segment_size);
 
-	/*
-	 * Setup structures to store decoded changes.
-	 */
+	dstate = palloc0_object(RepackDecodingState);
 	dstate->relid = relid;
-	dstate->tstore = tuplestore_begin_heap(false, false,
-										   maintenance_work_mem);
 
-	/* Caller should already have the table locked. */
-	rel = table_open(relid, NoLock);
-	tupdesc = CreateTupleDescCopy(RelationGetDescr(rel));
-	dstate->tupdesc = tupdesc;
-	table_close(rel, NoLock);
+	/*
+	 * Tuple descriptor may be needed to flatten a tuple before we write it to
+	 * a file. A copy is needed because the decoding worker invalidates system
+	 * caches before it starts to do the actual work.
+	 */
+	rel = table_open(relid, AccessShareLock);
+	dstate->tupdesc = CreateTupleDescCopy(RelationGetDescr(rel));
 
-	/* Initialize the descriptor to store the changes ... */
-	dstate->tupdesc_change = CreateTemplateTupleDesc(1);
+	/* Avoid logical decoding of other relations. */
+	repacked_rel_locator = rel->rd_locator;
+	toastrelid = rel->rd_rel->reltoastrelid;
+	if (OidIsValid(toastrelid))
+	{
+		Relation	toastrel;
 
-	TupleDescInitEntry(dstate->tupdesc_change, 1, NULL, BYTEAOID, -1, 0);
-	/* ... as well as the corresponding slot. */
-	dstate->tsslot = MakeSingleTupleTableSlot(dstate->tupdesc_change,
-											  &TTSOpsMinimalTuple);
+		/* Avoid logical decoding of other TOAST relations. */
+		toastrel = table_open(toastrelid, AccessShareLock);
+		repacked_rel_toast_locator = toastrel->rd_locator;
+		table_close(toastrel, AccessShareLock);
+	}
+	table_close(rel, AccessShareLock);
 
-	dstate->resowner = ResourceOwnerCreate(CurrentResourceOwner,
-										   "logical decoding");
+	/* The file will be set as soon as we have it opened. */
+	dstate->file = NULL;
 
 	ctx->output_writer_private = dstate;
+
 	return ctx;
 }
 
 /*
- * Retrieve tuple from ConcurrentChange structure.
+ * Decode logical changes from the WAL sequence and store them to a file.
  *
- * The input data starts with the structure but it might not be appropriately
- * aligned.
+ * If true is returned, there is no more work for the worker.
  */
-static HeapTuple
-get_changed_tuple(char *change)
-{
-	HeapTupleData tup_data;
-	HeapTuple	result;
-	char	   *src;
-
-	/*
-	 * Ensure alignment before accessing the fields. (This is why we can't use
-	 * heap_copytuple() instead of this function.)
-	 */
-	src = change + offsetof(ConcurrentChange, tup_data);
-	memcpy(&tup_data, src, sizeof(HeapTupleData));
-
-	result = (HeapTuple) palloc(HEAPTUPLESIZE + tup_data.t_len);
-	memcpy(result, &tup_data, sizeof(HeapTupleData));
-	result->t_data = (HeapTupleHeader) ((char *) result + HEAPTUPLESIZE);
-	src = change + SizeOfConcurrentChange;
-	memcpy(result->t_data, src, result->t_len);
-
-	return result;
-}
-
-/*
- * Decode logical changes from the WAL sequence up to end_of_wal.
- */
-void
-repack_decode_concurrent_changes(LogicalDecodingContext *ctx,
-								 XLogRecPtr end_of_wal)
+static bool
+decode_concurrent_changes(LogicalDecodingContext *ctx,
+						  DecodingWorkerShared *shared)
 {
 	RepackDecodingState *dstate;
-	ResourceOwner resowner_old;
+	XLogRecPtr	lsn_upto;
+	bool		done;
+	char		fname[MAXPGPATH];
 
 	dstate = (RepackDecodingState *) ctx->output_writer_private;
-	resowner_old = CurrentResourceOwner;
-	CurrentResourceOwner = dstate->resowner;
 
-	PG_TRY();
+	/* Open the output file. */
+	DecodingWorkerFileName(fname, shared->relid, shared->last_exported + 1);
+	dstate->file = BufFileCreateFileSet(&shared->sfs.fs, fname);
+
+	SpinLockAcquire(&shared->mutex);
+	lsn_upto = shared->lsn_upto;
+	done = shared->done;
+	SpinLockRelease(&shared->mutex);
+
+	while (true)
 	{
-		while (ctx->reader->EndRecPtr < end_of_wal)
+		XLogRecord *record;
+		XLogSegNo	segno_new;
+		char	   *errm = NULL;
+		XLogRecPtr	end_lsn;
+
+		CHECK_FOR_INTERRUPTS();
+
+		record = XLogReadRecord(ctx->reader, &errm);
+		if (record)
 		{
-			XLogRecord *record;
-			XLogSegNo	segno_new;
-			char	   *errm = NULL;
-			XLogRecPtr	end_lsn;
-
-			record = XLogReadRecord(ctx->reader, &errm);
-			if (errm)
-				elog(ERROR, "%s", errm);
-
-			if (record != NULL)
-				LogicalDecodingProcessRecord(ctx, ctx->reader);
+			LogicalDecodingProcessRecord(ctx, ctx->reader);
 
 			/*
 			 * If WAL segment boundary has been crossed, inform the decoding
-			 * system that the catalog_xmin can advance. (We can confirm more
-			 * often, but a filling a single WAL segment should not take much
-			 * time.)
+			 * system that the catalog_xmin can advance.
+			 *
+			 * TODO Does it make sense to confirm more often? Segment size
+			 * seems appropriate for restart_lsn (because less than a segment
+			 * cannot be recycled anyway), however more frequent checks might
+			 * be beneficial for catalog_xmin.
 			 */
 			end_lsn = ctx->reader->EndRecPtr;
 			XLByteToSeg(end_lsn, segno_new, wal_segment_size);
@@ -2645,80 +2731,137 @@ repack_decode_concurrent_changes(LogicalDecodingContext *ctx,
 					 (uint32) (end_lsn >> 32), (uint32) end_lsn);
 				repack_current_segment = segno_new;
 			}
-
-			CHECK_FOR_INTERRUPTS();
 		}
-		InvalidateSystemCaches();
-		CurrentResourceOwner = resowner_old;
+		else
+		{
+			ReadLocalXLogPageNoWaitPrivate *priv;
+
+			if (errm)
+				ereport(ERROR, (errmsg("%s", errm)));
+
+			/*
+			 * In the decoding loop we do not want to get blocked when there
+			 * is no more WAL available, otherwise the loop would become
+			 * uninterruptible.
+			 */
+			priv = (ReadLocalXLogPageNoWaitPrivate *)
+				ctx->reader->private_data;
+			if (priv->end_of_wal)
+				/* Do not miss the end of WAL condition next time. */
+				priv->end_of_wal = false;
+			else
+				ereport(ERROR, (errmsg("could not read WAL record")));
+		}
+
+		/*
+		 * Whether we could read new record or not, keep checking if
+		 * 'lsn_upto' was specified.
+		 */
+		if (XLogRecPtrIsInvalid(lsn_upto))
+		{
+			SpinLockAcquire(&shared->mutex);
+			lsn_upto = shared->lsn_upto;
+			/* 'done' should be set at the same time as 'lsn_upto' */
+			done = shared->done;
+			SpinLockRelease(&shared->mutex);
+		}
+		if (!XLogRecPtrIsInvalid(lsn_upto) &&
+			ctx->reader->EndRecPtr >= lsn_upto)
+			break;
+
+		if (record == NULL)
+		{
+			int64 timeout = 0;
+			WaitLSNResult	res;
+
+			/*
+			 * Before we retry reading, wait until new WAL is flushed.
+			 *
+			 * There is a race condition such that the backend executing
+			 * REPACK determines 'lsn_upto', but before it sets the shared
+			 * variable, we reach the end of WAL. In that case we'd need to
+			 * wait until the next WAL flush (unrelated to REPACK). Although
+			 * that should not be a problem in a busy system, it might be
+			 * noticeable in other cases, including regression tests (which
+			 * are not necessarily executed in parallel). Therefore it makes
+			 * sense to use timeout.
+			 *
+			 * If lsn_upto is valid, WAL records having LSN lower than that
+			 * should already have been flushed to disk.
+			 */
+			if (XLogRecPtrIsInvalid(lsn_upto))
+				timeout = 100L;
+			res = WaitForLSN(WAIT_LSN_TYPE_PRIMARY_FLUSH,
+							 ctx->reader->EndRecPtr + 1,
+							 timeout);
+			if (res != WAIT_LSN_RESULT_SUCCESS &&
+				res != WAIT_LSN_RESULT_TIMEOUT)
+				ereport(ERROR, (errmsg("waiting for WAL failed")));
+		}
 	}
-	PG_CATCH();
-	{
-		/* clear all timetravel entries */
-		InvalidateSystemCaches();
-		CurrentResourceOwner = resowner_old;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
+
+	/*
+	 * Close the file so we can make it available to the backend.
+	 */
+	BufFileClose(dstate->file);
+	dstate->file = NULL;
+	SpinLockAcquire(&shared->mutex);
+	shared->lsn_upto = InvalidXLogRecPtr;
+	shared->last_exported++;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableSignal(&shared->cv);
+
+	return done;
 }
 
 /*
  * Apply changes stored in 'file'.
  */
 static void
-apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
+apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 {
+	char		kind;
+	uint32		t_len;
 	Relation	rel = dest->rel;
 	TupleTableSlot *index_slot,
 			   *ident_slot;
 	HeapTuple	tup_old = NULL;
 
-	if (dstate->nchanges == 0)
-		return;
-
 	/* TupleTableSlot is needed to pass the tuple to ExecInsertIndexTuples(). */
-	index_slot = MakeSingleTupleTableSlot(dstate->tupdesc, &TTSOpsHeapTuple);
+	index_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+										  &TTSOpsHeapTuple);
 
 	/* A slot to fetch tuples from identity index. */
 	ident_slot = table_slot_create(rel, NULL);
 
-	while (tuplestore_gettupleslot(dstate->tstore, true, false,
-								   dstate->tsslot))
+	while (true)
 	{
-		bool		shouldFree;
-		HeapTuple	tup_change,
-					tup,
+		size_t		nread;
+		HeapTuple	tup,
 					tup_exist;
-		char	   *change_raw,
-				   *src;
-		ConcurrentChange change;
-		bool		isnull[1];
-		Datum		values[1];
 
 		CHECK_FOR_INTERRUPTS();
 
-		/* Get the change from the single-column tuple. */
-		tup_change = ExecFetchSlotHeapTuple(dstate->tsslot, false, &shouldFree);
-		heap_deform_tuple(tup_change, dstate->tupdesc_change, values, isnull);
-		Assert(!isnull[0]);
+		nread = BufFileReadMaybeEOF(file, &kind, 1, true);
+		/* Are we done with the file? */
+		if (nread == 0)
+			break;
 
-		/* Make sure we access aligned data. */
-		change_raw = (char *) DatumGetByteaP(values[0]);
-		src = (char *) VARDATA(change_raw);
-		memcpy(&change, src, SizeOfConcurrentChange);
+		/* Read the tuple. */
+		BufFileReadExact(file, &t_len, sizeof(t_len));
+		tup = (HeapTuple) palloc(HEAPTUPLESIZE + t_len);
+		tup->t_data = (HeapTupleHeader) ((char *) tup + HEAPTUPLESIZE);
+		BufFileReadExact(file, tup->t_data, t_len);
+		tup->t_len = t_len;
+		ItemPointerSetInvalid(&tup->t_self);
+		tup->t_tableOid = RelationGetRelid(dest->rel);
 
-		/*
-		 * Extract the tuple from the change. The tuple is copied here because
-		 * it might be assigned to 'tup_old', in which case it needs to
-		 * survive into the next iteration.
-		 */
-		tup = get_changed_tuple(src);
-
-		if (change.kind == CHANGE_UPDATE_OLD)
+		if (kind == CHANGE_UPDATE_OLD)
 		{
 			Assert(tup_old == NULL);
 			tup_old = tup;
 		}
-		else if (change.kind == CHANGE_INSERT)
+		else if (kind == CHANGE_INSERT)
 		{
 			Assert(tup_old == NULL);
 
@@ -2726,12 +2869,11 @@ apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
 
 			pfree(tup);
 		}
-		else if (change.kind == CHANGE_UPDATE_NEW ||
-				 change.kind == CHANGE_DELETE)
+		else if (kind == CHANGE_UPDATE_NEW || kind == CHANGE_DELETE)
 		{
 			HeapTuple	tup_key;
 
-			if (change.kind == CHANGE_UPDATE_NEW)
+			if (kind == CHANGE_UPDATE_NEW)
 			{
 				tup_key = tup_old != NULL ? tup_old : tup;
 			}
@@ -2748,7 +2890,7 @@ apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
 			if (tup_exist == NULL)
 				elog(ERROR, "failed to find target tuple");
 
-			if (change.kind == CHANGE_UPDATE_NEW)
+			if (kind == CHANGE_UPDATE_NEW)
 				apply_concurrent_update(rel, tup, tup_exist, dest->iistate,
 										index_slot);
 			else
@@ -2763,25 +2905,18 @@ apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
 			pfree(tup);
 		}
 		else
-			elog(ERROR, "unrecognized kind of change: %d", change.kind);
+			elog(ERROR, "unrecognized kind of change: %d", kind);
 
 		/*
 		 * If a change was applied now, increment CID for next writes and
 		 * update the snapshot so it sees the changes we've applied so far.
 		 */
-		if (change.kind != CHANGE_UPDATE_OLD)
+		if (kind != CHANGE_UPDATE_OLD)
 		{
 			CommandCounterIncrement();
 			UpdateActiveSnapshotCommandId();
 		}
-
-		/* TTSOpsMinimalTuple has .get_heap_tuple==NULL. */
-		Assert(shouldFree);
-		pfree(tup_change);
 	}
-
-	tuplestore_clear(dstate->tstore);
-	dstate->nchanges = 0;
 
 	/* Cleanup. */
 	ExecDropSingleTupleTableSlot(index_slot);
@@ -2957,25 +3092,59 @@ find_target_tuple(Relation rel, ChangeDest *dest, HeapTuple tup_key,
 }
 
 /*
- * Decode and apply concurrent changes.
+ * Decode and apply concurrent changes, up to (and including) the record whose
+ * LSN is 'end_of_wal'.
  */
 static void
-process_concurrent_changes(LogicalDecodingContext *decoding_ctx,
-						   XLogRecPtr end_of_wal, ChangeDest *dest)
+process_concurrent_changes(XLogRecPtr end_of_wal, ChangeDest *dest, bool done)
 {
-	RepackDecodingState *dstate;
+	DecodingWorkerShared *shared;
+	char		fname[MAXPGPATH];
+	BufFile    *file;
 
 	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 								 PROGRESS_REPACK_PHASE_CATCH_UP);
 
-	dstate = (RepackDecodingState *) decoding_ctx->output_writer_private;
+	/* Ask the worker for the file. */
+	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
+	SpinLockAcquire(&shared->mutex);
+	shared->lsn_upto = end_of_wal;
+	shared->done = done;
+	SpinLockRelease(&shared->mutex);
 
-	repack_decode_concurrent_changes(decoding_ctx, end_of_wal);
+	/*
+	 * The worker needs to finish processing of the current WAL record. Even
+	 * if it's idle, it'll need to close the output file. Thus we're likely to
+	 * wait, so prepare for sleep.
+	 */
+	ConditionVariablePrepareToSleep(&shared->cv);
+	for (;;)
+	{
+		int		last_exported;
 
-	if (dstate->nchanges == 0)
-		return;
+		SpinLockAcquire(&shared->mutex);
+		last_exported = shared->last_exported;
+		SpinLockRelease(&shared->mutex);
 
-	apply_concurrent_changes(dstate, dest);
+		/*
+		 * Has the worker exported the file we are waiting for?
+		 */
+		if (last_exported == dest->file_seq)
+			break;
+
+		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
+	}
+	ConditionVariableCancelSleep();
+
+	/* Open the file. */
+	DecodingWorkerFileName(fname, shared->relid, dest->file_seq);
+	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
+	apply_concurrent_changes(file, dest);
+
+	BufFileClose(file);
+
+	/* Get ready for the next file. */
+	dest->file_seq++;
 }
 
 /*
@@ -3101,15 +3270,10 @@ cleanup_logical_decoding(LogicalDecodingContext *ctx)
 
 	dstate = (RepackDecodingState *) ctx->output_writer_private;
 
-	ExecDropSingleTupleTableSlot(dstate->tsslot);
-	FreeTupleDesc(dstate->tupdesc_change);
 	FreeTupleDesc(dstate->tupdesc);
-	tuplestore_end(dstate->tstore);
-
 	FreeDecodingContext(ctx);
 
-	ReplicationSlotRelease();
-	ReplicationSlotDrop(NameStr(dstate->slotname), false);
+	ReplicationSlotDropAcquired();
 	pfree(dstate);
 }
 
@@ -3123,7 +3287,6 @@ cleanup_logical_decoding(LogicalDecodingContext *ctx)
  */
 static void
 rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
-								   LogicalDecodingContext *decoding_ctx,
 								   TransactionId frozenXid,
 								   MultiXactId cutoffMulti)
 {
@@ -3204,6 +3367,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 											&chgdst.ident_index);
 	chgdst.ident_key = build_identity_key(ident_idx_new, OldHeap,
 										  &chgdst.ident_key_nentries);
+	chgdst.file_seq = WORKER_FILE_SNAPSHOT + 1;
 
 	/*
 	 * During testing, wait for another backend to perform concurrent data
@@ -3225,7 +3389,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 * hold AccessExclusiveLock. (Quite some amount of WAL could have been
 	 * written during the data copying and index creation.)
 	 */
-	process_concurrent_changes(decoding_ctx, end_of_wal, &chgdst);
+	process_concurrent_changes(end_of_wal, &chgdst, false);
 
 	/*
 	 * Acquire AccessExclusiveLock on the table, its TOAST relation (if there
@@ -3306,8 +3470,11 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	XLogFlush(wal_insert_ptr);
 	end_of_wal = GetFlushRecPtr(NULL);
 
-	/* Apply the concurrent changes again. */
-	process_concurrent_changes(decoding_ctx, end_of_wal, &chgdst);
+	/*
+	 * Apply the concurrent changes again. Indicate that the decoding worker
+	 * won't be needed anymore.
+	 */
+	process_concurrent_changes(end_of_wal, &chgdst, true);
 
 	/* Remember info about rel before closing OldHeap */
 	relpersistence = OldHeap->rd_rel->relpersistence;
@@ -3416,4 +3583,511 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 	}
 
 	return result;
+}
+
+/*
+ * Try to start a background worker to perform logical decoding of data
+ * changes applied to relation while REPACK CONCURRENTLY is copying its
+ * contents to a new table.
+ */
+static void
+start_decoding_worker(Oid relid)
+{
+	Size		size;
+	dsm_segment *seg;
+	DecodingWorkerShared *shared;
+	shm_mq	   *mq;
+	shm_mq_handle *mqh;
+	BackgroundWorker bgw;
+
+	/* Setup shared memory. */
+	size = BUFFERALIGN(offsetof(DecodingWorkerShared, error_queue)) +
+		BUFFERALIGN(REPACK_ERROR_QUEUE_SIZE);
+	seg = dsm_create(size, 0);
+	shared = (DecodingWorkerShared *) dsm_segment_address(seg);
+	shared->lsn_upto = InvalidXLogRecPtr;
+	shared->done = false;
+	SharedFileSetInit(&shared->sfs, seg);
+	shared->last_exported = -1;
+	SpinLockInit(&shared->mutex);
+	shared->dbid = MyDatabaseId;
+
+	/*
+	 * This is the UserId set in cluster_rel(). Security context shouldn't be
+	 * needed for decoding worker.
+	 */
+	shared->roleid = GetUserId();
+	shared->relid = relid;
+	ConditionVariableInit(&shared->cv);
+	shared->backend_proc = MyProc;
+	shared->backend_pid = MyProcPid;
+	shared->backend_proc_number = MyProcNumber;
+
+	mq = shm_mq_create((char *) BUFFERALIGN(shared->error_queue),
+					   REPACK_ERROR_QUEUE_SIZE);
+	shm_mq_set_receiver(mq, MyProc);
+	mqh = shm_mq_attach(mq, seg, NULL);
+
+	memset(&bgw, 0, sizeof(bgw));
+	snprintf(bgw.bgw_name, BGW_MAXLEN,
+			 "REPACK decoding worker for relation \"%s\"",
+			 get_rel_name(relid));
+	snprintf(bgw.bgw_type, BGW_MAXLEN, "REPACK decoding worker");
+	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS |
+		BGWORKER_BACKEND_DATABASE_CONNECTION;
+	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	bgw.bgw_restart_time = BGW_NEVER_RESTART;
+	snprintf(bgw.bgw_library_name, MAXPGPATH, "postgres");
+	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "RepackWorkerMain");
+	bgw.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
+	bgw.bgw_notify_pid = MyProcPid;
+
+	decoding_worker = palloc0_object(DecodingWorker);
+	if (!RegisterDynamicBackgroundWorker(&bgw, &decoding_worker->handle))
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+				 errmsg("out of background worker slots"),
+				 errhint("You might need to increase \"%s\".", "max_worker_processes")));
+
+	decoding_worker->seg = seg;
+	decoding_worker->error_mqh = mqh;
+
+	/*
+	 * The decoding setup must be done before the caller can have XID assigned
+	 * for any reason, otherwise the worker might end up in a deadlock,
+	 * waiting for the caller's transaction to end. Therefore wait here until
+	 * the worker indicates that it has the logical decoding initialized.
+	 */
+	ConditionVariablePrepareToSleep(&shared->cv);
+	for (;;)
+	{
+		int			initialized;
+
+		SpinLockAcquire(&shared->mutex);
+		initialized = shared->initialized;
+		SpinLockRelease(&shared->mutex);
+
+		if (initialized)
+			break;
+
+		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
+	}
+	ConditionVariableCancelSleep();
+}
+
+/*
+ * Stop the decoding worker and cleanup the related resources.
+ *
+ * The worker stops on its own when it knows there is no more work to do, but
+ * we need to stop it explicitly at least on ERROR in the launching backend.
+ */
+static void
+stop_decoding_worker(void)
+{
+	BgwHandleStatus status;
+
+	/* Haven't reached the worker startup? */
+	if (decoding_worker == NULL)
+		return;
+
+	/* Could not register the worker? */
+	if (decoding_worker->handle == NULL)
+		return;
+
+	TerminateBackgroundWorker(decoding_worker->handle);
+	/* The worker should really exit before the REPACK command does. */
+	HOLD_INTERRUPTS();
+	status = WaitForBackgroundWorkerShutdown(decoding_worker->handle);
+	RESUME_INTERRUPTS();
+
+	if (status == BGWH_POSTMASTER_DIED)
+		ereport(FATAL,
+				(errcode(ERRCODE_ADMIN_SHUTDOWN),
+				 errmsg("postmaster exited during REPACK command")));
+
+	shm_mq_detach(decoding_worker->error_mqh);
+
+	/*
+	 * If we could not cancel the current sleep due to ERROR, do that before
+	 * we detach from the shared memory the condition variable is located in.
+	 * If we did not, the bgworker ERROR handling code would try and fail
+	 * badly.
+	 */
+	ConditionVariableCancelSleep();
+
+	dsm_detach(decoding_worker->seg);
+	pfree(decoding_worker);
+	decoding_worker = NULL;
+}
+
+/* Is this process a REPACK worker? */
+static bool is_repack_worker = false;
+
+static pid_t backend_pid;
+static ProcNumber backend_proc_number;
+
+/*
+ * See ParallelWorkerShutdown for details.
+ */
+static void
+RepackWorkerShutdown(int code, Datum arg)
+{
+	SendProcSignal(backend_pid,
+				   PROCSIG_REPACK_MESSAGE,
+				   backend_proc_number);
+
+	dsm_detach((dsm_segment *) DatumGetPointer(arg));
+}
+
+/* REPACK decoding worker entry point */
+void
+RepackWorkerMain(Datum main_arg)
+{
+	dsm_segment *seg;
+	DecodingWorkerShared *shared;
+	shm_mq	   *mq;
+	shm_mq_handle *mqh;
+
+	is_repack_worker = true;
+
+	/*
+	 * Override the default bgworker_die() with die() so we can use
+	 * CHECK_FOR_INTERRUPTS().
+	 */
+	pqsignal(SIGTERM, die);
+	BackgroundWorkerUnblockSignals();
+
+	seg = dsm_attach(DatumGetUInt32(main_arg));
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not map dynamic shared memory segment")));
+
+	shared = (DecodingWorkerShared *) dsm_segment_address(seg);
+
+	/* Arrange to signal the leader if we exit. */
+	backend_pid = shared->backend_pid;
+	backend_proc_number = shared->backend_proc_number;
+	before_shmem_exit(RepackWorkerShutdown, PointerGetDatum(seg));
+
+	/*
+	 * Join locking group - see the comments around the call of
+	 * start_decoding_worker().
+	 */
+	if (!BecomeLockGroupMember(shared->backend_proc, backend_pid))
+		/* The leader is not running anymore. */
+		return;
+
+	/*
+	 * Setup a queue to send error messages to the backend that launched this
+	 * worker.
+	 */
+	mq = (shm_mq *) (char *) BUFFERALIGN(shared->error_queue);
+	shm_mq_set_sender(mq, MyProc);
+	mqh = shm_mq_attach(mq, seg, NULL);
+	pq_redirect_to_shm_mq(seg, mqh);
+	pq_set_parallel_leader(shared->backend_pid,
+						   shared->backend_proc_number);
+
+	/* Connect to the database. */
+	BackgroundWorkerInitializeConnectionByOid(shared->dbid, shared->roleid, 0);
+
+	repack_worker_internal(seg);
+}
+
+static void
+repack_worker_internal(dsm_segment *seg)
+{
+	DecodingWorkerShared *shared;
+	LogicalDecodingContext *decoding_ctx;
+	SharedFileSet *sfs;
+	Snapshot	snapshot;
+
+	/*
+	 * Transaction is needed to open relation, and it also provides us with a
+	 * resource owner.
+	 */
+	StartTransactionCommand();
+
+	shared = (DecodingWorkerShared *) dsm_segment_address(seg);
+
+	/*
+	 * Not sure the spinlock is needed here - the backend should not change
+	 * anything in the shared memory until we have serialized the snapshot.
+	 */
+	SpinLockAcquire(&shared->mutex);
+	Assert(XLogRecPtrIsInvalid(shared->lsn_upto));
+	sfs = &shared->sfs;
+	SpinLockRelease(&shared->mutex);
+
+	SharedFileSetAttach(sfs, seg);
+
+	/*
+	 * Prepare to capture the concurrent data changes ourselves.
+	 */
+	decoding_ctx = setup_logical_decoding(shared->relid);
+
+	/* Announce that we're ready. */
+	SpinLockAcquire(&shared->mutex);
+	shared->initialized = true;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableSignal(&shared->cv);
+
+	/* Build the initial snapshot and export it. */
+	snapshot = SnapBuildInitialSnapshotForRepack(decoding_ctx->snapshot_builder);
+	export_initial_snapshot(snapshot, shared);
+
+	/*
+	 * Only historic snapshots should be used now. Do not let us restrict the
+	 * progress of xmin horizon.
+	 */
+	InvalidateCatalogSnapshot();
+
+	while (!decode_concurrent_changes(decoding_ctx, shared))
+		;
+
+	/* Cleanup. */
+	cleanup_logical_decoding(decoding_ctx);
+	CommitTransactionCommand();
+}
+
+/*
+ * Make snapshot available to the backend that launched the decoding worker.
+ */
+static void
+export_initial_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
+{
+	char		fname[MAXPGPATH];
+	BufFile    *file;
+	Size		snap_size;
+	char	   *snap_space;
+
+	snap_size = EstimateSnapshotSpace(snapshot);
+	snap_space = (char *) palloc(snap_size);
+	SerializeSnapshot(snapshot, snap_space);
+	FreeSnapshot(snapshot);
+
+	DecodingWorkerFileName(fname, shared->relid, shared->last_exported + 1);
+	file = BufFileCreateFileSet(&shared->sfs.fs, fname);
+	/* To make restoration easier, write the snapshot size first. */
+	BufFileWrite(file, &snap_size, sizeof(snap_size));
+	BufFileWrite(file, snap_space, snap_size);
+	pfree(snap_space);
+	BufFileClose(file);
+
+	/* Increase the counter to tell the backend that the file is available. */
+	SpinLockAcquire(&shared->mutex);
+	shared->last_exported++;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableSignal(&shared->cv);
+}
+
+/*
+ * Get the initial snapshot from the decoding worker.
+ */
+static Snapshot
+get_initial_snapshot(DecodingWorker *worker)
+{
+	DecodingWorkerShared *shared;
+	char		fname[MAXPGPATH];
+	BufFile    *file;
+	Size		snap_size;
+	char	   *snap_space;
+	Snapshot	snapshot;
+
+	shared = (DecodingWorkerShared *) dsm_segment_address(worker->seg);
+
+	/*
+	 * The worker needs to initialize the logical decoding, which usually
+	 * takes some time. Therefore it makes sense to prepare for the sleep
+	 * first.
+	 */
+	ConditionVariablePrepareToSleep(&shared->cv);
+	for (;;)
+	{
+		int		last_exported;
+
+		SpinLockAcquire(&shared->mutex);
+		last_exported = shared->last_exported;
+		SpinLockRelease(&shared->mutex);
+
+		/*
+		 * Has the worker exported the file we are waiting for?
+		 */
+		if (last_exported == WORKER_FILE_SNAPSHOT)
+			break;
+
+		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
+	}
+	ConditionVariableCancelSleep();
+
+	/* Read the snapshot from a file. */
+	DecodingWorkerFileName(fname, shared->relid, WORKER_FILE_SNAPSHOT);
+	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
+	BufFileReadExact(file, &snap_size, sizeof(snap_size));
+	snap_space = (char *) palloc(snap_size);
+	BufFileReadExact(file, snap_space, snap_size);
+	BufFileClose(file);
+
+	/* Restore it. */
+	snapshot = RestoreSnapshot(snap_space);
+	pfree(snap_space);
+
+	return snapshot;
+}
+
+bool
+IsRepackWorker(void)
+{
+	return is_repack_worker;
+}
+
+/*
+ * Handle receipt of an interrupt indicating a repack worker message.
+ *
+ * Note: this is called within a signal handler!  All we can do is set
+ * a flag that will cause the next CHECK_FOR_INTERRUPTS() to invoke
+ * ProcessRepackMessages().
+ */
+void
+HandleRepackMessageInterrupt(void)
+{
+	InterruptPending = true;
+	RepackMessagePending = true;
+	SetLatch(MyLatch);
+}
+
+/*
+ * Process any queued protocol messages received from parallel workers.
+ */
+void
+ProcessRepackMessages(void)
+{
+	MemoryContext oldcontext;
+
+	static MemoryContext hpm_context = NULL;
+
+	/*
+	 * Nothing to do if we haven't launched the worker yet or have already
+	 * terminated it.
+	 */
+	if (decoding_worker == NULL)
+		return;
+
+	/*
+	 * This is invoked from ProcessInterrupts(), and since some of the
+	 * functions it calls contain CHECK_FOR_INTERRUPTS(), there is a potential
+	 * for recursive calls if more signals are received while this runs.  It's
+	 * unclear that recursive entry would be safe, and it doesn't seem useful
+	 * even if it is safe, so let's block interrupts until done.
+	 */
+	HOLD_INTERRUPTS();
+
+	/*
+	 * Moreover, CurrentMemoryContext might be pointing almost anywhere.  We
+	 * don't want to risk leaking data into long-lived contexts, so let's do
+	 * our work here in a private context that we can reset on each use.
+	 */
+	if (hpm_context == NULL)	/* first time through? */
+		hpm_context = AllocSetContextCreate(TopMemoryContext,
+											"ProcessRepackMessages",
+											ALLOCSET_DEFAULT_SIZES);
+	else
+		MemoryContextReset(hpm_context);
+
+	oldcontext = MemoryContextSwitchTo(hpm_context);
+
+	/* OK to process messages.  Reset the flag saying there are more to do. */
+	RepackMessagePending = false;
+
+	/*
+	 * Read as many messages as we can from each worker, but stop when no more
+	 * messages can be read from the worker without blocking.
+	 */
+	while (true)
+	{
+		shm_mq_result res;
+		Size		nbytes;
+		void	   *data;
+
+		res = shm_mq_receive(decoding_worker->error_mqh, &nbytes,
+							 &data, true);
+		if (res == SHM_MQ_WOULD_BLOCK)
+			break;
+		else if (res == SHM_MQ_SUCCESS)
+		{
+			StringInfoData msg;
+
+			initStringInfo(&msg);
+			appendBinaryStringInfo(&msg, data, nbytes);
+			ProcessRepackMessage(&msg);
+			pfree(msg.data);
+		}
+		else
+		{
+			/*
+			 * The decoding worker is special in that it exits as soon as it
+			 * has its work done. Thus the DETACHED result code is fine.
+			 */
+			Assert(res == SHM_MQ_DETACHED);
+
+			break;
+		}
+	}
+
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Might as well clear the context on our way out */
+	MemoryContextReset(hpm_context);
+
+	RESUME_INTERRUPTS();
+}
+
+/*
+ * Process a single protocol message received from a single parallel worker.
+ */
+static void
+ProcessRepackMessage(StringInfo msg)
+{
+	char		msgtype;
+
+	msgtype = pq_getmsgbyte(msg);
+
+	switch (msgtype)
+	{
+		case PqMsg_ErrorResponse:
+		case PqMsg_NoticeResponse:
+			{
+				ErrorData	edata;
+
+				/* Parse ErrorResponse or NoticeResponse. */
+				pq_parse_errornotice(msg, &edata);
+
+				/* Death of a worker isn't enough justification for suicide. */
+				edata.elevel = Min(edata.elevel, ERROR);
+
+				/*
+				 * If desired, add a context line to show that this is a
+				 * message propagated from a parallel worker.  Otherwise, it
+				 * can sometimes be confusing to understand what actually
+				 * happened.
+				 */
+				if (edata.context)
+					edata.context = psprintf("%s\n%s", edata.context,
+											 _("decoding worker"));
+				else
+					edata.context = pstrdup(_("decoding worker"));
+
+				/* Rethrow error or print notice. */
+				ThrowErrorData(&edata);
+
+				break;
+			}
+
+		default:
+			{
+				elog(ERROR, "unrecognized message type received from decoding worker: %c (message length %d bytes)",
+					 msgtype, msg->len);
+			}
+	}
 }
