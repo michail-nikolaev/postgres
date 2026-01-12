@@ -440,10 +440,7 @@ Snapshot
 SnapBuildInitialSnapshot(SnapBuild *builder)
 {
 	Snapshot	snap;
-	TransactionId xid;
 	TransactionId safeXid;
-	TransactionId *newxip;
-	int			newxcnt = 0;
 
 	Assert(XactIsoLevel == XACT_REPEATABLE_READ);
 	Assert(builder->building_full_snapshot);
@@ -485,7 +482,35 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 
 	MyProc->xmin = snap->xmin;
 
-	/* allocate in transaction context */
+	/* Convert the historic snapshot to MVCC snapshot. */
+	return SnapBuildMVCCFromHistoric(snap, true);
+}
+
+/*
+ * Turn a historic MVCC snapshot into an ordinary MVCC snapshot.
+ *
+ * Unlike a regular (non-historic) MVCC snapshot, the 'xip' array of this
+ * snapshot contains not only running main transactions, but also their
+ * subtransactions. On the other hand, 'subxip' will usually be empty. This
+ * difference does not affect the result of XidInMVCCSnapshot() because it
+ * searches both in 'xip' and 'subxip'.
+ *
+ * Pass true for 'in_place' if you don't care about modifying the source
+ * snapshot. If you need a new instance, and one that was allocated as a
+ * single chunk of memory, pass false.
+ */
+Snapshot
+SnapBuildMVCCFromHistoric(Snapshot snapshot, bool in_place)
+{
+	TransactionId xid;
+	TransactionId *oldxip = snapshot->xip;
+	uint32		oldxcnt = snapshot->xcnt;
+	TransactionId *newxip;
+	int			newxcnt = 0;
+	Snapshot	result;
+
+	Assert(snapshot->snapshot_type == SNAPSHOT_HISTORIC_MVCC);
+
 	newxip = palloc_array(TransactionId, GetMaxSnapshotXidCount());
 
 	/*
@@ -494,7 +519,7 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 	 * classical snapshot by marking all non-committed transactions as
 	 * in-progress. This can be expensive.
 	 */
-	for (xid = snap->xmin; NormalTransactionIdPrecedes(xid, snap->xmax);)
+	for (xid = snapshot->xmin; NormalTransactionIdPrecedes(xid, snapshot->xmax);)
 	{
 		void	   *test;
 
@@ -502,7 +527,7 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 		 * Check whether transaction committed using the decoding snapshot
 		 * meaning of ->xip.
 		 */
-		test = bsearch(&xid, snap->xip, snap->xcnt,
+		test = bsearch(&xid, snapshot->xip, snapshot->xcnt,
 					   sizeof(TransactionId), xidComparator);
 
 		if (test == NULL)
@@ -519,11 +544,25 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 	}
 
 	/* adjust remaining snapshot fields as needed */
-	snap->snapshot_type = SNAPSHOT_MVCC;
-	snap->xcnt = newxcnt;
-	snap->xip = newxip;
+	snapshot->xcnt = newxcnt;
+	snapshot->xip = newxip;
 
-	return snap;
+	if (in_place)
+		result = snapshot;
+	else
+	{
+		result = CopySnapshot(snapshot);
+
+		/* Restore the original values so the source is intact. */
+		snapshot->xip = oldxip;
+		snapshot->xcnt = oldxcnt;
+
+		/* newxip has been copied */
+		pfree(newxip);
+	}
+	result->snapshot_type = SNAPSHOT_MVCC;
+
+	return result;
 }
 
 /*
