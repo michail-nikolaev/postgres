@@ -1701,22 +1701,16 @@ DefineIndex(ParseState *pstate,
 	 * chains can be created where the new tuple and the old tuple in the
 	 * chain have different index keys.
 	 *
-	 * We now take a new snapshot, and build the index using all tuples that
-	 * are visible in this snapshot.  We can be sure that any HOT updates to
+	 * We build the index using all tuples that are visible using single or
+	 * multiple refreshing snapshots. We can be sure that any HOT updates to
 	 * these tuples will be compatible with the index, since any updates made
 	 * by transactions that didn't know about the index are now committed or
 	 * rolled back.  Thus, each visible tuple is either the end of its
 	 * HOT-chain or the extension of the chain is HOT-safe for this index.
 	 */
 
-	/* Set ActiveSnapshot since functions in the indexes may need it */
-	PushActiveSnapshot(GetTransactionSnapshot());
-
 	/* Perform concurrent build of index */
 	index_concurrently_build(tableId, indexRelationId);
-
-	/* we can do away with our snapshot */
-	PopActiveSnapshot();
 
 	/*
 	 * Commit this transaction to make the indisready update visible.
@@ -2874,8 +2868,11 @@ ExecReindex(ParseState *pstate, const ReindexStmt *stmt, bool isTopLevel)
 	}
 
 	if (concurrently)
+	{
 		PreventInTransactionBlock(isTopLevel,
 								  "REINDEX CONCURRENTLY");
+		PreventIsolationUsesXactSnapshot("REINDEX CONCURRENTLY");
+	}
 
 	params.options =
 		(verbose ? REINDEXOPT_VERBOSE : 0) |
@@ -4131,9 +4128,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		if (newidx->safe)
 			set_indexsafe_procflags();
 
-		/* Set ActiveSnapshot since functions in the indexes may need it */
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		/*
 		 * Update progress for the index to build, with the correct parent
 		 * table involved.
@@ -4148,7 +4142,6 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/* Perform concurrent build of new index */
 		index_concurrently_build(newidx->tableId, newidx->indexId);
 
-		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
 

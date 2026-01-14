@@ -3707,6 +3707,17 @@ PreventInTransactionBlock(bool isTopLevel, const char *stmtType)
 	MyXactFlags |= XACT_FLAGS_NEEDIMMEDIATECOMMIT;
 }
 
+void
+PreventIsolationUsesXactSnapshot(const char *stmtType)
+{
+	if (IsolationUsesXactSnapshot())
+		ereport(ERROR,
+				(errcode(ERRCODE_INAPPROPRIATE_ISOLATION_LEVEL_FOR_COMMAND),
+		/* translator: %s represents an SQL statement name */
+				 errmsg("%s does not support transaction isolation higher than READ COMMITTED",
+						stmtType)));
+}
+
 /*
  *	WarnNoTransactionBlock
  *	RequireTransactionBlock

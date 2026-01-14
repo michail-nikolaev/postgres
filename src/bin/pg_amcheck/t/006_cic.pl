@@ -152,7 +152,7 @@ $node->pgbench(
 	0,
 	[qr{actually processed}],
 	[qr{^$}],
-	'concurrent operations with REINDEX/CREATE INDEX CONCURRENTLY for GIN/GIST/BRIN/HASH/SPGIST',
+	'concurrent operations with REINDEX/CREATE INDEX CONCURRENTLY for GIN',
 	{
 		'concurrent_ops_gin_idx' => q(
 			SELECT pg_try_advisory_lock(42)::integer AS gotlock \gset

@@ -1460,8 +1460,11 @@ ProcessUtilitySlow(ParseState *pstate,
 					bool		is_alter_table;
 
 					if (stmt->concurrent)
+					{
 						PreventInTransactionBlock(isTopLevel,
 												  "CREATE INDEX CONCURRENTLY");
+						PreventIsolationUsesXactSnapshot("CREATE INDEX CONCURRENTLY");
+					}
 
 					/*
 					 * Look up the relation OID just once, right here at the

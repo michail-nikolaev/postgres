@@ -488,6 +488,7 @@ extern bool IsTransactionOrTransactionBlock(void);
 extern char TransactionBlockStatusCode(void);
 extern void AbortOutOfAnyTransaction(void);
 extern void PreventInTransactionBlock(bool isTopLevel, const char *stmtType);
+extern void PreventIsolationUsesXactSnapshot(const char *stmtType);
 extern void RequireTransactionBlock(bool isTopLevel, const char *stmtType);
 extern void WarnNoTransactionBlock(bool isTopLevel, const char *stmtType);
 extern bool IsInTransactionBlock(bool isTopLevel);
