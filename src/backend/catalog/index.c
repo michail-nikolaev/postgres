@@ -1531,7 +1531,7 @@ index_concurrently_build(Oid heapRelationId,
 	index_build(heapRel, indexRelation, indexInfo, false, true);
 
 	InvalidateCatalogSnapshot();
-	Assert(indexInfo->ii_Unique || !TransactionIdIsValid(MyProc->xmin));
+	Assert(!TransactionIdIsValid(MyProc->xmin));
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -3322,9 +3322,9 @@ IndexCheckExclusion(Relation heapRelation,
  * if we used HeapTupleSatisfiesVacuum).  This leaves us with an index that
  * does not contain any tuples added to the table while we built the index.
  *
- * Furthermore, in case of non-unique index we set SO_RESET_SNAPSHOT for the
- * scan, which causes new snapshot to be set as active every so often. The reason
- * for that is to propagate the xmin horizon forward.
+ * Furthermore, we set SO_RESET_SNAPSHOT for the scan, which causes new
+ * snapshot to be set as active every so often. The reason  for that is to
+ * propagate the xmin horizon forward.
  *
  * Next, we mark the index "indisready" (but still not "indisvalid") and
  * commit the second transaction and start a third.  Again we wait for all
