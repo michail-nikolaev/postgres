@@ -1140,7 +1140,8 @@ extern Size table_parallelscan_estimate(Relation rel, Snapshot snapshot);
  */
 extern void table_parallelscan_initialize(Relation rel,
 										  ParallelTableScanDesc pscan,
-										  Snapshot snapshot);
+										  Snapshot snapshot,
+										  bool reset_snapshot);
 
 /*
  * Begin a parallel scan. `pscan` needs to have been initialized with
@@ -1772,7 +1773,7 @@ table_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
  * This only really makes sense for heap AM, it might need to be generalized
  * for other AMs later.
  *
- * In case of non-unique index and non-parallel concurrent build,
+ * In case of non-unique concurrent index build,
  * SO_RESET_SNAPSHOT is applied for the scan. That leads to changing snapshots
  * on the fly to allow xmin horizon propagate.
  */
