@@ -243,7 +243,8 @@ CheckIndexCompatible(Oid oldId,
 	 */
 	indexInfo = makeIndexInfo(numberOfAttributes, numberOfAttributes,
 							  accessMethodId, NIL, NIL, false, false,
-							  false, false, amsummarizing, isWithoutOverlaps);
+							  false, false, amsummarizing, isWithoutOverlaps,
+							  NULL, NULL, NULL);
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
 	opclassIds = palloc_array(Oid, numberOfAttributes);
@@ -930,7 +931,8 @@ DefineIndex(ParseState *pstate,
 							  !concurrent,
 							  concurrent,
 							  amissummarizing,
-							  stmt->iswithoutoverlaps);
+							  stmt->iswithoutoverlaps,
+							  NULL, NULL, NULL);
 
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
