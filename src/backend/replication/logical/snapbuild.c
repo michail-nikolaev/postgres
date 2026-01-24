@@ -399,6 +399,47 @@ SnapBuildBuildSnapshot(SnapBuild *builder)
 	snapshot->xmin = builder->xmin;
 	snapshot->xmax = builder->xmax;
 
+	/*
+	 * Although it's very unlikely, it's possible that a commit WAL record was
+	 * decoded but CLOG is not aware of the commit yet. Should the CLOG update
+	 * be delayed even more, visibility checks that use this snapshot could
+	 * work incorrectly. Therefore we check the CLOG status here.
+	 */
+	while (true)
+	{
+		bool	found = false;
+
+		for (int i = 0; i < builder->committed.xcnt; i++)
+		{
+			/*
+			 * XXX Is it worth remembering the XIDs that appear to be
+			 * committed per CLOG and skipping them in the next iteration of
+			 * the outer loop? Not sure it's worth the effort - a single
+			 * iteration is enough in most cases.
+			 */
+			if (unlikely(!TransactionIdDidCommit(builder->committed.xip[i])))
+			{
+				found = true;
+
+				/*
+				 * Wait a bit before going to the next iteration of the outer
+				 * loop. The race conditions we address here is pretty rare,
+				 * so we shouldn't need to wait too long.
+				 */
+				(void) WaitLatch(MyLatch,
+								 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+								 10L,
+								 WAIT_EVENT_SNAPBUILD_CLOG);
+				ResetLatch(MyLatch);
+
+				break;
+			}
+		}
+
+		if (!found)
+			break;
+	}
+
 	/* store all transactions to be treated as committed by this snapshot */
 	snapshot->xip =
 		(TransactionId *) ((char *) snapshot + sizeof(SnapshotData));
