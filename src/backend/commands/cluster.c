@@ -1031,7 +1031,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		 * rebuild the target's indexes and throw away the transient table.
 		 */
 		finish_heap_swap(tableOid, OIDNewHeap, is_system_catalog,
-						 swap_toast_by_content, false, true, true,
+						 swap_toast_by_content, false, true, true, InvalidTransactionId,
 						 frozenXid, cutoffMulti,
 						 relpersistence);
 	}
@@ -1429,6 +1429,7 @@ static void
 swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 					bool swap_toast_by_content,
 					bool is_internal,
+					TransactionId check_xmin,
 					TransactionId frozenXid,
 					MultiXactId cutoffMulti,
 					Oid *mapped_tables)
@@ -1611,6 +1612,9 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 		relform2->relallfrozen = swap_allfrozen;
 	}
 
+	relform1->relcheckxmin = check_xmin;
+	relform2->relcheckxmin = check_xmin;
+
 	/*
 	 * Update the tuples in pg_class --- unless the target relation of the
 	 * swap is pg_class itself.  In that case, there is zero point in making
@@ -1688,6 +1692,7 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 									target_is_pg_class,
 									swap_toast_by_content,
 									is_internal,
+									InvalidTransactionId,
 									frozenXid,
 									cutoffMulti,
 									mapped_tables);
@@ -1791,6 +1796,7 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 							target_is_pg_class,
 							swap_toast_by_content,
 							is_internal,
+							check_xmin,
 							InvalidTransactionId,
 							InvalidMultiXactId,
 							mapped_tables);
@@ -1814,6 +1820,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 				 bool check_constraints,
 				 bool is_internal,
 				 bool reindex,
+				 TransactionId check_xmin,
 				 TransactionId frozenXid,
 				 MultiXactId cutoffMulti,
 				 char newrelpersistence)
@@ -1835,7 +1842,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 	 */
 	swap_relation_files(OIDOldHeap, OIDNewHeap,
 						(OIDOldHeap == RelationRelationId),
-						swap_toast_by_content, is_internal,
+						swap_toast_by_content, is_internal, check_xmin,
 						frozenXid, cutoffMulti, mapped_tables);
 
 	/*
@@ -3335,6 +3342,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 							false,	/* swap_toast_by_content */
 							true,
 							InvalidTransactionId,
+							InvalidTransactionId,
 							InvalidMultiXactId,
 							mapped_tables);
 
@@ -3371,7 +3379,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	finish_heap_swap(old_table_oid, new_table_oid,
 					 is_system_catalog,
 					 false,		/* swap_toast_by_content */
-					 false, true, false,
+					 false, true, false, GetCurrentTransactionId(),
 					 frozenXid, cutoffMulti,
 					 relpersistence);
 }

@@ -953,6 +953,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relrewrite - 1] = ObjectIdGetDatum(rd_rel->relrewrite);
 	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
 	values[Anum_pg_class_relminmxid - 1] = MultiXactIdGetDatum(rd_rel->relminmxid);
+	values[Anum_pg_class_relcheckxmin - 1] = TransactionIdGetDatum(rd_rel->relcheckxmin);
 	if (relacl != (Datum) 0)
 		values[Anum_pg_class_relacl - 1] = relacl;
 	else
@@ -1022,6 +1023,8 @@ AddNewRelationTuple(Relation pg_class_desc,
 
 	/* relispartition is always set by updating this tuple later */
 	new_rel_reltup->relispartition = false;
+
+	new_rel_reltup->relcheckxmin = InvalidTransactionId;
 
 	/* fill rd_att's type ID with something sane even if reltype is zero */
 	new_rel_desc->rd_att->tdtypeid = new_type_oid ? new_type_oid : RECORDOID;

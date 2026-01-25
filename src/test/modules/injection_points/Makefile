@@ -16,6 +16,7 @@ ISOLATION = basic \
 	    inplace \
 	    repack \
 	    repack_toast \
+	    repack_mvcc \
 	    syscache-update-pruned \
 	    heap_lock_update
 ISOLATION_OPTS = --temp-config $(top_srcdir)/src/test/modules/injection_points/logical.conf
