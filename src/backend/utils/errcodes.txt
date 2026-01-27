@@ -259,6 +259,7 @@ Section: Class 25 - Invalid Transaction State
 25P02    E    ERRCODE_IN_FAILED_SQL_TRANSACTION                              in_failed_sql_transaction
 25P03    E    ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT                    idle_in_transaction_session_timeout
 25P04    E    ERRCODE_TRANSACTION_TIMEOUT                                    transaction_timeout
+25P05    E    ERRCODE_RELATION_UNAVAILABLE_FOR_CURRENT_TRANSACTION           relation_unavailable_for_current_transaction
 
 Section: Class 26 - Invalid SQL Statement Name
 

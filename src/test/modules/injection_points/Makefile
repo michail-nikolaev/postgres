@@ -16,6 +16,7 @@ ISOLATION = basic \
 	    inplace \
 	    repack \
 	    repack_toast \
+	    repack_mvcc \
 	    syscache-update-pruned \
 	    heap_lock_update
 

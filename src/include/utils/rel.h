@@ -143,6 +143,11 @@ typedef struct RelationData
 	 */
 	TransactionId rd_partdesc_nodetached_xmin;
 
+	/*
+	 * Used at execution phase to prevent violation of MVCC rules.
+	 */
+	TransactionId rd_check_xmin;
+
 	/* data managed by RelationGetPartitionQual: */
 	List	   *rd_partcheck;	/* partition CHECK quals */
 	bool		rd_partcheckvalid;	/* true if list has been computed */

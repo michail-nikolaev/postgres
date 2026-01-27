@@ -6026,6 +6026,7 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 							 false, false, true,
 							 !OidIsValid(tab->newTableSpace),
 							 true,
+							 GetCurrentTransactionId(),
 							 RecentXmin,
 							 ReadNextMultiXactId(),
 							 persistence);

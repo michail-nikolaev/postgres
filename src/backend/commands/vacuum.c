@@ -1534,6 +1534,9 @@ vac_update_relstats(Relation relation,
 		if (update)
 		{
 			pgcform->relfrozenxid = frozenxid;
+			/* Clear relcheckxmin if frozenxid is higher, now it is safe */
+			if (TransactionIdPrecedes(pgcform->relcheckxmin, pgcform->relfrozenxid))
+				pgcform->relcheckxmin = InvalidTransactionId;
 			dirty = true;
 			if (frozenxid_updated)
 				*frozenxid_updated = true;

@@ -1203,6 +1203,8 @@ retry:
 	 */
 	RelationBuildTupleDesc(relation);
 
+	relation->rd_check_xmin = relp->relcheckxmin;
+
 	/* foreign key data is not loaded till asked for */
 	relation->rd_fkeylist = NIL;
 	relation->rd_fkeyvalid = false;

@@ -865,6 +865,24 @@ ExecGetRangeTableRelation(EState *estate, Index rti, bool isResultRel)
 		estate->es_relations[rti - 1] = rel;
 	}
 
+	if (unlikely(TransactionIdIsValid(rel->rd_check_xmin)))
+	{
+		/* We know it is committed, just need to be sure it is visible for current exec */
+		TransactionId xmin = rel->rd_check_xmin;
+		/* Fast check first */
+		if (unlikely(!TransactionIdIsCurrentTransactionId(xmin) &&
+				!TransactionIdPrecedes(xmin, TransactionXmin)))
+		{
+			Snapshot snapshot = GetActiveSnapshot();
+			/* Test remaining rules */
+			if (XidInMVCCSnapshot(xmin, snapshot))
+				ereport(ERROR,
+						errcode(ERRCODE_RELATION_UNAVAILABLE_FOR_CURRENT_TRANSACTION),
+						errmsg("relation \"%s\" cannot be accessed in current transaction",
+							   RelationGetRelationName(rel)));
+		}
+	}
+
 	return rel;
 }
 

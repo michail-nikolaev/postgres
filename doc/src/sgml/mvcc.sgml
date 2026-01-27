@@ -1833,21 +1833,29 @@ SELECT pg_advisory_lock(q.id) FROM
    <title>Caveats</title>
 
    <para>
-    Some commands, currently only <link linkend="sql-truncate"><command>TRUNCATE</command></link>, the
-    table-rewriting forms of <link linkend="sql-altertable"><command>ALTER
-    TABLE</command></link> and <command>REPACK</command> with
-    the <literal>CONCURRENTLY</literal> option, are not
-    MVCC-safe.  This means that after the truncation or rewrite commits, the
+    Some commands, currently only <link linkend="sql-truncate"><command>TRUNCATE</command></link>,
+    are not MVCC-safe.  This means that after the truncation commits, the
     table will appear empty to concurrent transactions, if they are using a
-    snapshot taken before the command committed.  This will only be an
-    issue for a transaction that did not access the table in question
-    before the command started &mdash; any transaction that has done so
-    would hold at least an <literal>ACCESS SHARE</literal> table lock,
-    which would block the truncating or rewriting command until that transaction completes.
-    So these commands will not cause any apparent inconsistency in the
-    table contents for successive queries on the target table, but they
+    snapshot taken before the command committed.  This will only be an issue
+    for a transaction that did not access the table in question before the
+    command started &mdash; any transaction that has done so would hold at
+    least an <literal>ACCESS SHARE</literal> table lock, which would block
+    the <command>TRUNCATE</command> command until that transaction completes.
+    So <command>TRUNCATE</command> will not cause any apparent inconsistency
+    in the table contents for successive queries on the target table, but it
     could cause visible inconsistency between the contents of the target
     table and other tables in the database.
+   </para>
+
+   <para>
+    The table-rewriting forms of
+    <link linkend="sql-altertable"><command>ALTER TABLE</command></link>
+    and <link linkend="sql-repack"><command>REPACK</command></link>
+    with the <literal>CONCURRENTLY</literal> option are also not MVCC-safe.
+    If a transaction attempts to access a relation that was rewritten
+    after the transaction's snapshot was taken, an error will be raised.
+    As above, this will only be an issue for a transaction that did not
+    access the table before the rewriting command started.
    </para>
 
    <para>

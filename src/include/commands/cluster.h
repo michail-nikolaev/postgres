@@ -130,6 +130,7 @@ extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 							 bool check_constraints,
 							 bool is_internal,
 							 bool reindex,
+							 TransactionId check_xmin,
 							 TransactionId frozenXid,
 							 MultiXactId cutoffMulti,
 							 char newrelpersistence);
