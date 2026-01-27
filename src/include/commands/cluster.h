@@ -17,11 +17,13 @@
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
 #include "replication/decode.h"
+#include "postmaster/bgworker.h"
 #include "replication/logical.h"
+#include "storage/buffile.h"
 #include "storage/lock.h"
+#include "storage/shm_mq.h"
 #include "utils/relcache.h"
 #include "utils/resowner.h"
-#include "utils/tuplestore.h"
 
 
 /* flag bits for ClusterParams->options */
@@ -44,6 +46,9 @@ typedef struct ClusterParams
  * The following definitions are used by REPACK CONCURRENTLY.
  */
 
+/*
+ * Stored as a single byte in the output file.
+ */
 typedef enum
 {
 	CHANGE_INSERT,
@@ -52,67 +57,29 @@ typedef enum
 	CHANGE_DELETE
 } ConcurrentChangeKind;
 
-typedef struct ConcurrentChange
-{
-	/* See the enum above. */
-	ConcurrentChangeKind kind;
-
-	/*
-	 * The actual tuple.
-	 *
-	 * The tuple data follows the ConcurrentChange structure. Before use make
-	 * sure the tuple is correctly aligned (ConcurrentChange can be stored as
-	 * bytea) and that tuple->t_data is fixed.
-	 */
-	HeapTupleData tup_data;
-} ConcurrentChange;
-
-#define SizeOfConcurrentChange (offsetof(ConcurrentChange, tup_data) + \
-								sizeof(HeapTupleData))
-
 /*
  * Logical decoding state.
  *
- * Here we store the data changes that we decode from WAL while the table
- * contents is being copied to a new storage. Also the necessary metadata
- * needed to apply these changes to the table is stored here.
+ * The output plugin uses it to store the data changes that it decodes from
+ * WAL while the table contents is being copied to a new storage.
  */
 typedef struct RepackDecodingState
 {
 	/* The relation whose changes we're decoding. */
 	Oid			relid;
 
-	/* Replication slot name. */
-	NameData	slotname;
-
-	/*
-	 * Decoded changes are stored here. Although we try to avoid excessive
-	 * batches, it can happen that the changes need to be stored to disk. The
-	 * tuplestore does this transparently.
-	 */
-	Tuplestorestate *tstore;
-
-	/* The current number of changes in tstore. */
-	double		nchanges;
-
-	/*
-	 * Descriptor to store the ConcurrentChange structure serialized (bytea).
-	 * We can't store the tuple directly because tuplestore only supports
-	 * minimum tuple and we may need to transfer OID system column from the
-	 * output plugin. Also we need to transfer the change kind, so it's better
-	 * to put everything in the structure than to use 2 tuplestores "in
-	 * parallel".
-	 */
-	TupleDesc	tupdesc_change;
-
-	/* Tuple descriptor needed to update indexes. */
+	/* Tuple descriptor of the relation being processed. */
 	TupleDesc	tupdesc;
 
-	/* Slot to retrieve data from tstore. */
-	TupleTableSlot *tsslot;
-
-	ResourceOwner resowner;
+	/* The current output file. */
+	BufFile    *file;
 } RepackDecodingState;
+
+extern PGDLLIMPORT volatile sig_atomic_t RepackMessagePending;
+
+extern bool IsRepackWorker(void);
+extern void HandleRepackMessageInterrupt(void);
+extern void ProcessRepackMessages(void);
 
 extern void ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel);
 
@@ -137,6 +104,6 @@ extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 
 extern bool am_decoding_for_repack(void);
 extern bool change_useless_for_repack(XLogRecordBuffer *buf);
-extern void repack_decode_concurrent_changes(LogicalDecodingContext *ctx,
-											 XLogRecPtr end_of_wal);
+
+extern void RepackWorkerMain(Datum main_arg);
 #endif							/* CLUSTER_H */

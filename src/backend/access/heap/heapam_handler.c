@@ -33,7 +33,6 @@
 #include "catalog/index.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
-#include "commands/cluster.h"
 #include "commands/progress.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -688,7 +687,6 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
 								 Snapshot snapshot,
-								 LogicalDecodingContext *decoding_ctx,
 								 TransactionId *xid_cutoff,
 								 MultiXactId *multi_cutoff,
 								 double *num_tuples,
@@ -710,7 +708,6 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
 	bool		concurrent = snapshot != NULL;
-	XLogRecPtr	end_of_wal_prev = GetFlushRecPtr(NULL);
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
@@ -971,31 +968,6 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			ct_val[1] = *num_tuples;
 			pgstat_progress_update_multi_param(2, ct_index, ct_val);
 		}
-
-		/*
-		 * Process the WAL produced by the load, as well as by other
-		 * transactions, so that the replication slot can advance and WAL does
-		 * not pile up. Use wal_segment_size as a threshold so that we do not
-		 * introduce the decoding overhead too often.
-		 *
-		 * Of course, we must not apply the changes until the initial load has
-		 * completed.
-		 *
-		 * Note that our insertions into the new table should not be decoded
-		 * as we (intentionally) do not write the logical decoding specific
-		 * information to WAL.
-		 */
-		if (concurrent)
-		{
-			XLogRecPtr	end_of_wal;
-
-			end_of_wal = GetFlushRecPtr(NULL);
-			if ((end_of_wal - end_of_wal_prev) > wal_segment_size)
-			{
-				repack_decode_concurrent_changes(decoding_ctx, end_of_wal);
-				end_of_wal_prev = end_of_wal;
-			}
-		}
 	}
 
 	if (indexScan != NULL)
@@ -1041,22 +1013,6 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			/* Report n_tuples */
 			pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED,
 										 n_tuples);
-
-			/*
-			 * Try to keep the amount of not-yet-decoded WAL small, like
-			 * above.
-			 */
-			if (concurrent)
-			{
-				XLogRecPtr	end_of_wal;
-
-				end_of_wal = GetFlushRecPtr(NULL);
-				if ((end_of_wal - end_of_wal_prev) > wal_segment_size)
-				{
-					repack_decode_concurrent_changes(decoding_ctx, end_of_wal);
-					end_of_wal_prev = end_of_wal;
-				}
-			}
 		}
 
 		tuplesort_end(tuplesort);
