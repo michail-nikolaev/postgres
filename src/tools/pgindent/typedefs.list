@@ -420,7 +420,6 @@ CatCacheHeader
 CatalogId
 CatalogIdMapEntry
 CatalogIndexState
-ChangeDest
 ChangeVarNodes_callback
 ChangeVarNodes_context
 ChannelName
@@ -498,6 +497,7 @@ CompressFileHandle
 CompressionLocation
 CompressorState
 ComputeXidHorizonsResult
+ConcurrentChangeContext
 ConcurrentChangeKind
 ConditionVariable
 ConditionVariableMinimallyPadded
@@ -2581,6 +2581,7 @@ ReorderBufferTupleCidKey
 ReorderBufferUpdateProgressTxnCB
 ReorderTuple
 RepOriginId
+RepackApplyRange
 RepackCommand
 RepackDecodingState
 RepackStmt
