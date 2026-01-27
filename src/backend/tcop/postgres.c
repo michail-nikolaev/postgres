@@ -36,6 +36,7 @@
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "commands/async.h"
+#include "commands/cluster.h"
 #include "commands/event_trigger.h"
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
@@ -3541,6 +3542,9 @@ ProcessInterrupts(void)
 
 	if (ParallelApplyMessagePending)
 		ProcessParallelApplyMessages();
+
+	if (RepackMessagePending)
+		ProcessRepackMessages();
 }
 
 /*
