@@ -33,6 +33,7 @@
 #include "catalog/index.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "commands/cluster.h"
 #include "commands/progress.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -686,12 +687,12 @@ static void
 heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
-								 Snapshot snapshot,
 								 TransactionId *xid_cutoff,
 								 MultiXactId *multi_cutoff,
 								 double *num_tuples,
 								 double *tups_vacuumed,
-								 double *tups_recently_dead)
+								 double *tups_recently_dead,
+								 void *tableam_data)
 {
 	RewriteState rwstate = NULL;
 	IndexScanDesc indexScan;
@@ -707,7 +708,10 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bool	   *isnull;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
-	bool		concurrent = snapshot != NULL;
+	ConcurrentChangeContext *ctx = (ConcurrentChangeContext *) tableam_data;
+	bool		concurrent = ctx != NULL;
+	Snapshot	snapshot = NULL;
+	BlockNumber range_end = InvalidBlockNumber;
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
@@ -744,8 +748,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 * that still need to be copied, we scan with SnapshotAny and use
 	 * HeapTupleSatisfiesVacuum for the visibility test.
 	 *
-	 * In the CONCURRENTLY case, we do regular MVCC visibility tests, using
-	 * the snapshot passed by the caller.
+	 * In the CONCURRENTLY case, we do regular MVCC visibility tests. The
+	 * snapshot changes several times during the scan so that we do not block
+	 * the progress of the xmin horizon for VACUUM too much.
 	 */
 	if (OldIndex != NULL && !use_sort)
 	{
@@ -766,6 +771,13 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 									snapshot ? snapshot : SnapshotAny,
 									NULL, 0, 0);
 		index_rescan(indexScan, NULL, 0, NULL, 0);
+
+		/*
+		 * Index scan should not be used in the CONCURRENTLY case because
+		 * it returns tuples in random order, so we could not split the
+		 * scan into a series of page ranges.
+		 */
+		Assert(!concurrent);
 	}
 	else
 	{
@@ -773,19 +785,79 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_SEQ_SCAN_HEAP);
 
-		tableScan = table_beginscan(OldHeap,
-									snapshot ? snapshot : SnapshotAny,
-									0, (ScanKey) NULL);
+		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL);
 		heapScan = (HeapScanDesc) tableScan;
+
+		/*
+		 * In CONCURRENTLY mode we scan the table by ranges of blocks and the
+		 * algorithm below expects forward direction. (No other direction
+		 * should be set here regardless concurrently anyway.)
+		 */
+		Assert(heapScan->rs_dir == ForwardScanDirection || !concurrent);
 		indexScan = NULL;
 
 		/* Set total heap blocks */
 		pgstat_progress_update_param(PROGRESS_REPACK_TOTAL_HEAP_BLKS,
 									 heapScan->rs_nblocks);
+
+		/* Setup the first range. */
+		if (concurrent)
+		{
+			ctx->first_block = heapScan->rs_startblock;
+			range_end = ctx->first_block + repack_blocks_per_snapshot;
+		}
 	}
 
 	slot = table_slot_create(OldHeap, NULL);
 	hslot = (BufferHeapTupleTableSlot *) slot;
+
+	if (concurrent)
+	{
+		/*
+		 * Do not block the progress of xmin horizons.
+		 *
+		 * TODO Analyze thoroughly if this might have bad consequences.
+		 */
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+
+		/*
+		 * As there is no snapshot, our xmin should be invalid now.
+		 *
+		 * TODO xid can still be valid. We can mark our transaction with the
+		 * PROC_IN_VACUUM flag, but at the same time we need to make sure that
+		 * anything we write is ignored by VACUUM: since our xid is >= xmin of
+		 * our replication slot, the slot does not help. Other transaction
+		 * might use their RecentXmin to check if our xact is still running
+		 * (see TransactionIdIsInProgress) before they check CLOG. By using
+		 * PROC_IN_VACUUM we'd let their RecentXmin skip our xid. Thus our
+		 * xact would appear not running anymore, but not yet marked committed
+		 * in CLOG either, therefore aborted: it's o.k. for VACUUM to clean up
+		 * tuples written by aborted transaction.
+		 *
+		 * Perhaps we can add a new field 'relisvalid' to pg_class and
+		 * something alike to pg_index and make sure that neither queries nor
+		 * VACUUM can use tables / indexes which do not have this flag set
+		 * (The existing pg_index(indisvalid) field probably should not
+		 * control whether VACUUM is allowed or not). Then we can do the
+		 * catalog changes in separate transactions. Only the transaction that
+		 * copies the heap would then use the PROC_IN_VACUUM flag. However,
+		 * even then it would probably be appropriate to do regular
+		 * (MVCC-safe) rewriting, i.e. avoid setting the xid of the rewriting
+		 * transaction in the tuple headers.
+		 *
+		 * (If PROC_IN_VACUUM is eventually used, this Assert() statement is
+		 * probably not needed.)
+		 */
+		Assert(!TransactionIdIsValid(MyProc->xmin));
+
+		/*
+		 * Wait until the worker has the initial snapshot and retrieve it.
+		 */
+		snapshot = repack_get_snapshot(ctx);
+
+		PushActiveSnapshot(snapshot);
+	}
 
 	/*
 	 * Scan through the OldHeap, either in OldIndex order or sequentially;
@@ -803,6 +875,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		if (indexScan != NULL)
 		{
+			/* See above. */
+			Assert(!concurrent);
+
 			if (!index_getnext_slot(indexScan, ForwardScanDirection, slot))
 				break;
 
@@ -824,6 +899,18 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				 */
 				pgstat_progress_update_param(PROGRESS_REPACK_HEAP_BLKS_SCANNED,
 											 heapScan->rs_nblocks);
+
+				if (concurrent)
+				{
+					PopActiveSnapshot();
+
+					/*
+					 * For the last range, there are no restrictions on block
+					 * numbers, so the concurrent data changes pertaining to
+					 * this range can be decoded (and applied) anytime after
+					 * this loop.
+					 */
+				}
 				break;
 			}
 
@@ -856,18 +943,19 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		if (!concurrent)
 		{
 			/*
-			 * To be able to guarantee that we can set the hint bit, acquire an
-			 * exclusive lock on the old buffer. We need the hint bits, set in
-			 * heapam_relation_copy_for_cluster() -> HeapTupleSatisfiesVacuum(),
-			 * to be set, as otherwise reform_and_rewrite_tuple() ->
-			 * rewrite_heap_tuple() will get confused. Specifically,
-			 * rewrite_heap_tuple() checks for HEAP_XMAX_INVALID in the old tuple
-			 * to determine whether to check the old-to-new mapping hash table.
+			 * To be able to guarantee that we can set the hint bit, acquire
+			 * an exclusive lock on the old buffer. We need the hint bits, set
+			 * in heapam_relation_copy_for_cluster() ->
+			 * HeapTupleSatisfiesVacuum(), to be set, as otherwise
+			 * reform_and_rewrite_tuple() -> rewrite_heap_tuple() will get
+			 * confused. Specifically, rewrite_heap_tuple() checks for
+			 * HEAP_XMAX_INVALID in the old tuple to determine whether to
+			 * check the old-to-new mapping hash table.
 			 *
-			 * It'd be better if we somehow could avoid setting hint bits on the
-			 * old page. One reason to use VACUUM FULL are very bloated tables -
-			 * rewriting most of the old table during VACUUM FULL doesn't exactly
-			 * help...
+			 * It'd be better if we somehow could avoid setting hint bits on
+			 * the old page. One reason to use VACUUM FULL are very bloated
+			 * tables - rewriting most of the old table during VACUUM FULL
+			 * doesn't exactly help...
 			 */
 			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
@@ -936,6 +1024,66 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				continue;
 			}
 		}
+		else
+		{
+			BlockNumber blkno;
+			bool		visible;
+
+			/*
+			 * With CONCURRENTLY, we use each snapshot only for certain range
+			 * of pages, so that VACUUM does not get blocked for too long. So
+			 * first check if the tuple falls into the current range.
+			 */
+			blkno = BufferGetBlockNumber(buf);
+
+			Assert(BlockNumberIsValid(range_end));
+
+			/* End of the current range? */
+			if (blkno >= range_end)
+			{
+				XLogRecPtr	end_of_wal;
+
+				PopActiveSnapshot();
+
+				/* See above. */
+				Assert(!TransactionIdIsValid(MyProc->xmin));
+				/*
+				 * XXX It might be worth Assert(CatalogSnapshot == NULL) here,
+				 * however that symbol is not external.
+				 */
+
+				/*
+				 * Decode all the concurrent data changes committed so far -
+				 * these will be applicable to the current range.
+				 */
+				end_of_wal = GetFlushRecPtr(NULL);
+				repack_get_concurrent_changes(ctx, end_of_wal, range_end,
+											  true, false);
+
+				/*
+				 * Define the next range.
+				 */
+				range_end = blkno + repack_blocks_per_snapshot;
+
+				/*
+				 * Get the snapshot for the next range - it should have been
+				 * built at the position right after the last change
+				 * decoded. Data present in the next range of blocks will
+				 * either be visible to the snapshot or appear in the next
+				 * batch of decoded changes.
+				 */
+				snapshot = repack_get_snapshot(ctx);
+				PushActiveSnapshot(snapshot);
+			}
+
+			/* Finally check the tuple visibility. */
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			visible = HeapTupleSatisfiesVisibility(tuple, snapshot, buf);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (!visible)
+				continue;
+		}
 
 		*num_tuples += 1;
 		if (tuplesort != NULL)
@@ -968,6 +1116,18 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			ct_val[1] = *num_tuples;
 			pgstat_progress_update_multi_param(2, ct_index, ct_val);
 		}
+	}
+
+	if (concurrent)
+	{
+		XLogRecPtr	end_of_wal;
+
+		/* Decode the changes belonging to the last range. */
+		end_of_wal = GetFlushRecPtr(NULL);
+		repack_get_concurrent_changes(ctx, end_of_wal, InvalidBlockNumber,
+									  false, false);
+
+		PushActiveSnapshot(GetTransactionSnapshot());
 	}
 
 	if (indexScan != NULL)

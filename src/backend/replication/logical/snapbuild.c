@@ -128,6 +128,7 @@
 #include "access/heapam_xlog.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "commands/cluster.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -537,7 +538,7 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
  * we do not set MyProc->xmin). XXX Do we yet need to add some restrictions?
  */
 Snapshot
-SnapBuildInitialSnapshotForRepack(SnapBuild *builder)
+SnapBuildSnapshotForRepack(SnapBuild *builder)
 {
 	Snapshot	snap;
 
@@ -1078,6 +1079,28 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		}
 	}
 
+	/*
+	 * Is REPACKED (CONCURRENTLY) being run by this backend?
+	 */
+	else if (am_decoding_for_repack())
+	{
+		Assert(builder->building_full_snapshot);
+
+		/*
+		 * In this special mode, heap changes of other relations should not be
+		 * decoded at all - see heap_decode(). Thus if we find a single heap
+		 * change in this transaction (or its subtransaction), we know that
+		 * this transaction changes the relation being repacked.
+		 */
+		if (ReorderBufferXidHasHeapChanges(builder->reorder, xid))
+
+			/*
+			 * Record the commit so we can build snapshots for the relation
+			 * being repacked.
+			 */
+			needs_timetravel = true;
+	}
+
 	for (nxact = 0; nxact < nsubxacts; nxact++)
 	{
 		TransactionId subxid = subxacts[nxact];
@@ -1283,7 +1306,7 @@ SnapBuildProcessRunningXacts(SnapBuild *builder, XLogRecPtr lsn, xl_running_xact
 		xmin = running->oldestRunningXid;
 	elog(DEBUG3, "xmin: %u, xmax: %u, oldest running: %u, oldest xmin: %u",
 		 builder->xmin, builder->xmax, running->oldestRunningXid, xmin);
-	LogicalIncreaseXminForSlot(lsn, xmin);
+	LogicalIncreaseXminForSlot(lsn, xmin, true);
 
 	/*
 	 * Also tell the slot where we can restart decoding from. We don't want to

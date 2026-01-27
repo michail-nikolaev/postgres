@@ -196,6 +196,8 @@ store_change(LogicalDecodingContext *ctx, ConcurrentChangeKind kind,
 	BufFileWrite(dstate->file, &tuple->t_len, sizeof(tuple->t_len));
 	/* ... and the tuple itself. */
 	BufFileWrite(dstate->file, tuple->t_data, tuple->t_len);
+	/* CTID is needed as well, to check block ranges. */
+	BufFileWrite(dstate->file, &tuple->t_self, sizeof(tuple->t_self));
 
 	/* Free the flat copy if created above. */
 	if (flattened)

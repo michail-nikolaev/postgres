@@ -3735,6 +3735,56 @@ ReorderBufferXidHasCatalogChanges(ReorderBuffer *rb, TransactionId xid)
 }
 
 /*
+ * Check if a transaction (or its subtransaction) contains a heap change.
+ */
+bool
+ReorderBufferXidHasHeapChanges(ReorderBuffer *rb, TransactionId xid)
+{
+	ReorderBufferTXN *txn;
+	dlist_iter	iter;
+
+	txn = ReorderBufferTXNByXid(rb, xid, false, NULL, InvalidXLogRecPtr,
+								false);
+	if (txn == NULL)
+		return false;
+
+	dlist_foreach(iter, &txn->changes)
+	{
+		ReorderBufferChange *change;
+
+		change = dlist_container(ReorderBufferChange, node, iter.cur);
+
+		switch (change->action)
+		{
+			case REORDER_BUFFER_CHANGE_INSERT:
+			case REORDER_BUFFER_CHANGE_UPDATE:
+			case REORDER_BUFFER_CHANGE_DELETE:
+				return true;
+			default:
+				break;
+		}
+	}
+
+	/* Check subtransactions. */
+
+	/*
+	 * TODO Verify that subtransactions must be assigned to the top-level
+	 * transactions by now.
+	 */
+	dlist_foreach(iter, &txn->subtxns)
+	{
+		ReorderBufferTXN *subtxn;
+
+		subtxn = dlist_container(ReorderBufferTXN, node, iter.cur);
+
+		if (ReorderBufferXidHasHeapChanges(rb, subtxn->xid))
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * ReorderBufferXidHasBaseSnapshot
  *		Have we already set the base snapshot for the given txn/subtxn?
  */

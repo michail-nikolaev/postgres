@@ -46,6 +46,72 @@ typedef struct ClusterParams
  * The following definitions are used by REPACK CONCURRENTLY.
  */
 
+extern PGDLLIMPORT int repack_blocks_per_snapshot;
+
+/*
+ * Everything we need to call ExecInsertIndexTuples().
+ */
+typedef struct IndexInsertState
+{
+	ResultRelInfo *rri;
+	EState	   *estate;
+} IndexInsertState;
+
+/*
+ * Backend-local information to control the decoding worker.
+ */
+typedef struct DecodingWorker
+{
+	/* The worker. */
+	BackgroundWorkerHandle *handle;
+
+	/* DecodingWorkerShared is in this segment. */
+	dsm_segment *seg;
+
+	/* Handle of the error queue. */
+	shm_mq_handle *error_mqh;
+} DecodingWorker;
+
+/*
+ * Information needed to handle concurrent data changes.
+ */
+typedef struct ConcurrentChangeContext
+{
+	/* The relation the changes are applied to. */
+	Relation	rel;
+
+	/*
+	 * Background worker performing logical decoding of concurrent data
+	 * changes.
+	 */
+	DecodingWorker *worker;
+
+	/*
+	 * Sequential numbers of the most recent files containing snapshots and
+	 * data changes respectively. These files are created by the decoding
+	 * worker.
+	 */
+	int		file_seq_snapshot;
+	int		file_seq_changes;
+
+	/*
+	 * The following is needed to find the existing tuple if the change is
+	 * UPDATE or DELETE. 'ident_key' should have all the fields except for
+	 * 'sk_argument' initialized.
+	 */
+	Relation	ident_index;
+	ScanKey		ident_key;
+	int			ident_key_nentries;
+
+	/* Needed to update indexes of rel_dst. */
+	IndexInsertState *iistate;
+
+	/* The first block of the scan used to copy the heap. */
+	BlockNumber first_block;
+	/* List of RepackApplyRange objects. */
+	List	   *block_ranges;
+} ConcurrentChangeContext;
+
 /*
  * Stored as a single byte in the output file.
  */
@@ -104,6 +170,12 @@ extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 
 extern bool am_decoding_for_repack(void);
 extern bool change_useless_for_repack(XLogRecordBuffer *buf);
+extern void repack_get_concurrent_changes(struct ConcurrentChangeContext *ctx,
+										  XLogRecPtr end_of_wal,
+										  BlockNumber range_end,
+										  bool request_snapshot,
+										  bool done);
+extern Snapshot repack_get_snapshot(struct ConcurrentChangeContext *ctx);
 
 extern void RepackWorkerMain(Datum main_arg);
 #endif							/* CLUSTER_H */
