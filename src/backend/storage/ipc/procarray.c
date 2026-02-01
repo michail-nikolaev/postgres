@@ -1642,7 +1642,12 @@ TransactionIdIsInProgress(TransactionId xid)
  * relations that's not required, since only backends in my own database could
  * ever see the tuples in them. Also, we can ignore concurrently running lazy
  * VACUUMs because (a) they must be working on other tables, and (b) they
- * don't need to do snapshot-based lookups.
+ * don't need to do snapshot-based lookups.  Similarly, for the non-catalog
+ * horizon, we can ignore REPACK CONCURRENTLY for the
+ * same reasons and because they can't run in transaction blocks.  (They are
+ * not possible to ignore for catalogs, because REPACK do some catalog
+ * operations.)  Do note that this means that REPACK must use a lock level
+ * that conflicts with VACUUM.
  *
  * This also computes a horizon used to truncate pg_subtrans. For that
  * backends in all databases have to be considered, and concurrently running
@@ -1689,9 +1694,6 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 	bool		in_recovery = RecoveryInProgress();
 	TransactionId *other_xids = ProcGlobal->xids;
 
-	/* inferred after ProcArrayLock is released */
-	h->catalog_oldest_nonremovable = InvalidTransactionId;
-
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
 
 	h->latest_completed = TransamVariables->latestCompletedXid;
@@ -1711,6 +1713,7 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 
 		h->oldest_considered_running = initial;
 		h->shared_oldest_nonremovable = initial;
+		h->catalog_oldest_nonremovable = initial;
 		h->data_oldest_nonremovable = initial;
 
 		/*
@@ -1809,10 +1812,25 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			(statusFlags & PROC_AFFECTS_ALL_HORIZONS) ||
 			in_recovery)
 		{
-			h->data_oldest_nonremovable =
-				TransactionIdOlder(h->data_oldest_nonremovable, xmin);
+			/*
+			 * We can ignore this backend if it's running REPACK
+			 * CONCURRENTLY - but
+			 * only on vacuums of user-defined tables.
+			 */
+			if (!(statusFlags & PROC_IN_REPACK))
+				h->data_oldest_nonremovable =
+					TransactionIdOlder(h->data_oldest_nonremovable, xmin);
+
+			/* Catalog tables need to consider all backends in this db */
+			h->catalog_oldest_nonremovable =
+				TransactionIdOlder(h->catalog_oldest_nonremovable, xmin);
+
 		}
 	}
+
+	/* catalog horizon should never be later than data */
+	Assert(TransactionIdPrecedesOrEquals(h->catalog_oldest_nonremovable,
+										 h->data_oldest_nonremovable));
 
 	/*
 	 * If in recovery fetch oldest xid in KnownAssignedXids, will be applied
@@ -1835,6 +1853,8 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 			TransactionIdOlder(h->shared_oldest_nonremovable, kaxmin);
 		h->data_oldest_nonremovable =
 			TransactionIdOlder(h->data_oldest_nonremovable, kaxmin);
+		h->catalog_oldest_nonremovable =
+			TransactionIdOlder(h->catalog_oldest_nonremovable, kaxmin);
 		/* temp relations cannot be accessed in recovery */
 	}
 
@@ -1862,7 +1882,9 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 	h->shared_oldest_nonremovable =
 		TransactionIdOlder(h->shared_oldest_nonremovable,
 						   h->slot_catalog_xmin);
-	h->catalog_oldest_nonremovable = h->data_oldest_nonremovable;
+	h->catalog_oldest_nonremovable =
+		TransactionIdOlder(h->catalog_oldest_nonremovable,
+						   h->slot_xmin);
 	h->catalog_oldest_nonremovable =
 		TransactionIdOlder(h->catalog_oldest_nonremovable,
 						   h->slot_catalog_xmin);

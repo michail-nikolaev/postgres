@@ -292,7 +292,7 @@ static void export_snapshot(Snapshot snapshot,
 							DecodingWorkerShared *shared);
 static void ProcessRepackMessage(StringInfo msg);
 static const char *RepackCommandAsString(RepackCommand cmd);
-
+static void set_in_repack_procflags(void);
 
 #define REPL_PLUGIN_NAME   "pgoutput_repack"
 
@@ -353,6 +353,14 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 						   RepackCommandAsString(stmt->command),
 						   opt->defname),
 					parser_errposition(pstate, opt->location));
+	}
+
+	if ((params.options & CLUOPT_CONCURRENT) != 0)
+	{
+		InvalidateCatalogSnapshot();
+		PopActiveSnapshot();
+		set_in_repack_procflags();
+		PushActiveSnapshot(GetTransactionSnapshot());
 	}
 
 	/*
@@ -507,6 +515,12 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 		{
 			CommitTransactionCommand();
 			continue;
+		}
+
+		if ((params.options & CLUOPT_CONCURRENT) != 0)
+		{
+			InvalidateCatalogSnapshot();
+			set_in_repack_procflags();
 		}
 
 		/* functions in indexes may want a snapshot set */
@@ -4356,4 +4370,20 @@ ProcessRepackMessage(StringInfo msg)
 					 msgtype, msg->len);
 			}
 	}
+}
+
+static void
+set_in_repack_procflags(void)
+{
+	/*
+	 * This should only be called before installing xid or xmin in MyProc;
+	 * otherwise, concurrent processes could see an Xmin that moves backwards.
+	 */
+	Assert(MyProc->xid == InvalidTransactionId &&
+		   MyProc->xmin == InvalidTransactionId);
+
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+	MyProc->statusFlags |= PROC_IN_REPACK;
+	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+	LWLockRelease(ProcArrayLock);
 }
