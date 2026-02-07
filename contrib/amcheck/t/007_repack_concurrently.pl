@@ -91,6 +91,11 @@ $node->pgbench(
 			\\sleep 1 ms
 			COMMIT;
 
+			\\set v random(1, 300)
+			\\ if :v = 1
+				VACUUM ANALYZE pg_catalog.pg_class;
+			\\ endif
+
 			BEGIN
 			--TRANSACTION ISOLATION LEVEL REPEATABLE READ
 			;

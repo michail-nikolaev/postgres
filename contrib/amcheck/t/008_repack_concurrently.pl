@@ -49,7 +49,7 @@ $node->safe_psql('postgres', q(CREATE UNLOGGED SEQUENCE last_j START 1 INCREMENT
 
 
 $node->pgbench(
-'--no-vacuum --client=15 --jobs=4 --exit-on-abort --transactions=1000',
+'--no-vacuum --client=15 --jobs=4 --exit-on-abort --transactions=5000',
 0,
 [qr{actually processed}],
 [qr{^$}],
@@ -81,6 +81,10 @@ $node->pgbench(
 				COMMIT;
 			SELECT pg_advisory_unlock(43);
 			\\sleep 1 ms
+			\\set v random(1, 300)
+			\\ if :v = 1
+				VACUUM ANALYZE pg_catalog.pg_class;
+			\\ endif
 
 			BEGIN
 			--TRANSACTION ISOLATION LEVEL REPEATABLE READ
