@@ -39,9 +39,10 @@ typedef enum
 	PROCSIG_RECOVERY_CONFLICT,	/* backend is blocking recovery, check
 								 * PGPROC->pendingRecoveryConflicts for the
 								 * reason */
+	PROCSIG_REPACK_MESSAGE,		/* Message from repack worker */
 } ProcSignalReason;
 
-#define NUM_PROCSIGNALS (PROCSIG_RECOVERY_CONFLICT + 1)
+#define NUM_PROCSIGNALS (PROCSIG_REPACK_MESSAGE + 1)
 
 typedef enum
 {
