@@ -74,10 +74,17 @@ teardown
 
 session s2
 step change
+# Separately test UPDATE of both plain ("i") and TOASTed ("j") attribute. In
+# the first case, the new tuple we get from reorderbuffer.c contains "j" as a
+# TOAST pointer, which we need to update so it points to the new heap. In the
+# latter case, we receive "j" as "external indirect" value - here we test that
+# the decoding worker writes the tuple to a file correctly and that the
+# backend executing REPACK manages to restore it.
 {
 	UPDATE repack_test SET j=get_long_string() where i=2;
 	DELETE FROM repack_test WHERE i=3;
 	INSERT INTO repack_test(i, j) VALUES (4, get_long_string());
+	UPDATE repack_test SET i=3 where i=1;
 }
 # Check the table from the perspective of s2.
 step check2

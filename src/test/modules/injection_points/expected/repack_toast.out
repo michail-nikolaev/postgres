@@ -13,6 +13,7 @@ step change:
 	UPDATE repack_test SET j=get_long_string() where i=2;
 	DELETE FROM repack_test WHERE i=3;
 	INSERT INTO repack_test(i, j) VALUES (4, get_long_string());
+	UPDATE repack_test SET i=3 where i=1;
 
 step check2: 
 	INSERT INTO relfilenodes(node)

@@ -65,11 +65,13 @@ typedef enum
  */
 typedef struct RepackDecodingState
 {
+#ifdef	USE_ASSERT_CHECKING
 	/* The relation whose changes we're decoding. */
 	Oid			relid;
+#endif
 
-	/* Tuple descriptor of the relation being processed. */
-	TupleDesc	tupdesc;
+	/* Per-change memory context. */
+	MemoryContext	change_cxt;
 
 	/* The current output file. */
 	BufFile    *file;

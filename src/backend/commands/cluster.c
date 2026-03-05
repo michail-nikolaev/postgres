@@ -35,6 +35,7 @@
 #include "postgres.h"
 
 #include "access/amapi.h"
+#include "access/detoast.h"
 #include "access/heapam.h"
 #include "access/multixact.h"
 #include "access/relscan.h"
@@ -286,6 +287,10 @@ static void apply_concurrent_update(Relation rel, HeapTuple tup,
 									IndexInsertState *iistate,
 									TupleTableSlot *index_slot);
 static void apply_concurrent_delete(Relation rel, HeapTuple tup_target);
+static HeapTuple restore_tuple(BufFile *file, Relation relation,
+							   MemoryContext cxt);
+static HeapTuple adjust_toast_pointers(Relation relation, HeapTuple tup_dst,
+									   HeapTuple tup_src, MemoryContext cxt);
 static HeapTuple find_target_tuple(Relation rel, ChangeDest *dest,
 								   HeapTuple tup_key,
 								   TupleTableSlot *ident_slot);
@@ -2586,6 +2591,7 @@ setup_logical_decoding(Oid relid)
 	LogicalDecodingContext *ctx;
 	NameData	slotname;
 	RepackDecodingState *dstate;
+	MemoryContext oldcxt;
 
 	/*
 	 * REPACK CONCURRENTLY is not allowed in a transaction block, so this
@@ -2636,14 +2642,6 @@ setup_logical_decoding(Oid relid)
 	 */
 	ctx->reader->routine.page_read = read_local_xlog_page_no_wait;
 
-	/*
-	 * read_local_xlog_page_no_wait() needs to be able to indicate the end of
-	 * WAL.
-	 */
-	ctx->reader->private_data = MemoryContextAllocZero(ctx->context,
-													   sizeof(ReadLocalXLogPageNoWaitPrivate));
-
-
 	/* Some WAL records should have been read. */
 	Assert(ctx->reader->EndRecPtr != InvalidXLogRecPtr);
 
@@ -2654,18 +2652,27 @@ setup_logical_decoding(Oid relid)
 	XLByteToSeg(ctx->reader->EndRecPtr, repack_current_segment,
 				wal_segment_size);
 
-	dstate = palloc0_object(RepackDecodingState);
-	dstate->relid = relid;
+	/* Our private state belongs to the decoding context. */
+	oldcxt = MemoryContextSwitchTo(ctx->context);
 
 	/*
-	 * Tuple descriptor may be needed to flatten a tuple before we write it to
-	 * a file. A copy is needed because the decoding worker invalidates system
-	 * caches before it starts to do the actual work.
+	 * read_local_xlog_page_no_wait() needs to be able to indicate the end of
+	 * WAL.
 	 */
-	rel = table_open(relid, AccessShareLock);
-	dstate->tupdesc = CreateTupleDescCopy(RelationGetDescr(rel));
+	ctx->reader->private_data = palloc0_object(ReadLocalXLogPageNoWaitPrivate);
+	dstate = palloc0_object(RepackDecodingState);
+	MemoryContextSwitchTo(oldcxt);
+
+#ifdef	USE_ASSERT_CHECKING
+	dstate->relid = relid;
+#endif
+
+	dstate->change_cxt = AllocSetContextCreate(ctx->context,
+											   "REPACK - change",
+											   ALLOCSET_DEFAULT_SIZES);
 
 	/* Avoid logical decoding of other relations. */
+	rel = table_open(relid, AccessShareLock);
 	repacked_rel_locator = rel->rd_locator;
 	toastrelid = rel->rd_rel->reltoastrelid;
 	if (OidIsValid(toastrelid))
@@ -2834,10 +2841,10 @@ static void
 apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 {
 	char		kind;
-	uint32		t_len;
 	Relation	rel = dest->rel;
 	TupleTableSlot *index_slot,
 			   *ident_slot;
+	MemoryContext apply_cxt;
 	HeapTuple	tup_old = NULL;
 
 	/* TupleTableSlot is needed to pass the tuple to ExecInsertIndexTuples(). */
@@ -2846,6 +2853,14 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 
 	/* A slot to fetch tuples from identity index. */
 	ident_slot = table_slot_create(rel, NULL);
+
+	/*
+	 * Use a separate memory context for the tuples and any memory needed to
+	 * process them.
+	 */
+	apply_cxt = AllocSetContextCreate(TopTransactionContext,
+									  "REPACK - apply",
+									  ALLOCSET_DEFAULT_SIZES);
 
 	while (true)
 	{
@@ -2861,14 +2876,7 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 			break;
 
 		/* Read the tuple. */
-		BufFileReadExact(file, &t_len, sizeof(t_len));
-		tup = (HeapTuple) palloc(HEAPTUPLESIZE + t_len);
-		tup->t_data = (HeapTupleHeader) ((char *) tup + HEAPTUPLESIZE);
-		BufFileReadExact(file, tup->t_data, t_len);
-		tup->t_len = t_len;
-		ItemPointerSetInvalid(&tup->t_self);
-		tup->t_tableOid = RelationGetRelid(dest->rel);
-
+		tup = restore_tuple(file, rel, apply_cxt);
 		if (kind == CHANGE_UPDATE_OLD)
 		{
 			Assert(tup_old == NULL);
@@ -2880,7 +2888,7 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 
 			apply_concurrent_insert(rel, tup, dest->iistate, index_slot);
 
-			pfree(tup);
+			MemoryContextReset(apply_cxt);
 		}
 		else if (kind == CHANGE_UPDATE_NEW || kind == CHANGE_DELETE)
 		{
@@ -2904,18 +2912,28 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 				elog(ERROR, "failed to find target tuple");
 
 			if (kind == CHANGE_UPDATE_NEW)
+			{
+				/*
+				 * If 'tup' contains TOAST pointers, they point to the old
+				 * relation's toast. Copy the corresponding TOAST pointers for
+				 * the new relation from the existing tuple. (The fact that we
+				 * received a TOAST pointer here implies that the attribute
+				 * hasn't changed.)
+				 */
+				if (HeapTupleHasExternal(tup))
+					tup = adjust_toast_pointers(rel, tup, tup_exist,
+												apply_cxt);
+
 				apply_concurrent_update(rel, tup, tup_exist, dest->iistate,
 										index_slot);
+			}
 			else
 				apply_concurrent_delete(rel, tup_exist);
 
 			if (tup_old != NULL)
-			{
-				pfree(tup_old);
 				tup_old = NULL;
-			}
 
-			pfree(tup);
+			MemoryContextReset(apply_cxt);
 		}
 		else
 			elog(ERROR, "unrecognized kind of change: %d", kind);
@@ -2932,6 +2950,7 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 	}
 
 	/* Cleanup. */
+	MemoryContextDelete(apply_cxt);
 	ExecDropSingleTupleTableSlot(index_slot);
 	ExecDropSingleTupleTableSlot(ident_slot);
 }
@@ -3040,6 +3059,186 @@ apply_concurrent_delete(Relation rel, HeapTuple tup_target)
 		ereport(ERROR, (errmsg("failed to apply concurrent DELETE")));
 
 	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_DELETED, 1);
+}
+
+/*
+ * Read tuple from file and store it in given memory context.
+ *
+ * External attributes are stored in separate memory chunks, in order to avoid
+ * exceeding MaxAllocSize - that could happen if the individual attributes are
+ * smaller than MaxAllocSize but the whole tuple is bigger.
+ */
+static HeapTuple
+restore_tuple(BufFile *file, Relation relation, MemoryContext cxt)
+{
+	uint32		t_len;
+	HeapTuple	tup;
+	MemoryContext oldcxt;
+	uint32		natt_ext;
+	List	   *attrs_ext = NIL;
+
+	oldcxt = MemoryContextSwitchTo(cxt);
+
+	/* First, read the external attributes if there are some. */
+	BufFileReadExact(file, &natt_ext, sizeof(natt_ext));
+	for (int i = 0; i < natt_ext; i++)
+	{
+		varlena		varhdr;
+		char	   *ext_val;
+		Size		ext_val_size;
+
+		/*
+		 * Read the header into properly aligned memory before accessing it.
+		 */
+		BufFileReadExact(file, &varhdr, VARHDRSZ);
+		ext_val_size = VARSIZE_ANY(&varhdr);
+		ext_val = palloc0(ext_val_size);
+		memcpy(ext_val, &varhdr, VARHDRSZ);
+		BufFileReadExact(file, ext_val + VARHDRSZ, ext_val_size - VARHDRSZ);
+
+		attrs_ext = lappend(attrs_ext, ext_val);
+	}
+
+	/* Read the tuple. */
+	BufFileReadExact(file, &t_len, sizeof(t_len));
+	tup = (HeapTuple) palloc(HEAPTUPLESIZE + t_len);
+	tup->t_data = (HeapTupleHeader) ((char *) tup + HEAPTUPLESIZE);
+	BufFileReadExact(file, tup->t_data, t_len);
+	tup->t_len = t_len;
+	ItemPointerSetInvalid(&tup->t_self);
+	tup->t_tableOid = RelationGetRelid(relation);
+
+	/*
+	 * If there are "external indirect" attributes, make the tuple reference
+	 * them.
+	 */
+	if (natt_ext > 0)
+	{
+		TupleDesc	desc;
+		Datum	   *attrs;
+		bool	   *isnull;
+		ListCell   *lc;
+
+		desc = RelationGetDescr(relation);
+		attrs = palloc0_array(Datum, desc->natts);
+		isnull = palloc0_array(bool, desc->natts);
+
+		heap_deform_tuple(tup, desc, attrs, isnull);
+
+		lc = list_head(attrs_ext);
+		for (int i = 0; i < desc->natts; i++)
+		{
+			CompactAttribute *attr = TupleDescCompactAttr(desc, i);
+			varlena    *varlena_pointer,
+					   *new_datum;
+			varatt_indirect redirect_pointer;
+
+			/* Find the external attributes, like in store_change(). */
+			if (attr->attisdropped)
+				continue;
+			if (attr->attlen != -1)
+				continue;
+			if (isnull[i])
+				continue;
+			varlena_pointer = (varlena *) DatumGetPointer(attrs[i]);
+			if (!VARATT_IS_EXTERNAL_INDIRECT(varlena_pointer))
+				continue;
+
+			/* Update the attribute. */
+			memset(&redirect_pointer, 0, sizeof(redirect_pointer));
+			redirect_pointer.pointer = lfirst(lc);
+
+			new_datum = (varlena *) palloc0(INDIRECT_POINTER_SIZE);
+			SET_VARTAG_EXTERNAL(new_datum, VARTAG_INDIRECT);
+			memcpy(VARDATA_EXTERNAL(new_datum), &redirect_pointer,
+				   sizeof(redirect_pointer));
+
+			attrs[i] = PointerGetDatum(new_datum);
+
+			lc = lnext(attrs_ext, lc);
+		}
+		Assert(lc == NULL);
+
+		tup = heap_form_tuple(desc, attrs, isnull);
+	}
+
+	MemoryContextSwitchTo(oldcxt);
+
+	return tup;
+}
+
+/*
+ * Copy TOAST pointers from 'tup_src' to 'tup_dst' and return the modified
+ * 'tup_dst'. Use 'cxt' for all memory allocations.
+ */
+static HeapTuple
+adjust_toast_pointers(Relation relation, HeapTuple tup_dst,
+					  HeapTuple tup_src, MemoryContext cxt)
+{
+	TupleDesc	desc;
+	Datum	   *attrs_dst;
+	bool	   *isnull_dst;
+	Datum	   *attrs_src = NULL;
+	bool	   *isnull_src = NULL;
+	MemoryContext oldcxt;
+	HeapTuple	result;
+
+	oldcxt = MemoryContextSwitchTo(cxt);
+
+	desc = RelationGetDescr(relation);
+	attrs_dst = palloc0_array(Datum, desc->natts);
+	isnull_dst = palloc0_array(bool, desc->natts);
+
+	heap_deform_tuple(tup_dst, desc, attrs_dst, isnull_dst);
+
+	for (int i = 0; i < desc->natts; i++)
+	{
+		CompactAttribute *attr = TupleDescCompactAttr(desc, i);
+		varlena    *varlena_dst,
+				   *varlena_src;
+
+		if (attr->attisdropped)
+			continue;
+		if (attr->attlen != -1)
+			continue;
+		if (isnull_dst[i])
+			continue;
+
+		varlena_dst = (varlena *) DatumGetPointer(attrs_dst[i]);
+		if (!VARATT_IS_EXTERNAL_ONDISK(varlena_dst))
+			continue;
+
+		/*
+		 * The first TOAST pointer? The caller can easily check if the tuple
+		 * has external attributes(s) in general, but is not supposed to check
+		 * specifically for TOAST.
+		 */
+		if (attrs_src == NULL)
+		{
+			attrs_src = palloc0_array(Datum, desc->natts);
+			isnull_src = palloc0_array(bool, desc->natts);
+
+			heap_deform_tuple(tup_src, desc, attrs_src, isnull_src);
+		}
+
+		varlena_src = (varlena *) DatumGetPointer(attrs_src[i]);
+
+		/*
+		 * Logical decoding only uses TOAST pointer for attributes that
+		 * haven't changed.
+		 */
+		Assert(!isnull_src[i]);
+		Assert(VARATT_IS_EXTERNAL_ONDISK(varlena_src));
+
+		/* Copy the pointer. */
+		memcpy(VARDATA_EXTERNAL(varlena_dst), VARDATA_EXTERNAL(varlena_src),
+			   sizeof(varatt_external));
+	}
+	result = heap_form_tuple(desc, attrs_dst, isnull_dst);
+
+	MemoryContextSwitchTo(oldcxt);
+
+	return result;
 }
 
 /*
@@ -3263,15 +3462,8 @@ free_index_insert_state(IndexInsertState *iistate)
 static void
 cleanup_logical_decoding(LogicalDecodingContext *ctx)
 {
-	RepackDecodingState *dstate;
-
-	dstate = (RepackDecodingState *) ctx->output_writer_private;
-
-	FreeTupleDesc(dstate->tupdesc);
 	FreeDecodingContext(ctx);
-
 	ReplicationSlotDropAcquired();
-	pfree(dstate);
 }
 
 /*
