@@ -478,7 +478,7 @@ SnapBuildBuildSnapshot(SnapBuild *builder)
  * for loading in different transaction.
  */
 Snapshot
-SnapBuildInitialSnapshot(SnapBuild *builder)
+SnapBuildInitialSnapshot(SnapBuild *builder, bool repack)
 {
 	Snapshot	snap;
 	TransactionId xid;
@@ -486,7 +486,7 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 	TransactionId *newxip;
 	int			newxcnt = 0;
 
-	Assert(XactIsoLevel == XACT_REPEATABLE_READ);
+	Assert(XactIsoLevel == XACT_REPEATABLE_READ || repack);
 	Assert(builder->building_full_snapshot);
 
 	/* don't allow older snapshots */
@@ -564,6 +564,11 @@ SnapBuildInitialSnapshot(SnapBuild *builder)
 	snap->xcnt = newxcnt;
 	snap->xip = newxip;
 
+	/*
+	 * FreeSnapshot() is more appropriate for REPACK than counting references.
+	 */
+	snap->copied = repack;
+
 	return snap;
 }
 
@@ -596,7 +601,7 @@ SnapBuildExportSnapshot(SnapBuild *builder)
 	XactIsoLevel = XACT_REPEATABLE_READ;
 	XactReadOnly = true;
 
-	snap = SnapBuildInitialSnapshot(builder);
+	snap = SnapBuildInitialSnapshot(builder, false);
 
 	/*
 	 * now that we've built a plain snapshot, make it active and use the
