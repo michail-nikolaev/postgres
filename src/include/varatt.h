@@ -207,7 +207,7 @@ typedef struct
 
 /* VARSIZE_4B() should only be used on known-aligned data */
 #define VARSIZE_4B(PTR) \
-	(((const varattrib_4b *) (PTR))->va_4byte.va_header & 0x3FFFFFFF)
+	(*((const uint32 *) (PTR)) & 0x3FFFFFFF)
 #define VARSIZE_1B(PTR) \
 	(((const varattrib_1b *) (PTR))->va_header & 0x7F)
 #define VARTAG_1B_E(PTR) \
@@ -240,7 +240,7 @@ typedef struct
 
 /* VARSIZE_4B() should only be used on known-aligned data */
 #define VARSIZE_4B(PTR) \
-	((((const varattrib_4b *) (PTR))->va_4byte.va_header >> 2) & 0x3FFFFFFF)
+	((*((const uint32 *) (PTR)) >> 2) & 0x3FFFFFFF)
 #define VARSIZE_1B(PTR) \
 	((((const varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
 #define VARTAG_1B_E(PTR) \
