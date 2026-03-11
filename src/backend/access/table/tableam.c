@@ -319,8 +319,7 @@ simple_table_tuple_delete(Relation rel, ItemPointer tid, Snapshot snapshot)
 	result = table_tuple_delete(rel, tid,
 								GetCurrentCommandId(true),
 								snapshot, InvalidSnapshot,
-								true /* wait for commit */ ,
-								&tmfd, false /* changingPart */ );
+								TABLE_DELETE_WAIT, &tmfd);
 
 	switch (result)
 	{

@@ -260,6 +260,15 @@ typedef struct TM_IndexDeleteOp
 #define TABLE_INSERT_FROZEN			0x0004
 #define TABLE_INSERT_NO_LOGICAL		0x0008
 
+/* "options" flag bits for table_tuple_update */
+#define TABLE_UPDATE_WAIT			0x0001
+#define TABLE_UPDATE_NO_LOGICAL		0x0002
+
+/* "options" flag bits for table_tuple_delete */
+#define TABLE_DELETE_WAIT			0x0001
+#define TABLE_DELETE_CHANGING_PART	0x0002
+#define TABLE_DELETE_NO_LOGICAL		0x0004
+
 /* flag bits for table_tuple_lock */
 /* Follow tuples whose update is in progress if lock modes don't conflict  */
 #define TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS	(1 << 0)
@@ -535,9 +544,8 @@ typedef struct TableAmRoutine
 								 CommandId cid,
 								 Snapshot snapshot,
 								 Snapshot crosscheck,
-								 bool wait,
-								 TM_FailureData *tmfd,
-								 bool changingPart);
+								 int options,
+								 TM_FailureData *tmfd);
 
 	/* see table_tuple_update() for reference about parameters */
 	TM_Result	(*tuple_update) (Relation rel,
@@ -546,7 +554,7 @@ typedef struct TableAmRoutine
 								 CommandId cid,
 								 Snapshot snapshot,
 								 Snapshot crosscheck,
-								 bool wait,
+								 int options,
 								 TM_FailureData *tmfd,
 								 LockTupleMode *lockmode,
 								 TU_UpdateIndexes *update_indexes);
@@ -629,6 +637,7 @@ typedef struct TableAmRoutine
 											  Relation OldIndex,
 											  bool use_sort,
 											  TransactionId OldestXmin,
+											  Snapshot snapshot,
 											  TransactionId *xid_cutoff,
 											  MultiXactId *multi_cutoff,
 											  double *num_tuples,
@@ -1459,6 +1468,7 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  *	cid - delete command ID (used for visibility test, and stored into
  *		cmax if successful)
  *	crosscheck - if not InvalidSnapshot, also check tuple against this
+ *	XXX document options
  *	wait - true if should wait for any conflicting update to commit/abort
  *	changingPart - true iff the tuple is being moved to another partition
  *		table due to an update of the partition key. Otherwise, false.
@@ -1476,12 +1486,12 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  */
 static inline TM_Result
 table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
-				   Snapshot snapshot, Snapshot crosscheck, bool wait,
-				   TM_FailureData *tmfd, bool changingPart)
+				   Snapshot snapshot, Snapshot crosscheck, int options,
+				   TM_FailureData *tmfd)
 {
 	return rel->rd_tableam->tuple_delete(rel, tid, cid,
 										 snapshot, crosscheck,
-										 wait, tmfd, changingPart);
+										 options, tmfd);
 }
 
 /*
@@ -1496,7 +1506,12 @@ table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
  *	cid - update command ID (used for visibility test, and stored into
  *		cmax/cmin if successful)
  *	crosscheck - if not InvalidSnapshot, also check old tuple against this
- *	wait - true if should wait for any conflicting update to commit/abort
+ *	options - These allow the caller to specify options that may change the
+ *	behavior of the AM. The AM will ignore options that it does not support.
+ *		TABLE_UPDATE_WAIT -- set if should wait for any conflicting update to
+ *		commit/abort
+ *		TABLE_UPDATE_NO_LOGICAL -- force-disables the emitting of logical
+ *		decoding information for the tuple.
  *
  * Output parameters:
  *	slot - newly constructed tuple data to store
@@ -1522,12 +1537,12 @@ table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
 static inline TM_Result
 table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
 				   CommandId cid, Snapshot snapshot, Snapshot crosscheck,
-				   bool wait, TM_FailureData *tmfd, LockTupleMode *lockmode,
+				   int options, TM_FailureData *tmfd, LockTupleMode *lockmode,
 				   TU_UpdateIndexes *update_indexes)
 {
 	return rel->rd_tableam->tuple_update(rel, otid, slot,
 										 cid, snapshot, crosscheck,
-										 wait, tmfd,
+										 options, tmfd,
 										 lockmode, update_indexes);
 }
 
@@ -1657,6 +1672,8 @@ table_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
  *   not needed for the relation's AM
  * - *xid_cutoff - ditto
  * - *multi_cutoff - ditto
+ * - snapshot - if != NULL, ignore data changes done by transactions that this
+ *	 (MVCC) snapshot considers still in-progress or in the future.
  *
  * Output parameters:
  * - *xid_cutoff - rel's new relfrozenxid value, may be invalid
@@ -1669,6 +1686,7 @@ table_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
 								Relation OldIndex,
 								bool use_sort,
 								TransactionId OldestXmin,
+								Snapshot snapshot,
 								TransactionId *xid_cutoff,
 								MultiXactId *multi_cutoff,
 								double *num_tuples,
@@ -1677,6 +1695,7 @@ table_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
 {
 	OldTable->rd_tableam->relation_copy_for_cluster(OldTable, NewTable, OldIndex,
 													use_sort, OldestXmin,
+													snapshot,
 													xid_cutoff, multi_cutoff,
 													num_tuples, tups_vacuumed,
 													tups_recently_dead);

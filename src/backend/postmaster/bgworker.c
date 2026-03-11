@@ -13,6 +13,7 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "commands/cluster.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -143,6 +144,10 @@ static const struct
 	{
 		.fn_name = "SequenceSyncWorkerMain",
 		.fn_addr = SequenceSyncWorkerMain
+	},
+	{
+		.fn_name = "RepackWorkerMain",
+		.fn_addr = RepackWorkerMain
 	}
 };
 
