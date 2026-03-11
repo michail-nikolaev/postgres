@@ -1291,15 +1291,32 @@ index_create(Relation heapRelation,
 /*
  * index_concurrently_create_copy
  *
- * Create concurrently an index based on the definition of the one provided by
- * caller.  The index is inserted into catalogs and needs to be built later
- * on.  This is called during concurrent reindex processing.
- *
- * "tablespaceOid" is the tablespace to use for this index.
+ * Variant of index_create_copy(), called during concurrent reindex
+ * processing.
  */
 Oid
 index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							   Oid tablespaceOid, const char *newName)
+{
+	return index_create_copy(heapRelation, oldIndexId, tablespaceOid, newName,
+							 true);
+}
+
+/*
+ * index_create_copy
+ *
+ * Create an index based on the definition of the one provided by caller.  The
+ * index is inserted into catalogs. If 'concurrently' is TRUE, it needs to be
+ * built later on, otherwise it's built immediately.
+ *
+ * "tablespaceOid" is the tablespace to use for this index.
+ *
+ * The actual implementation of index_concurrently_create_copy(), reusable for
+ * other purposes.
+ */
+Oid
+index_create_copy(Relation heapRelation, Oid oldIndexId, Oid tablespaceOid,
+				  const char *newName, bool concurrently)
 {
 	Relation	indexRelation;
 	IndexInfo  *oldInfo,
@@ -1318,6 +1335,7 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 	List	   *indexColNames = NIL;
 	List	   *indexExprs = NIL;
 	List	   *indexPreds = NIL;
+	int			flags = 0;
 
 	indexRelation = index_open(oldIndexId, RowExclusiveLock);
 
@@ -1328,7 +1346,7 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 	 * Concurrent build of an index with exclusion constraints is not
 	 * supported.
 	 */
-	if (oldInfo->ii_ExclusionOps != NULL)
+	if (oldInfo->ii_ExclusionOps != NULL && concurrently)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("concurrent index creation for exclusion constraints is not supported")));
@@ -1384,9 +1402,7 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 	}
 
 	/*
-	 * Build the index information for the new index.  Note that rebuild of
-	 * indexes with exclusion constraints is not supported, hence there is no
-	 * need to fill all the ii_Exclusion* fields.
+	 * Build the index information for the new index.
 	 */
 	newInfo = makeIndexInfo(oldInfo->ii_NumIndexAttrs,
 							oldInfo->ii_NumIndexKeyAttrs,
@@ -1395,10 +1411,13 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							indexPreds,
 							oldInfo->ii_Unique,
 							oldInfo->ii_NullsNotDistinct,
-							false,	/* not ready for inserts */
-							true,
+							!concurrently,	/* isready */
+							concurrently,	/* concurrent */
 							indexRelation->rd_indam->amsummarizing,
-							oldInfo->ii_WithoutOverlaps);
+							oldInfo->ii_WithoutOverlaps,
+							oldInfo->ii_ExclusionOps,
+							oldInfo->ii_ExclusionProcs,
+							oldInfo->ii_ExclusionStrats);
 
 	/*
 	 * Extract the list of column names and the column numbers for the new
@@ -1436,6 +1455,9 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 		stattargets[i].isnull = isnull;
 	}
 
+	if (concurrently)
+		flags = INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT;
+
 	/*
 	 * Now create the new index.
 	 *
@@ -1459,7 +1481,7 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							  indcoloptions->values,
 							  stattargets,
 							  reloptionsDatum,
-							  INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT,
+							  flags,
 							  0,
 							  true, /* allow table to be a system catalog? */
 							  false,	/* is_internal? */
@@ -2453,7 +2475,8 @@ BuildIndexInfo(Relation index)
 					   indexStruct->indisready,
 					   false,
 					   index->rd_indam->amsummarizing,
-					   indexStruct->indisexclusion && indexStruct->indisunique);
+					   indexStruct->indisexclusion && indexStruct->indisunique,
+					   NULL, NULL, NULL);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -2513,7 +2536,8 @@ BuildDummyIndexInfo(Relation index)
 					   indexStruct->indisready,
 					   false,
 					   index->rd_indam->amsummarizing,
-					   indexStruct->indisexclusion && indexStruct->indisunique);
+					   indexStruct->indisexclusion && indexStruct->indisunique,
+					   NULL, NULL, NULL);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
