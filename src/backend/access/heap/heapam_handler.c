@@ -50,6 +50,11 @@
 static void reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
 									 Datum *values, bool *isnull, RewriteState rwstate);
+static void heap_insert_for_repack(HeapTuple tuple, Relation OldHeap,
+								   Relation NewHeap, Datum *values, bool *isnull,
+								   BulkInsertState bistate);
+static HeapTuple reform_tuple(HeapTuple tuple, Relation OldHeap,
+							  Relation NewHeap, Datum *values, bool *isnull);
 
 static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
@@ -702,6 +707,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 double *tups_recently_dead)
 {
 	RewriteState rwstate = NULL;
+	BulkInsertState	bistate = NULL;
 	IndexScanDesc indexScan;
 	TableScanDesc tableScan;
 	HeapScanDesc heapScan;
@@ -737,6 +743,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	if (!concurrent)
 		rwstate = begin_heap_rewrite(OldHeap, NewHeap, OldestXmin,
 									 *xid_cutoff, *multi_cutoff);
+	else
+		bistate = GetBulkInsertState();
 
 
 	/* Set up sorting if wanted */
@@ -966,8 +974,12 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			};
 			int64		ct_val[2];
 
-			reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
-									 values, isnull, rwstate);
+			if (!concurrent)
+				reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
+										 values, isnull, rwstate);
+			else
+				heap_insert_for_repack(tuple, OldHeap, NewHeap,
+									   values, isnull, bistate);
 
 			/*
 			 * In indexscan mode and also VACUUM FULL, report increase in
@@ -1015,10 +1027,15 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				break;
 
 			n_tuples += 1;
-			reform_and_rewrite_tuple(tuple,
-									 OldHeap, NewHeap,
-									 values, isnull,
-									 rwstate);
+			if (!concurrent)
+				reform_and_rewrite_tuple(tuple,
+										 OldHeap, NewHeap,
+										 values, isnull,
+										 rwstate);
+			else
+				heap_insert_for_repack(tuple, OldHeap, NewHeap,
+									   values, isnull, bistate);
+
 			/* Report n_tuples */
 			pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED,
 										 n_tuples);
@@ -1030,6 +1047,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	/* Write out any remaining tuples, and fsync if needed */
 	if (rwstate)
 		end_heap_rewrite(rwstate);
+	if (bistate)
+		FreeBulkInsertState(bistate);
 
 	/* Clean up */
 	pfree(values);
@@ -2422,56 +2441,71 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
  * SET WITHOUT OIDS.
  *
  * So, we must reconstruct the tuple from component Datums.
- *
- * If rwstate=NULL, use simple_heap_insert() instead of rewriting - in that
- * case we still need to deform/form the tuple. TODO Shouldn't we rename the
- * function, as might not do any rewrite?
  */
 static void
 reform_and_rewrite_tuple(HeapTuple tuple,
 						 Relation OldHeap, Relation NewHeap,
 						 Datum *values, bool *isnull, RewriteState rwstate)
 {
+	HeapTuple       copiedTuple;
+
+	copiedTuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+
+	/* The heap rewrite module does the rest */
+	rewrite_heap_tuple(rwstate, tuple, copiedTuple);
+
+	heap_freetuple(copiedTuple);
+}
+
+/*
+ * Insert tuple when processing REPACK CONCURRENTLY.
+ *
+ * rewriteheap.c is not used in the CONCURRENTLY case because it'd be
+ * difficult to do the same in the catch-up phase (as the logical
+ * decoding does not provide us with sufficient visibility
+ * information). Thus we must use heap_insert() both during the
+ * catch-up and here.
+ *
+ * We pass the NO_LOGICAL flag to heap_insert() in order to skip logical
+ * decoding: as soon as REPACK CONCURRENTLY swaps the relation files, it drops
+ * this relation, so no logical replication subscription should need the data.
+ *
+ * BulkInsertState is used because many tuples are inserted in the typical
+ * case.
+ */
+static void
+heap_insert_for_repack(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
+					   Datum *values, bool *isnull, BulkInsertState bistate)
+{
+	tuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+
+	heap_insert(NewHeap, tuple, GetCurrentCommandId(true),
+				HEAP_INSERT_NO_LOGICAL, bistate);
+
+	heap_freetuple(tuple);
+}
+
+/*
+ * Deform tuple, set values of dropped columns to NULL, form a new tuple and
+ * return it.
+ */
+static HeapTuple
+reform_tuple(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
+			 Datum *values, bool *isnull)
+{
 	TupleDesc	oldTupDesc = RelationGetDescr(OldHeap);
 	TupleDesc	newTupDesc = RelationGetDescr(NewHeap);
-	HeapTuple	copiedTuple;
 	int			i;
 
 	heap_deform_tuple(tuple, oldTupDesc, values, isnull);
 
-	/* Be sure to null out any dropped columns */
 	for (i = 0; i < newTupDesc->natts; i++)
 	{
 		if (TupleDescCompactAttr(newTupDesc, i)->attisdropped)
 			isnull[i] = true;
 	}
 
-	copiedTuple = heap_form_tuple(newTupDesc, values, isnull);
-
-	if (rwstate)
-		/* The heap rewrite module does the rest */
-		rewrite_heap_tuple(rwstate, tuple, copiedTuple);
-	else
-	{
-		/*
-		 * Insert tuple when processing REPACK CONCURRENTLY.
-		 *
-		 * rewriteheap.c is not used in the CONCURRENTLY case because it'd be
-		 * difficult to do the same in the catch-up phase (as the logical
-		 * decoding does not provide us with sufficient visibility
-		 * information). Thus we must use heap_insert() both during the
-		 * catch-up and here.
-		 *
-		 * The following is like simple_heap_insert() except that we pass the
-		 * flag to skip logical decoding: as soon as REPACK CONCURRENTLY swaps
-		 * the relation files, it drops this relation, so no logical
-		 * replication subscription should need the data.
-		 */
-		heap_insert(NewHeap, copiedTuple, GetCurrentCommandId(true),
-					HEAP_INSERT_NO_LOGICAL, NULL);
-	}
-
-	heap_freetuple(copiedTuple);
+	return heap_form_tuple(newTupDesc, values, isnull);
 }
 
 /*
