@@ -1162,9 +1162,6 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, ident_idx,
 										   frozenXid, cutoffMulti);
-
-		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
-									 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
 	}
 	else
 	{
@@ -3616,6 +3613,10 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	relpersistence = OldHeap->rd_rel->relpersistence;
 	is_system_catalog = IsSystemRelation(OldHeap);
 
+	/*
+	 * finish_heap_swap() sets the phase too, but here we need some swapping
+	 * in advance.
+	 */
 	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 								 PROGRESS_REPACK_PHASE_SWAP_REL_FILES);
 
