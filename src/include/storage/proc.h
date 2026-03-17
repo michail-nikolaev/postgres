@@ -67,10 +67,11 @@ struct XidCache
 #define		PROC_AFFECTS_ALL_HORIZONS	0x20	/* this proc's xmin must be
 												 * included in vacuum horizons
 												 * in all databases */
+#define		PROC_IN_REPACK				0x40	/* currently REPACK (CONCURRENTLY) */
 
 /* flags reset at EOXact */
 #define		PROC_VACUUM_STATE_MASK \
-	(PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_VACUUM_FOR_WRAPAROUND)
+	(PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_VACUUM_FOR_WRAPAROUND | PROC_IN_REPACK)
 
 /*
  * Xmin-related flags. Make sure any flags that affect how the process' Xmin
