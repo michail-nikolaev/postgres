@@ -2666,6 +2666,21 @@ repack_setup_logical_decoding(Oid relid)
 	 */
 	Assert(!ctx->fast_forward);
 
+	/* Avoid logical decoding of other relations. */
+	rel = table_open(relid, AccessShareLock);
+	repacked_rel_locator = rel->rd_locator;
+	toastrelid = rel->rd_rel->reltoastrelid;
+	if (OidIsValid(toastrelid))
+	{
+		Relation	toastrel;
+
+		/* Avoid logical decoding of other TOAST relations. */
+		toastrel = table_open(toastrelid, AccessShareLock);
+		repacked_rel_toast_locator = toastrel->rd_locator;
+		table_close(toastrel, AccessShareLock);
+	}
+	table_close(rel, AccessShareLock);
+
 	DecodingContextFindStartpoint(ctx);
 
 	/*
@@ -2701,21 +2716,6 @@ repack_setup_logical_decoding(Oid relid)
 	dstate->change_cxt = AllocSetContextCreate(ctx->context,
 											   "REPACK - change",
 											   ALLOCSET_DEFAULT_SIZES);
-
-	/* Avoid logical decoding of other relations. */
-	rel = table_open(relid, AccessShareLock);
-	repacked_rel_locator = rel->rd_locator;
-	toastrelid = rel->rd_rel->reltoastrelid;
-	if (OidIsValid(toastrelid))
-	{
-		Relation	toastrel;
-
-		/* Avoid logical decoding of other TOAST relations. */
-		toastrel = table_open(toastrelid, AccessShareLock);
-		repacked_rel_toast_locator = toastrel->rd_locator;
-		table_close(toastrel, AccessShareLock);
-	}
-	table_close(rel, AccessShareLock);
 
 	/* The file will be set as soon as we have it opened. */
 	dstate->file = NULL;
