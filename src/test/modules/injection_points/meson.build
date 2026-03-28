@@ -45,6 +45,7 @@ tests += {
     'specs': [
       'basic',
       'inplace',
+      'predicate-lock-page-split',
       'syscache-update-pruned',
       'heap_lock_update',
     ],
