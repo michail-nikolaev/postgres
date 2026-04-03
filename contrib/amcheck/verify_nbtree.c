@@ -559,11 +559,14 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 									 0, /* number of keys */
 									 NULL,	/* scan key */
 									 true,	/* buffer access strategy OK */
-									 true); /* syncscan OK? */
+									 true, /* syncscan OK? */
+									 false);	/* reset_snapshot OK? */
 
 		/*
 		 * Scan will behave as the first scan of a CREATE INDEX CONCURRENTLY
-		 * behaves.
+		 * behaves, except that it keeps one snapshot throughout: we pass
+		 * reset_snapshot as false above, since the snapshot registered
+		 * earlier is what the check is defined against.
 		 *
 		 * It's okay that we don't actually use the same lock strength for the
 		 * heap relation as any other ii_Concurrent caller would.  We have no

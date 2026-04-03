@@ -275,6 +275,8 @@ typedef struct IndexAmRoutine
 	bool		amcanparallel;
 	/* does AM support parallel build? */
 	bool		amcanbuildparallel;
+	/* does AM support the snapshot-reset contract of concurrent builds? */
+	bool		amcanresetsnapshot;
 	/* does AM support columns included with clause INCLUDE? */
 	bool		amcaninclude;
 	/* does AM use maintenance_work_mem? */

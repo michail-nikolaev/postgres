@@ -55,6 +55,10 @@
 #include "utils/inval.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
+
+/* GUCs */
+int			concurrent_index_reset_snapshot_interval = 100;
 
 
 static HeapTuple heap_prepare_insert(Relation relation, HeapTuple tup,
@@ -702,6 +706,61 @@ heap_prepare_pagescan(TableScanDesc sscan)
 }
 
 /*
+ * heap_reset_scan_snapshot - replace the scan's snapshot with a freshly
+ * taken one, advancing this backend's xmin.
+ *
+ * The ordering is chosen so that MyProc->xmin is never invalid and only
+ * moves forward: the new snapshot is registered before the old one is
+ * released, and the old snapshot is unregistered while the active stack is
+ * empty -- at that point SnapshotResetXmin() advances xmin directly to the
+ * oldest remaining registered snapshot, normally the new one.
+ *
+ * If something else keeps an older snapshot registered (say, a cursor
+ * opened by an index expression), xmin cannot advance all the way.  That is
+ * not a correctness problem -- the horizon merely lags behind -- but it
+ * defeats the purpose of resetting, so tests may attach to the
+ * "heap_reset_scan_snapshot_xmin_pinned" injection point to catch it.
+ *
+ * The last snapshot the scan takes stays active once the scan ends: the rest
+ * of the build runs under it, and index_build() drops it when the access
+ * method is done.
+ */
+static inline void
+heap_reset_scan_snapshot(HeapScanDesc scan)
+{
+	Snapshot	oldsnap = scan->rs_base.rs_snapshot;
+	Snapshot	newsnap;
+
+	/* Make sure our snapshot is the active one. */
+	Assert(GetActiveSnapshot() == oldsnap);
+
+	INJECTION_POINT("heap_reset_scan_snapshot_swap", NULL);
+
+	/* The catalog snapshot is registered too and would hold back xmin. */
+	InvalidateCatalogSnapshot();
+
+	newsnap = RegisterSnapshot(GetLatestSnapshot());
+
+	/*
+	 * Point the scan at the new snapshot before dropping the old one: the
+	 * push below allocates and can therefore fail, and the scan must not be
+	 * left pointing at a snapshot that is already gone.
+	 */
+	scan->rs_base.rs_snapshot = newsnap;
+	PopActiveSnapshot();
+	UnregisterSnapshot(oldsnap);
+	PushActiveSnapshot(newsnap);
+
+#ifdef USE_INJECTION_POINTS
+	/* Let tests check whether the horizon can advance after the reset. */
+	if (TransactionIdIsValid(MyProc->xid))
+		INJECTION_POINT("heap_reset_scan_snapshot_xid_assigned", NULL);
+	if (unlikely(MyProc->xmin != newsnap->xmin))
+		INJECTION_POINT("heap_reset_scan_snapshot_xmin_pinned", NULL);
+#endif
+}
+
+/*
  * heap_fetch_next_buffer - read and pin the next block from MAIN_FORKNUM.
  *
  * Read the next block of the scan relation from the read stream and save it
@@ -742,7 +801,30 @@ heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
 
 	scan->rs_cbuf = read_stream_next_buffer(scan->rs_read_stream, NULL);
 	if (BufferIsValid(scan->rs_cbuf))
+	{
 		scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
+		if ((scan->rs_base.rs_flags & SO_RESET_SNAPSHOT) &&
+			concurrent_index_reset_snapshot_interval >= 0)
+		{
+			/*
+			 * XXX Reading the clock once per page is wasteful, since almost
+			 * every reading is "not yet", and a host whose clocksource is not
+			 * the TSC pays for it.  Recovery reports its progress from a hot
+			 * loop without a clock at all: a repeating timeout sets a flag
+			 * that the loop tests, see ereport_startup_progress().  Cheaper
+			 * still is INSTR_TIME_SET_CURRENT_FAST(), which reads the TSC
+			 * directly where that is available.
+			 */
+			TimestampTz now = GetCurrentTimestamp();
+
+			if (TimestampDifferenceExceeds(scan->rs_reset_time, now,
+										   concurrent_index_reset_snapshot_interval))
+			{
+				scan->rs_reset_time = now;
+				heap_reset_scan_snapshot(scan);
+			}
+		}
+	}
 }
 
 /*
@@ -1172,6 +1254,14 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 {
 	HeapScanDesc scan;
 
+	if ((flags & SO_RESET_SNAPSHOT) && parallel_scan == NULL)
+	{
+		/* The scan snapshot is required to be active and registered. */
+		Assert(GetActiveSnapshot() == snapshot);
+		Assert(snapshot->regd_count > 0);
+		INJECTION_POINT("heap_beginscan_reset_snapshot", NULL);
+	}
+
 	/*
 	 * increment relation ref count while scanning relation
 	 *
@@ -1201,6 +1291,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_snapshot = snapshot;
 	scan->rs_base.rs_nkeys = nkeys;
 	scan->rs_base.rs_flags = flags;
+	if (flags & SO_RESET_SNAPSHOT)
+		scan->rs_reset_time = GetCurrentTimestamp();
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_base.rs_instrument = NULL;
 	scan->rs_strategy = NULL;	/* set in initscan */
@@ -1334,6 +1426,13 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 {
 	HeapScanDesc scan = (HeapScanDesc) sscan;
 
+	/*
+	 * A scan that resets its snapshot cannot start over: the snapshot it
+	 * began with is long gone by now.  Index builds, its only caller, never
+	 * rescan.
+	 */
+	Assert(!(scan->rs_base.rs_flags & SO_RESET_SNAPSHOT));
+
 	if (set_params)
 	{
 		if (allow_strat)
@@ -1422,7 +1521,16 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_parallelworkerdata != NULL)
 		pfree(scan->rs_parallelworkerdata);
-
+	if (scan->rs_base.rs_flags & SO_RESET_SNAPSHOT)
+	{
+		/*
+		 * The registered reference is dropped by the SO_TEMP_SNAPSHOT path
+		 * below, but the snapshot stays active: the rest of the build runs
+		 * under it, and index_build() pops it once the build is done.
+		 */
+		Assert(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT);
+		Assert(GetActiveSnapshot() == sscan->rs_snapshot);
+	}
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
 

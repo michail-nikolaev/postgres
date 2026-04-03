@@ -1193,15 +1193,13 @@ heapam_index_build_range_scan(Relation heapRelation,
 	/* Arrange for econtext's scan tuple to be the tuple under test */
 	econtext->ecxt_scantuple = slot;
 
-	/* Set up execution state for predicate, if any. */
-	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
-
 	/*
 	 * Prepare for scan of the base relation.  In a normal index build, we use
 	 * SnapshotAny because we must retrieve all tuples and do our own time
 	 * qual checks (because we have to index RECENTLY_DEAD tuples). In a
 	 * concurrent build, or during bootstrap, we take a regular MVCC snapshot
-	 * and index whatever's live according to that.
+	 * and index whatever's live according to that while that snapshot is reset
+	 * every so often.
 	 */
 	OldestXmin = InvalidTransactionId;
 
@@ -1213,24 +1211,45 @@ heapam_index_build_range_scan(Relation heapRelation,
 	{
 		/*
 		 * Serial index build.
-		 *
-		 * Must begin our own heap scan in this case.  We may also need to
-		 * register a snapshot whose lifetime is under our direct control.
 		 */
 		if (!TransactionIdIsValid(OldestXmin))
 		{
+			/*
+			 * Must begin our own heap scan in this case.  We may also need
+			 * to register a snapshot whose lifetime is under our direct
+			 * control; for a reset-snapshot scan the registration is owned
+			 * by the scan itself (SO_TEMP_SNAPSHOT), which swaps the
+			 * snapshot for a fresh one every so often.
+			 */
 			snapshot = RegisterSnapshot(GetTransactionSnapshot());
-			need_unregister_snapshot = true;
+			if (indexInfo->ii_ResetSnapshot)
+			{
+				/*
+				 * Make it the active snapshot; from here on the scan owns
+				 * both references and releases them at endscan.  Nothing
+				 * may sit below it on the active stack, or it would pin
+				 * xmin for the whole scan.
+				 */
+				Assert(!ActiveSnapshotSet());
+				PushActiveSnapshot(snapshot);
+				Assert(GetActiveSnapshot() == snapshot);
+			}
+			else
+				need_unregister_snapshot = true;
 		}
 		else
+		{
+			Assert(!indexInfo->ii_Concurrent);
 			snapshot = SnapshotAny;
+		}
 
 		scan = table_beginscan_strat(heapRelation,	/* relation */
 									 snapshot,	/* snapshot */
 									 0, /* number of keys */
 									 NULL,	/* scan key */
 									 true,	/* buffer access strategy OK */
-									 allow_sync);	/* syncscan OK? */
+									 allow_sync,	/* syncscan OK? */
+									 indexInfo->ii_ResetSnapshot);
 	}
 	else
 	{
@@ -1258,6 +1277,14 @@ heapam_index_build_range_scan(Relation heapRelation,
 	Assert(snapshot == SnapshotAny ? TransactionIdIsValid(OldestXmin) :
 		   !TransactionIdIsValid(OldestXmin));
 	Assert(snapshot == SnapshotAny || !anyvisible);
+	Assert(snapshot == SnapshotAny || ActiveSnapshotSet() ||
+		   IsBootstrapProcessingMode());
+
+	/* Set up execution state for predicate, if any. */
+	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+	/* Clear reference to snapshot since it may be changed by the scan itself. */
+	if (indexInfo->ii_ResetSnapshot)
+		snapshot = InvalidSnapshot;
 
 	/* Publish number of blocks to scan */
 	if (progress)
@@ -1765,7 +1792,8 @@ heapam_index_validate_scan(Relation heapRelation,
 								 0, /* number of keys */
 								 NULL,	/* scan key */
 								 true,	/* buffer access strategy OK */
-								 false);	/* syncscan not OK */
+								 false,	/* syncscan not OK */
+								 false);	/* reset_snapshot not OK */
 	hscan = (HeapScanDesc) scan;
 
 	pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL,

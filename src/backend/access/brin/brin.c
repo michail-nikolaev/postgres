@@ -274,6 +274,7 @@ brinhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = false,
 		.amcanparallel = false,
 		.amcanbuildparallel = true,
+		.amcanresetsnapshot = false,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = true,
@@ -1221,7 +1222,6 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		state->bs_sortstate =
 			tuplesort_begin_index_brin(maintenance_work_mem, coordinate,
 									   TUPLESORT_NONE);
-
 		/* scan the relation and merge per-worker results */
 		reltuples = _brin_parallel_merge(state);
 

@@ -78,9 +78,11 @@
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/rel.h"
+#include "utils/injection_point.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
+#include "storage/proc.h"
 
 /* Potentially set by pg_upgrade_support functions */
 Oid			binary_upgrade_next_index_pg_class_oid = InvalidOid;
@@ -1525,8 +1527,8 @@ index_concurrently_build(Oid heapRelationId,
 	Relation	indexRelation;
 	IndexInfo  *indexInfo;
 
-	/* This had better make sure that a snapshot is active */
-	Assert(ActiveSnapshotSet());
+	Assert(!TransactionIdIsValid(MyProc->xmin));
+	Assert(!TransactionIdIsValid(MyProc->xid));
 
 	/* Open and lock the parent heap relation */
 	heapRel = table_open(heapRelationId, ShareUpdateExclusiveLock);
@@ -1544,12 +1546,16 @@ index_concurrently_build(Oid heapRelationId,
 
 	indexRelation = index_open(indexRelationId, RowExclusiveLock);
 
+	/* BuildIndexInfo may require a snapshot for expressions and predicates */
+	PushActiveSnapshot(GetTransactionSnapshot());
 	/*
 	 * We have to re-build the IndexInfo struct, since it was lost in the
 	 * commit of the transaction where this concurrent index was created at
 	 * the catalog level.
 	 */
 	indexInfo = BuildIndexInfo(indexRelation);
+	/* Done with snapshot */
+	PopActiveSnapshot();
 	Assert(!indexInfo->ii_ReadyForInserts);
 	indexInfo->ii_Concurrent = true;
 	indexInfo->ii_BrokenHotChain = false;
@@ -1568,11 +1574,18 @@ index_concurrently_build(Oid heapRelationId,
 	index_close(indexRelation, NoLock);
 
 	/*
+	 * Updating pg_index might involve TOAST table access, so ensure we
+	 * have a valid snapshot.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
+	/*
 	 * Update the pg_index row to mark the index as ready for inserts. Once we
 	 * commit this transaction, any new transactions that open the table must
 	 * insert new entries into the index for insertions and non-HOT updates.
 	 */
 	index_set_state_flags(indexRelationId, INDEX_CREATE_SET_READY);
+	/* we can do away with our snapshot */
+	PopActiveSnapshot();
 }
 
 /*
@@ -3028,6 +3041,51 @@ index_update_stats(Relation rel,
 
 
 /*
+ * index_build_resets_snapshots
+ *
+ * Does this concurrent index build use periodic snapshot resets?
+ *
+ * Snapshot resetting is only applicable when all of:
+ * - the build is concurrent (ii_Concurrent)
+ * - the index is non-unique (unique needs consistent snapshot)
+ * - isolation level is not REPEATABLE READ/SERIALIZABLE.  This is not
+ *   about the semantics of the command itself: CIC runs multiple internal
+ *   transactions anyway, so no single-snapshot view spans the whole
+ *   command at any isolation level.  It is about snapshot mechanics
+ *   inherited by those internal transactions: when
+ *   IsolationUsesXactSnapshot(), the first GetTransactionSnapshot() call
+ *   establishes a transaction snapshot that stays registered until the
+ *   transaction ends, pinning the xmin horizon no matter what the scan
+ *   does, and repeated GetTransactionSnapshot() calls keep returning that
+ *   same snapshot.  Resetting could not achieve anything, so the
+ *   pre-existing single-snapshot behavior is kept for these levels.
+ * - the build is not parallel (parallel needs separate infrastructure)
+ * - the index access method supports the contract (amcanresetsnapshot)
+ * - the table is a heap.  The scan side of the contract -- replacing the
+ *   snapshot at page boundaries and owning the active one meanwhile -- lives
+ *   in heapam, and a table access method has no way to announce that it
+ *   implements it.  Compare the routine rather than the AM oid, as
+ *   heap_getnext() does, so that a test may reuse the heap handler under
+ *   another name.  Supporting other table access methods would take a
+ *   capability of their own in TableAmRoutine.
+ * - the table is not a system catalog
+ * - resets are not turned off (concurrent_index_reset_snapshot_interval)
+ */
+static bool
+index_build_resets_snapshots(Relation heapRelation, Relation indexRelation,
+							 IndexInfo *indexInfo)
+{
+	return indexInfo->ii_Concurrent &&
+		concurrent_index_reset_snapshot_interval >= 0 &&
+		!indexInfo->ii_Unique &&
+		!IsolationUsesXactSnapshot() &&
+		indexInfo->ii_ParallelWorkers == 0 &&
+		indexRelation->rd_indam->amcanresetsnapshot &&
+		heapRelation->rd_tableam == GetHeapamTableAmRoutine() &&
+		!IsSystemRelation(heapRelation);
+}
+
+/*
  * index_build - invoke access-method-specific index build procedure
  *
  * On entry, the index's catalog entries are valid, and its physical disk
@@ -3073,9 +3131,28 @@ index_build(Relation heapRelation,
 	 */
 	if (parallel && IsNormalProcessingMode() &&
 		indexRelation->rd_indam->amcanbuildparallel)
+	{
+		/*
+		 * A concurrent build arrives here without an active snapshot, so
+		 * that nothing pins the xmin horizon between the build phases; the
+		 * planner still needs one to evaluate expressions and inspect
+		 * catalogs, so push a snapshot just around it.
+		 */
+		if (indexInfo->ii_Concurrent)
+		{
+			Assert(!ActiveSnapshotSet());
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
 		indexInfo->ii_ParallelWorkers =
 			plan_create_index_workers(RelationGetRelid(heapRelation),
 									  RelationGetRelid(indexRelation));
+		if (indexInfo->ii_Concurrent)
+			PopActiveSnapshot();
+	}
+
+	/* Decide once whether this build uses periodic snapshot resets. */
+	indexInfo->ii_ResetSnapshot =
+		index_build_resets_snapshots(heapRelation, indexRelation, indexInfo);
 
 	if (indexInfo->ii_ParallelWorkers == 0)
 		ereport(DEBUG1,
@@ -3121,11 +3198,25 @@ index_build(Relation heapRelation,
 	}
 
 	/*
+	 * Run the build under an active snapshot, as any other index operation
+	 * would.  A snapshot-resetting build is the exception: an ambient
+	 * snapshot would pin the xmin horizon for the whole build, so its heap
+	 * scan establishes the active snapshot itself, replacing it as the scan
+	 * proceeds, and leaves the last one behind for the phases that follow.
+	 */
+	if (indexInfo->ii_Concurrent && !indexInfo->ii_ResetSnapshot)
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+	/*
 	 * Call the access method's build procedure
 	 */
 	stats = indexRelation->rd_indam->ambuild(heapRelation, indexRelation,
 											 indexInfo);
 	Assert(stats);
+
+	/* Drop the snapshot the build ran under, whoever established it. */
+	if (indexInfo->ii_Concurrent)
+		PopActiveSnapshot();
 
 	/*
 	 * If this is an unlogged index, we may need to write out an init fork for
@@ -3284,7 +3375,8 @@ IndexCheckExclusion(Relation heapRelation,
 								 0, /* number of keys */
 								 NULL,	/* scan key */
 								 true,	/* buffer access strategy OK */
-								 true); /* syncscan OK */
+								 true, /* syncscan OK */
+								 false);	/* reset_snapshot not OK */
 
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
@@ -3347,11 +3439,15 @@ IndexCheckExclusion(Relation heapRelation,
  * as of the start of the scan (see table_index_build_scan), whereas a normal
  * build takes care to include recently-dead tuples.  This is OK because
  * we won't mark the index valid until all transactions that might be able
- * to see those tuples are gone.  The reason for doing that is to avoid
+ * to see those tuples are gone.  One of reasons for doing that is to avoid
  * bogus unique-index failures due to concurrent UPDATEs (we might see
  * different versions of the same row as being valid when we pass over them,
  * if we used HeapTupleSatisfiesVacuum).  This leaves us with an index that
  * does not contain any tuples added to the table while we built the index.
+ *
+ * Furthermore, in case of non-unique index we set SO_RESET_SNAPSHOT for the
+ * scan, which causes new snapshot to be set as active every so often. The reason
+ * for that is to propagate the xmin horizon forward.
  *
  * Next, we mark the index "indisready" (but still not "indisvalid") and
  * commit the second transaction and start a third.  Again we wait for all

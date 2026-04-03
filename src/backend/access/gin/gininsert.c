@@ -180,6 +180,9 @@ typedef struct
 	 * this way. And it's part of the build state, after all.
 	 */
 	Tuplesortstate *bs_worker_sort;
+
+	/* does this build replace its snapshot as it scans? */
+	bool		bs_reset_snapshot;
 } GinBuildState;
 
 
@@ -440,6 +443,32 @@ ginHeapTupleBulkInsert(GinBuildState *buildstate, OffsetNumber attnum,
 								&nentries, &categories);
 	MemoryContextSwitchTo(oldCtx);
 
+#ifdef USE_ASSERT_CHECKING
+
+	/*
+	 * The accumulator holds these entries until it is flushed, long after the
+	 * heap page they came from was scanned.  A build that replaces its
+	 * snapshot lets the xmin horizon advance in between, so an entry left as
+	 * an external TOAST pointer could lose its TOAST rows to vacuum before it
+	 * is written out.  It never is one: extractValue detoasts what it is
+	 * given, as an opclass whose key is the indexed value itself has to --
+	 * see the PG_DETOAST_DATUM() in btree_gin's gin_btree_extract_value().
+	 */
+	if (buildstate->bs_reset_snapshot)
+	{
+		CompactAttribute *att =
+			TupleDescCompactAttr(buildstate->accum.ginstate->origTupdesc,
+								 attnum - 1);
+
+		if (!att->attbyval && att->attlen == -1)
+		{
+			for (int i = 0; i < nentries; i++)
+				Assert(categories[i] != GIN_CAT_NORM_KEY ||
+					   !VARATT_IS_EXTERNAL(DatumGetPointer(entries[i])));
+		}
+	}
+#endif
+
 	ginInsertBAEntries(&buildstate->accum, heapptr, attnum,
 					   entries, categories, nentries);
 
@@ -681,7 +710,9 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 											   ALLOCSET_DEFAULT_SIZES);
 
 	buildstate.accum.ginstate = &buildstate.ginstate;
+	buildstate.bs_reset_snapshot = indexInfo->ii_ResetSnapshot;
 	ginInitBA(&buildstate.accum);
+
 
 	/* Report table scan phase started */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
@@ -2180,6 +2211,7 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 											   ALLOCSET_DEFAULT_SIZES);
 
 	buildstate.accum.ginstate = &buildstate.ginstate;
+	buildstate.bs_reset_snapshot = false;
 	ginInitBA(&buildstate.accum);
 
 
