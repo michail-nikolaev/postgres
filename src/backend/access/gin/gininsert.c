@@ -188,7 +188,7 @@ typedef struct
 
 /* parallel index builds */
 static void _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
-								bool isconcurrent, int request);
+								bool isconcurrent, bool reset_snapshot, int request);
 static void _gin_end_parallel(GinLeader *ginleader, GinBuildState *state);
 static Size _gin_parallel_estimate_shared(Relation heap, Snapshot snapshot);
 static double _gin_parallel_heapscan(GinBuildState *state);
@@ -729,6 +729,7 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 */
 	if (indexInfo->ii_ParallelWorkers > 0)
 		_gin_begin_parallel(state, heap, index, indexInfo->ii_Concurrent,
+							indexInfo->ii_ResetSnapshot,
 							indexInfo->ii_ParallelWorkers);
 
 	/*
@@ -957,6 +958,8 @@ gininsert(Relation index, Datum *values, bool *isnull,
  *
  * isconcurrent indicates if operation is CREATE INDEX CONCURRENTLY.
  *
+ * reset_snapshot indicates if the build uses periodic snapshot resets.
+ *
  * request is the target number of parallel worker processes to launch.
  *
  * Sets buildstate's GinLeader, which caller must use to shut down parallel
@@ -966,7 +969,7 @@ gininsert(Relation index, Datum *values, bool *isnull,
  */
 static void
 _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
-					bool isconcurrent, int request)
+					bool isconcurrent, bool reset_snapshot, int request)
 {
 	ParallelContext *pcxt;
 	int			scantuplesortstates;
@@ -1000,10 +1003,18 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	 * SnapshotAny because we must retrieve all tuples and do our own time
 	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
 	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
+	 * live according to that.  In a snapshot-resetting build there is no
+	 * fixed scan snapshot: push a fresh one so that it gets serialized for
+	 * the workers, and release it once every participant has restored its
+	 * copy.
 	 */
 	if (!isconcurrent)
 		snapshot = SnapshotAny;
+	else if (reset_snapshot)
+	{
+		snapshot = InvalidSnapshot;
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 	else
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
@@ -1048,7 +1059,9 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (IsMVCCSnapshot(snapshot))
+		if (reset_snapshot)
+			PopActiveSnapshot();
+		if (snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
@@ -1073,7 +1086,8 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 
 	table_parallelscan_initialize(heap,
 								  ParallelTableScanFromGinBuildShared(ginshared),
-								  snapshot);
+								  snapshot,
+								  reset_snapshot);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -1122,12 +1136,27 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (reset_snapshot)
+			PopActiveSnapshot();
 		_gin_end_parallel(ginleader, NULL);
 		return;
 	}
 
 	/* Save leader state now that it's clear build will be parallel */
 	buildstate->bs_leader = ginleader;
+
+	/*
+	 * A snapshot-resetting build has to wait for the workers before it scans
+	 * anything itself: our snapshot is the one they restore, and it may not
+	 * be replaced until every one of them holds its own.  Workers can only
+	 * restore it once they have attached, so wait for that first.
+	 */
+	if (reset_snapshot)
+	{
+		WaitForParallelWorkersToAttach(pcxt);
+		table_parallelscan_wait_restored(ParallelTableScanFromGinBuildShared(ginshared),
+										 pcxt->nworkers_launched);
+	}
 
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
@@ -1136,8 +1165,14 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	/*
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
+	 *
+	 * XXX Both waits could be one unconditional wait before the leader joins
+	 * the scan, which would read better.  It is kept out of the ordinary
+	 * build's way because that one deliberately overlaps the leader's scan
+	 * with worker startup.
 	 */
-	WaitForParallelWorkersToAttach(pcxt);
+	if (!reset_snapshot)
+		WaitForParallelWorkersToAttach(pcxt);
 }
 
 /*
@@ -1158,8 +1193,7 @@ _gin_end_parallel(GinLeader *ginleader, GinBuildState *state)
 	for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
 		InstrAccumParallelQuery(&ginleader->bufferusage[i], &ginleader->walusage[i]);
 
-	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(ginleader->snapshot))
+	if (ginleader->snapshot != InvalidSnapshot && IsMVCCSnapshot(ginleader->snapshot))
 		UnregisterSnapshot(ginleader->snapshot);
 	DestroyParallelContext(ginleader->pcxt);
 	ExitParallelMode();
@@ -1835,7 +1869,7 @@ _gin_parallel_merge(GinBuildState *state)
 
 /*
  * Returns size of shared memory required to store state for a parallel
- * gin index build based on the snapshot its parallel scan will use.
+ * gin index build.
  */
 static Size
 _gin_parallel_estimate_shared(Relation heap, Snapshot snapshot)
@@ -2064,6 +2098,7 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 {
 	SortCoordinate coordinate;
 	TableScanDesc scan;
+	ParallelTableScanDesc pscan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
 
@@ -2092,11 +2127,14 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 													  TUPLESORT_NONE);
 
 	/* Join parallel scan */
+	pscan = ParallelTableScanFromGinBuildShared(ginshared);
 	indexInfo = BuildIndexInfo(index);
 	indexInfo->ii_Concurrent = ginshared->isconcurrent;
+	indexInfo->ii_ResetSnapshot = pscan->phs_reset_snapshot;
+	state->bs_reset_snapshot = pscan->phs_reset_snapshot;
 
 	scan = table_beginscan_parallel(heap,
-									ParallelTableScanFromGinBuildShared(ginshared),
+									pscan,
 									SO_NONE);
 
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, progress,
@@ -2130,6 +2168,7 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 	ConditionVariableSignal(&ginshared->workersdonecv);
 
 	tuplesort_end(state->bs_sortstate);
+
 }
 
 /*
@@ -2211,7 +2250,6 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 											   ALLOCSET_DEFAULT_SIZES);
 
 	buildstate.accum.ginstate = &buildstate.ginstate;
-	buildstate.bs_reset_snapshot = false;
 	ginInitBA(&buildstate.accum);
 
 
@@ -2231,7 +2269,6 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 
 	_gin_parallel_scan_and_build(&buildstate, ginshared, sharedsort,
 								 heapRel, indexRel, sortmem, false);
-
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);

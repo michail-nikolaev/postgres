@@ -6,7 +6,7 @@ SET concurrent_index_reset_snapshot_interval = 0;
 SELECT injection_points_attach('heap_reset_scan_snapshot_xmin_pinned', 'error');
 SELECT injection_points_attach('heap_reset_scan_snapshot_xid_assigned', 'notice');
 SELECT injection_points_attach('heap_beginscan_reset_snapshot', 'notice');
-
+SELECT injection_points_attach('table_parallelscan_initialize_reset_snapshot', 'notice');
 
 CREATE SCHEMA cic_reset_snap;
 -- Rows are padded with a non-compressible attribute to get a platform
@@ -102,6 +102,10 @@ DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 -- The same in parallel mode
 ALTER TABLE cic_reset_snap.tbl SET (parallel_workers=2);
 
+-- Detach to keep test stable: during leader participation an xid may get
+-- assigned at nondeterministic points of the shared scan.
+SELECT injection_points_detach('heap_reset_scan_snapshot_xid_assigned');
+
 CREATE UNIQUE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl(i);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
@@ -152,5 +156,6 @@ RESET default_transaction_isolation;
 DROP SCHEMA cic_reset_snap CASCADE;
 
 SELECT injection_points_detach('heap_beginscan_reset_snapshot');
+SELECT injection_points_detach('table_parallelscan_initialize_reset_snapshot');
 
 DROP EXTENSION injection_points;

@@ -1200,10 +1200,18 @@ extern Size table_parallelscan_estimate(Relation rel, Snapshot snapshot);
  * relation. `pscan` needs to be sized according to parallelscan_estimate()
  * for the same relation.  Call this just once in the leader process; then,
  * individual workers attach via table_beginscan_parallel.
+ *
+ * `reset_snapshot` indicates that the scan resets its snapshot periodically;
+ * `snapshot` must then be InvalidSnapshot, and every participant starts with
+ * its active snapshot instead.
  */
 extern void table_parallelscan_initialize(Relation rel,
 										  ParallelTableScanDesc pscan,
-										  Snapshot snapshot);
+										  Snapshot snapshot,
+										  bool reset_snapshot);
+
+extern void table_parallelscan_wait_restored(ParallelTableScanDesc pscan,
+											 int nparticipants);
 
 /*
  * Begin a parallel scan. `pscan` needs to have been initialized with
@@ -1855,7 +1863,7 @@ table_scan_analyze_next_tuple(TableScanDesc scan,
  * This only really makes sense for heap AM, it might need to be generalized
  * for other AMs later.
  *
- * In case of non-unique index and non-parallel concurrent build,
+ * In case of non-unique concurrent build,
  * concurrent_index_reset_snapshot_interval is applied for the scan.
  * That leads to changing snapshots on the fly to allow xmin horizon
  * propagate.

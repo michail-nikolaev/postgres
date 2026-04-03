@@ -377,6 +377,26 @@ GetLatestSnapshot(void)
 }
 
 /*
+ * GetResetScanSnapshot
+ *		Get an up-to-date snapshot for the next chunk of a scan using
+ *		periodic snapshot resets (SO_RESET_SNAPSHOT).
+ *
+ * Unlike GetLatestSnapshot(), this may be used in parallel mode: every
+ * participant of such a scan advances its snapshot independently by design.
+ */
+Snapshot
+GetResetScanSnapshot(void)
+{
+	Assert(!HistoricSnapshotActive());
+	/* The scan is running, so the transaction snapshot was already taken. */
+	Assert(FirstSnapshotSet);
+
+	SecondarySnapshot = GetSnapshotData(&SecondarySnapshotData);
+
+	return SecondarySnapshot;
+}
+
+/*
  * GetCatalogSnapshot
  *		Get a snapshot that is sufficiently up-to-date for scan of the
  *		system catalog with the specified OID.

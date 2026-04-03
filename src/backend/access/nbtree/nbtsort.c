@@ -87,6 +87,7 @@ typedef struct BTSpool
 	Relation	index;
 	bool		isunique;
 	bool		nulls_not_distinct;
+	bool		reset_snapshot; /* from ii_ResetSnapshot; leader only */
 } BTSpool;
 
 /*
@@ -383,6 +384,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	btspool->index = index;
 	btspool->isunique = indexInfo->ii_Unique;
 	btspool->nulls_not_distinct = indexInfo->ii_NullsNotDistinct;
+	btspool->reset_snapshot = indexInfo->ii_ResetSnapshot;
 
 	/* Save as primary spool */
 	buildstate->spool = btspool;
@@ -1411,6 +1413,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	bool		leaderparticipates = true;
+	bool		reset_snapshot;
 	int			querylen;
 
 #ifdef DISABLE_LEADER_PARTICIPATION
@@ -1428,15 +1431,31 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 
 	scantuplesortstates = leaderparticipates ? request + 1 : request;
 
+	reset_snapshot = buildstate->spool->reset_snapshot;
+
 	/*
 	 * Prepare for scan of the base relation.  In a normal index build, we use
 	 * SnapshotAny because we must retrieve all tuples and do our own time
 	 * qual checks (because we have to index RECENTLY_DEAD tuples).  In a
 	 * concurrent build, we take a regular MVCC snapshot and index whatever's
-	 * live according to that.
+	 * live according to that.  In a snapshot-resetting build there is no
+	 * fixed scan snapshot: push a fresh one so that it gets serialized for
+	 * the workers, and release it once every participant has restored its
+	 * copy.
+	 *
+	 * XXX The snapshot-resetting parts here and in the two backout paths
+	 * below are repeated verbatim in _gin_begin_parallel() and
+	 * _brin_begin_parallel(), as is most of the surrounding parallel setup
+	 * they were copied from.  Factoring out the whole of it would be worth
+	 * doing on its own.
 	 */
 	if (!isconcurrent)
 		snapshot = SnapshotAny;
+	else if (reset_snapshot)
+	{
+		snapshot = InvalidSnapshot;
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
 	else
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
@@ -1492,7 +1511,9 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* If no DSM segment was available, back out (do serial build) */
 	if (pcxt->seg == NULL)
 	{
-		if (IsMVCCSnapshot(snapshot))
+		if (reset_snapshot)
+			PopActiveSnapshot();
+		if (snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot))
 			UnregisterSnapshot(snapshot);
 		DestroyParallelContext(pcxt);
 		ExitParallelMode();
@@ -1519,7 +1540,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	btshared->brokenhotchain = false;
 	table_parallelscan_initialize(btspool->heap,
 								  ParallelTableScanFromBTShared(btshared),
-								  snapshot);
+								  snapshot,
+								  reset_snapshot);
 
 	/*
 	 * Store shared tuplesort-private state, for which we reserved space.
@@ -1586,12 +1608,27 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
+		if (reset_snapshot)
+			PopActiveSnapshot();
 		_bt_end_parallel(btleader);
 		return;
 	}
 
 	/* Save leader state now that it's clear build will be parallel */
 	buildstate->btleader = btleader;
+
+	/*
+	 * A snapshot-resetting build has to wait for the workers before it scans
+	 * anything itself: our snapshot is the one they restore, and it may not
+	 * be replaced until every one of them holds its own.  Workers can only
+	 * restore it once they have attached, so wait for that first.
+	 */
+	if (reset_snapshot)
+	{
+		WaitForParallelWorkersToAttach(pcxt);
+		table_parallelscan_wait_restored(ParallelTableScanFromBTShared(btshared),
+										 pcxt->nworkers_launched);
+	}
 
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
@@ -1600,8 +1637,14 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	/*
 	 * Caller needs to wait for all launched workers when we return.  Make
 	 * sure that the failure-to-start case will not hang forever.
+	 *
+	 * XXX Both waits could be one unconditional wait before the leader joins
+	 * the scan, which would read better.  It is kept out of the ordinary
+	 * build's way because that one deliberately overlaps the leader's scan
+	 * with worker startup.
 	 */
-	WaitForParallelWorkersToAttach(pcxt);
+	if (!reset_snapshot)
+		WaitForParallelWorkersToAttach(pcxt);
 }
 
 /*
@@ -1623,7 +1666,7 @@ _bt_end_parallel(BTLeader *btleader)
 		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(btleader->snapshot))
+	if (btleader->snapshot != InvalidSnapshot && IsMVCCSnapshot(btleader->snapshot))
 		UnregisterSnapshot(btleader->snapshot);
 	DestroyParallelContext(btleader->pcxt);
 	ExitParallelMode();
@@ -1873,6 +1916,7 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	SortCoordinate coordinate;
 	BTBuildState buildstate;
 	TableScanDesc scan;
+	ParallelTableScanDesc pscan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
 
@@ -1925,10 +1969,12 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	buildstate.btleader = NULL;
 
 	/* Join parallel scan */
+	pscan = ParallelTableScanFromBTShared(btshared);
 	indexInfo = BuildIndexInfo(btspool->index);
 	indexInfo->ii_Concurrent = btshared->isconcurrent;
+	indexInfo->ii_ResetSnapshot = pscan->phs_reset_snapshot;
 	scan = table_beginscan_parallel(btspool->heap,
-									ParallelTableScanFromBTShared(btshared),
+									pscan,
 									SO_NONE);
 	reltuples = table_index_build_scan(btspool->heap, btspool->index, indexInfo,
 									   true, progress, _bt_build_callback,
@@ -1968,4 +2014,5 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	tuplesort_end(btspool->sortstate);
 	if (btspool2)
 		tuplesort_end(btspool2->sortstate);
+
 }

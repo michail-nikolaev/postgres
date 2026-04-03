@@ -3059,7 +3059,6 @@ index_update_stats(Relation rel,
  *   does, and repeated GetTransactionSnapshot() calls keep returning that
  *   same snapshot.  Resetting could not achieve anything, so the
  *   pre-existing single-snapshot behavior is kept for these levels.
- * - the build is not parallel (parallel needs separate infrastructure)
  * - the index access method supports the contract (amcanresetsnapshot)
  * - the table is a heap.  The scan side of the contract -- replacing the
  *   snapshot at page boundaries and owning the active one meanwhile -- lives
@@ -3079,7 +3078,6 @@ index_build_resets_snapshots(Relation heapRelation, Relation indexRelation,
 		concurrent_index_reset_snapshot_interval >= 0 &&
 		!indexInfo->ii_Unique &&
 		!IsolationUsesXactSnapshot() &&
-		indexInfo->ii_ParallelWorkers == 0 &&
 		indexRelation->rd_indam->amcanresetsnapshot &&
 		heapRelation->rd_tableam == GetHeapamTableAmRoutine() &&
 		!IsSystemRelation(heapRelation);

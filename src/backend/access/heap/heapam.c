@@ -722,8 +722,8 @@ heap_prepare_pagescan(TableScanDesc sscan)
  * "heap_reset_scan_snapshot_xmin_pinned" injection point to catch it.
  *
  * The last snapshot the scan takes stays active once the scan ends: the rest
- * of the build runs under it, and index_build() drops it when the access
- * method is done.
+ * of the build runs under it, and whoever provided the active-stack entry
+ * the scan took over drops it.
  */
 static inline void
 heap_reset_scan_snapshot(HeapScanDesc scan)
@@ -739,7 +739,7 @@ heap_reset_scan_snapshot(HeapScanDesc scan)
 	/* The catalog snapshot is registered too and would hold back xmin. */
 	InvalidateCatalogSnapshot();
 
-	newsnap = RegisterSnapshot(GetLatestSnapshot());
+	newsnap = RegisterSnapshot(GetResetScanSnapshot());
 
 	/*
 	 * Point the scan at the new snapshot before dropping the old one: the
@@ -1526,7 +1526,9 @@ heap_endscan(TableScanDesc sscan)
 		/*
 		 * The registered reference is dropped by the SO_TEMP_SNAPSHOT path
 		 * below, but the snapshot stays active: the rest of the build runs
-		 * under it, and index_build() pops it once the build is done.
+		 * under it.  Whoever established the active-stack entry the scan
+		 * took over pops it -- index_build() for a serial build or for the
+		 * leader, ParallelWorkerMain() for a parallel worker.
 		 */
 		Assert(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT);
 		Assert(GetActiveSnapshot() == sscan->rs_snapshot);
