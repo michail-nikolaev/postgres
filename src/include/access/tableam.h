@@ -1863,7 +1863,7 @@ table_scan_analyze_next_tuple(TableScanDesc scan,
  * This only really makes sense for heap AM, it might need to be generalized
  * for other AMs later.
  *
- * In case of non-unique concurrent build,
+ * In case of concurrent index build,
  * concurrent_index_reset_snapshot_interval is applied for the scan.
  * That leads to changing snapshots on the fly to allow xmin horizon
  * propagate.

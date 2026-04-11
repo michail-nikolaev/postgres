@@ -45,6 +45,7 @@ tests += {
   'isolation': {
     'specs': [
       'basic',
+      'cic_reset_unique',
       'inplace',
       'reindex_concurrently_deferred',
       'repack',

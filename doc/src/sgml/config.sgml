@@ -13032,6 +13032,27 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-index-build-duplicate-check-scale-factor" xreflabel="index_build_duplicate_check_scale_factor">
+      <term><varname>index_build_duplicate_check_scale_factor</varname> (<type>floating point</type>)
+      <indexterm>
+        <primary><varname>index_build_duplicate_check_scale_factor</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Limits the heap fetches a concurrent unique index build may perform
+        while sorting in order to fail on a duplicate key as early as
+        possible.  Such a build resets the snapshot of its heap scan, so two
+        equal keys in the sort need not conflict, and telling the two apart
+        takes a look at the heap.  The limit is a fraction of the tuples fed
+        into the sort so far; the default is <literal>0.01</literal>.
+        <literal>0</literal> disables these fetches, leaving the duplicate to
+        be reported by the definitive check that runs as the index is
+        written.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-ignore-system-indexes" xreflabel="ignore_system_indexes">
       <term><varname>ignore_system_indexes</varname> (<type>boolean</type>)
       <indexterm>

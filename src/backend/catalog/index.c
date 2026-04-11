@@ -3047,7 +3047,6 @@ index_update_stats(Relation rel,
  *
  * Snapshot resetting is only applicable when all of:
  * - the build is concurrent (ii_Concurrent)
- * - the index is non-unique (unique needs consistent snapshot)
  * - isolation level is not REPEATABLE READ/SERIALIZABLE.  This is not
  *   about the semantics of the command itself: CIC runs multiple internal
  *   transactions anyway, so no single-snapshot view spans the whole
@@ -3076,7 +3075,6 @@ index_build_resets_snapshots(Relation heapRelation, Relation indexRelation,
 {
 	return indexInfo->ii_Concurrent &&
 		concurrent_index_reset_snapshot_interval >= 0 &&
-		!indexInfo->ii_Unique &&
 		!IsolationUsesXactSnapshot() &&
 		indexRelation->rd_indam->amcanresetsnapshot &&
 		heapRelation->rd_tableam == GetHeapamTableAmRoutine() &&
@@ -3443,9 +3441,9 @@ IndexCheckExclusion(Relation heapRelation,
  * if we used HeapTupleSatisfiesVacuum).  This leaves us with an index that
  * does not contain any tuples added to the table while we built the index.
  *
- * Furthermore, in case of non-unique index we set SO_RESET_SNAPSHOT for the
- * scan, which causes new snapshot to be set as active every so often. The reason
- * for that is to propagate the xmin horizon forward.
+ * Furthermore, we set SO_RESET_SNAPSHOT for the scan, which causes new
+ * snapshot to be set as active every so often. The reason for that is to
+ * propagate the xmin horizon forward.
  *
  * Next, we mark the index "indisready" (but still not "indisvalid") and
  * commit the second transaction and start a third.  Again we wait for all

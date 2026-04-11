@@ -25,9 +25,11 @@
 #include "access/hash.h"
 #include "access/htup_details.h"
 #include "access/nbtree.h"
+#include "access/tableam.h"
 #include "catalog/index.h"
 #include "catalog/pg_collation.h"
 #include "executor/executor.h"
+#include "miscadmin.h"
 #include "pg_trace.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -35,7 +37,9 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
+#include "storage/proc.h"
 
+double		index_build_duplicate_check_scale_factor = 0.01;
 
 /* sort-type codes for sort__start probes */
 #define HEAP_SORT		0
@@ -104,6 +108,7 @@ static void writetup_datum(Tuplesortstate *state, LogicalTape *tape,
 static void readtup_datum(Tuplesortstate *state, SortTuple *stup,
 						  LogicalTape *tape, unsigned int len);
 static void freestate_cluster(Tuplesortstate *state);
+static void freestate_index_btree(Tuplesortstate *state);
 
 /*
  * Data structure pointed by "TuplesortPublic.arg" for the CLUSTER case.  Set by
@@ -136,6 +141,10 @@ typedef struct
 
 	bool		enforceUnique;	/* complain if we find duplicate tuples */
 	bool		uniqueNullsNotDistinct; /* unique constraint null treatment */
+	bool		uniqueDeadIgnored; /* ignore dead tuples in unique check */
+	int64		heapFetchCount;	/* heap fetches performed in comparator */
+	TupleTableSlot *heapFetchSlot;	/* slot reused by the fail-fast check */
+	IndexFetchTableData *heapFetch; /* fetch state reused likewise */
 } TuplesortIndexBTreeArg;
 
 /*
@@ -361,6 +370,7 @@ tuplesort_begin_index_btree(Relation heapRel,
 							Relation indexRel,
 							bool enforceUnique,
 							bool uniqueNullsNotDistinct,
+							bool uniqueDeadIgnored,
 							int workMem,
 							SortCoordinate coordinate,
 							int sortopt)
@@ -403,6 +413,22 @@ tuplesort_begin_index_btree(Relation heapRel,
 	arg->index.indexRel = indexRel;
 	arg->enforceUnique = enforceUnique;
 	arg->uniqueNullsNotDistinct = uniqueNullsNotDistinct;
+	arg->uniqueDeadIgnored = uniqueDeadIgnored;
+	arg->heapFetchCount = 0;
+	arg->heapFetchSlot = NULL;
+	arg->heapFetch = NULL;
+
+	/*
+	 * The fail-fast duplicate check in the comparator fetches heap tuples;
+	 * set up a slot and a fetch state to be reused by all such checks.
+	 */
+	if (uniqueDeadIgnored)
+	{
+		arg->heapFetchSlot = MakeSingleTupleTableSlot(RelationGetDescr(heapRel),
+													  &TTSOpsBufferHeapTuple);
+		arg->heapFetch = table_index_fetch_begin(heapRel, SO_NONE);
+		base->freestate = freestate_index_btree;
+	}
 
 	indexScanKey = _bt_mkscankey(indexRel, NULL);
 
@@ -1547,6 +1573,18 @@ freestate_cluster(Tuplesortstate *state)
 	}
 }
 
+static void
+freestate_index_btree(Tuplesortstate *state)
+{
+	TuplesortPublic *base = TuplesortstateGetPublic(state);
+	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
+
+	if (arg->heapFetch)
+		table_index_fetch_end(arg->heapFetch);
+	if (arg->heapFetchSlot)
+		ExecDropSingleTupleTableSlot(arg->heapFetchSlot);
+}
+
 /*
  * Routines specialized for IndexTuple case
  *
@@ -1667,9 +1705,7 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 	 */
 	if (arg->enforceUnique && !(!arg->uniqueNullsNotDistinct && equal_hasnull))
 	{
-		Datum		values[INDEX_MAX_KEYS];
-		bool		isnull[INDEX_MAX_KEYS];
-		char	   *key_desc;
+		bool		uniqueCheckFail = true;
 
 		/*
 		 * Some rather brain-dead implementations of qsort (such as the one in
@@ -1679,18 +1715,88 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 		 */
 		Assert(tuple1 != tuple2);
 
-		index_deform_tuple(tuple1, tupDes, values, isnull);
+		/*
+		 * Fail-fast check: perform heap fetches to see if either tuple is
+		 * dead, allowing us to skip the uniqueness error.  See _bt_load for
+		 * the definitive check.
+		 *
+		 * The number of heap fetches is bounded by
+		 * index_build_duplicate_check_scale_factor to avoid excessive I/O
+		 * when many equal keys are compared during sorting.  Once the budget
+		 * is exhausted, we skip the fail-fast check and let _bt_load()
+		 * handle uniqueness verification.
+		 */
+		if (arg->uniqueDeadIgnored)
+		{
+			/*
+			 * The budget is a percentage of the tuples fed into this sort so
+			 * far: run dumps of an external sort reach this comparator while
+			 * tuples are still being added, so it is recomputed here rather
+			 * than cached.  Each worker of a parallel build sorts its own
+			 * share and gets its own budget that way.
+			 *
+			 * That covers the leader too while it takes part in the scan,
+			 * which it does through a worker sort of its own.  Its merge
+			 * state is a different one, fed from the worker tapes rather
+			 * than through tuplesort_puttuple(), so that count stays at zero
+			 * and the merge never fails fast.  Nothing is lost by that: the
+			 * leader merges on the fly, as _bt_load() pulls the sorted
+			 * output, so a duplicate the merge could report reaches the
+			 * definitive check there at the same time anyway.
+			 */
+			int64		fetch_limit = base->ntuples *
+				index_build_duplicate_check_scale_factor;
 
-		key_desc = BuildIndexValueDescription(arg->index.indexRel, values, isnull);
+			if (arg->heapFetchCount < fetch_limit)
+			{
+				bool	any_tuple_dead;
+				ItemPointerData tid = tuple1->t_tid;
+#ifdef USE_ASSERT_CHECKING
+				TransactionId xmin_before = MyProc->xmin;
+#endif
 
-		ereport(ERROR,
-				(errcode(ERRCODE_UNIQUE_VIOLATION),
-				 errmsg("could not create unique index \"%s\"",
-						RelationGetRelationName(arg->index.indexRel)),
-				 key_desc ? errdetail("Key %s is duplicated.", key_desc) :
-				 errdetail("Duplicate keys exist."),
-				 errtableconstraint(arg->index.heapRel,
-									RelationGetRelationName(arg->index.indexRel))));
+				any_tuple_dead = _bt_heap_tuple_status(arg->heapFetch, &tid,
+													   arg->heapFetchSlot)
+					!= BTHEAP_LIVE;
+				arg->heapFetchCount++;
+
+				if (!any_tuple_dead)
+				{
+					tid = tuple2->t_tid;
+					any_tuple_dead = _bt_heap_tuple_status(arg->heapFetch, &tid,
+														   arg->heapFetchSlot)
+						!= BTHEAP_LIVE;
+					arg->heapFetchCount++;
+				}
+
+				if (any_tuple_dead)
+				{
+					elog(DEBUG5, "skipping duplicate values because some of them are dead: (%u,%u) vs (%u,%u)",
+						 ItemPointerGetBlockNumber(&tuple1->t_tid),
+						 ItemPointerGetOffsetNumber(&tuple1->t_tid),
+						 ItemPointerGetBlockNumber(&tuple2->t_tid),
+						 ItemPointerGetOffsetNumber(&tuple2->t_tid));
+
+					uniqueCheckFail = false;
+				}
+
+				/*
+				 * The fetches must not leave a snapshot behind.  We
+				 * cannot simply check that xmin is invalid here: during the
+				 * heap scan phase run dumps of an external sort reach this
+				 * comparator while the scan snapshot legitimately keeps xmin
+				 * set, so only verify that the fetches did not change it.
+				 */
+				Assert(MyProc->xmin == xmin_before);
+			}
+			else
+			{
+				/* Budget exhausted; defer to _bt_load() */
+				uniqueCheckFail = false;
+			}
+		}
+		if (uniqueCheckFail)
+			_bt_report_duplicate(arg->index.indexRel, arg->index.heapRel, tuple1);
 	}
 
 	/*

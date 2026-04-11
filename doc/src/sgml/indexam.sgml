@@ -314,8 +314,7 @@ ambuild (Relation heapRelation,
    this flag set to <literal>false</literal>.
    The <structfield>amcanresetsnapshot</structfield> flag allows concurrent
    builds on this access method to reset their snapshots periodically, so
-   that the xmin horizon can advance during the build.  For now this
-   applies only to non-unique builds.  An access method may
+   that the xmin horizon can advance during the build.  An access method may
    set it to <literal>true</literal> when its <structfield>ambuild</structfield>
    function tolerates the table scan switching to a newer MVCC snapshot in
    the course of the scan, does not itself hold snapshots across the scan,

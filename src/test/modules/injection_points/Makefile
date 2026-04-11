@@ -13,6 +13,7 @@ REGRESS = injection_points hashagg reindex_conc vacuum cic_reset_snapshots
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
 ISOLATION = basic \
+	    cic_reset_unique \
 	    inplace \
 	    reindex_concurrently_deferred \
 	    repack \

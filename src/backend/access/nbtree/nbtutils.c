@@ -20,6 +20,7 @@
 #include "access/nbtree.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
+#include "access/tableam.h"
 #include "commands/progress.h"
 #include "common/int.h"
 #include "lib/qunique.h"
@@ -27,6 +28,7 @@
 #include "storage/lwlock.h"
 #include "storage/subsystems.h"
 #include "utils/datum.h"
+#include "utils/snapmgr.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
@@ -1100,6 +1102,127 @@ _bt_check_natts(Relation rel, bool heapkeyspace, Page page, OffsetNumber offnum)
 	 * exceeds pg_index.indnkeyatts for the index.
 	 */
 	return tupnatts > 0 && tupnatts <= nkeyatts;
+}
+
+/*
+ * _bt_heap_tuple_status() -- how can this index entry take part in a
+ * uniqueness conflict?
+ *
+ * Used by the duplicate checks of concurrent unique index builds that reset
+ * their snapshot; see _bt_load().  Such a build collects its spool under a
+ * series of snapshots, so two equal keys in it were not necessarily live at
+ * the same time, and whether they conflict has to be decided against the
+ * current state of the heap.
+ *
+ * The dirty snapshot is what _bt_check_unique() consults for the same
+ * question, and it also reports the transaction that is yet to decide a
+ * tuple's fate: an entry whose deleting transaction is still running is
+ * neither live nor dead for our purpose.  Unlike an insert, the build does
+ * not wait to find out -- see _bt_load() for what it does with
+ * BTHEAP_UNDECIDED instead.  It also passes a fetch state of its own rather
+ * than using table_index_fetch_tuple_check(), which would set one up and
+ * tear it down for every call of a loop.
+ */
+BTHeapTupleStatus
+_bt_heap_tuple_status(IndexFetchTableData *fetch, ItemPointer tid,
+					  TupleTableSlot *slot)
+{
+	SnapshotData snapshot;
+	bool		call_again = false;
+	bool		all_dead = false;
+	bool		found;
+
+	InitDirtySnapshot(snapshot);
+	found = table_index_fetch_tuple(fetch, tid, &snapshot, slot,
+									&call_again, &all_dead);
+
+	/* Do not keep the buffer pinned. */
+	ExecClearTuple(slot);
+	table_index_fetch_reset(fetch);
+
+	if (!found)
+		return BTHEAP_DEAD;
+
+	if (TransactionIdIsValid(snapshot.xmin) ||
+		TransactionIdIsValid(snapshot.xmax))
+		return BTHEAP_UNDECIDED;
+
+	return BTHEAP_LIVE;
+}
+
+/*
+ * _bt_tuples_equal() -- are two index tuples equal on all key columns?
+ *
+ * Used by the duplicate checks of concurrent unique index builds with
+ * snapshot resets; see _bt_load().  Equality is decided exactly as suffix
+ * truncation decides it, by _bt_keep_natts() or _bt_keep_natts_fast().
+ *
+ * *hasnulls is set to true if any key column of either tuple is NULL; the
+ * caller decides whether NULLs make the tuples distinct.
+ */
+bool
+_bt_tuples_equal(Relation rel, BTScanInsert itup_key,
+				 IndexTuple itup1, IndexTuple itup2, bool *hasnulls)
+{
+	int			keysz = IndexRelationGetNumberOfKeyAttributes(rel);
+
+	/*
+	 * Detect NULLs in key columns.  The tuple header bit accounts for all
+	 * columns, so with INCLUDE columns present the key columns have to be
+	 * checked explicitly.
+	 */
+	if (IndexTupleHasNulls(itup1) || IndexTupleHasNulls(itup2))
+	{
+		if (keysz == IndexRelationGetNumberOfAttributes(rel))
+			*hasnulls = true;
+		else
+		{
+			TupleDesc	itupdesc = RelationGetDescr(rel);
+
+			for (int attnum = 1; attnum <= keysz; attnum++)
+			{
+				bool		isNull;
+
+				(void) index_getattr(itup1, attnum, itupdesc, &isNull);
+				*hasnulls |= isNull;
+				(void) index_getattr(itup2, attnum, itupdesc, &isNull);
+				*hasnulls |= isNull;
+			}
+		}
+	}
+
+	if (itup_key->allequalimage)
+		return _bt_keep_natts_fast(rel, itup1, itup2) > keysz;
+	else
+		return _bt_keep_natts(rel, itup1, itup2, itup_key) > keysz;
+}
+
+/*
+ *  _bt_report_duplicate() -- report a unique violation during index build.
+ *
+ * This is used by both _bt_load() and the tuplesort comparator's fail-fast
+ * check to report duplicate keys found during CREATE INDEX CONCURRENTLY or
+ * REINDEX CONCURRENTLY with snapshot resets enabled.
+ */
+void
+_bt_report_duplicate(Relation indexRel, Relation heapRel, IndexTuple itup)
+{
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+	char	   *key_desc;
+
+	index_deform_tuple(itup, RelationGetDescr(indexRel), values, isnull);
+
+	key_desc = BuildIndexValueDescription(indexRel, values, isnull);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_UNIQUE_VIOLATION),
+			 errmsg("could not create unique index \"%s\"",
+					RelationGetRelationName(indexRel)),
+			 key_desc ? errdetail("Key %s is duplicated.", key_desc) :
+			 errdetail("Duplicate keys exist."),
+			 errtableconstraint(heapRel,
+								RelationGetRelationName(indexRel))));
 }
 
 /*

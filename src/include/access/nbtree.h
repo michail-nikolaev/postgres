@@ -1314,6 +1314,23 @@ extern bool _bt_check_natts(Relation rel, bool heapkeyspace, Page page,
 extern void _bt_check_third_page(Relation rel, Relation heap,
 								 bool needheaptidspace, Page page, IndexTuple newtup);
 extern bool _bt_allequalimage(Relation rel, bool debugmessage);
+/* What an index entry's heap tuple contributes to a uniqueness conflict */
+typedef enum BTHeapTupleStatus
+{
+	BTHEAP_DEAD,				/* nothing here can conflict */
+	BTHEAP_LIVE,				/* live, and no transaction can change that */
+	BTHEAP_UNDECIDED,			/* a running transaction decides its fate */
+} BTHeapTupleStatus;
+
+struct IndexFetchTableData;
+extern BTHeapTupleStatus _bt_heap_tuple_status(struct IndexFetchTableData *fetch,
+											   ItemPointer tid,
+											   TupleTableSlot *slot);
+extern bool _bt_tuples_equal(Relation rel, BTScanInsert itup_key,
+							 IndexTuple itup1, IndexTuple itup2,
+							 bool *hasnulls);
+extern void _bt_report_duplicate(Relation indexRel, Relation heapRel,
+								 IndexTuple itup);
 
 /*
  * prototypes for functions in nbtvalidate.c
