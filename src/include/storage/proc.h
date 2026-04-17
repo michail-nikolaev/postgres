@@ -314,6 +314,15 @@ typedef struct PGPROC
 	LOCKMASK	heldLocks;		/* bitmask for lock types already held on this
 								 * lock object by this backend */
 
+	/*
+	 * Declared future-wait slot: a lock this proc intends to acquire later.
+	 * Empty when .locktag.locktag_lockmethodid == 0.  Publishing, clearing,
+	 * and remote reads are protected by the partition lock of .locktag
+	 * (deadlock walkers hold all partition locks and can safely inspect the
+	 * slot).  The owning backend may inspect its own slot locklessly.
+	 */
+	FutureWaitLock futureWaitLock;
+
 	pg_atomic_uint64 waitStart; /* time at which wait for lock acquisition
 								 * started */
 

@@ -276,6 +276,30 @@ typedef struct LOCALLOCK
 
 
 /*
+ * Declared "future wait" for a lock the backend intends to acquire later.
+ *
+ * A process may publish its intent to acquire a particular lock mode on a
+ * particular locktag before actually calling LockAcquire().  The deadlock
+ * detector treats a populated slot as a hard waits-for edge from the
+ * declarer to every current holder whose mode conflicts with .mode.  The
+ * slot is empty when locktag.locktag_lockmethodid == 0.
+ *
+ * Grouped in a struct so a future change can turn the slot into a short
+ * list without touching every reader.
+ */
+typedef struct FutureWaitLock
+{
+	LOCKTAG		locktag;		/* locktag_lockmethodid == 0 when empty */
+	LOCKMODE	mode;			/* mode the proc will eventually request */
+} FutureWaitLock;
+
+#define FutureWaitLockIsSet(futureWaitLock) \
+	((futureWaitLock)->locktag.locktag_lockmethodid != 0)
+#define FutureWaitLockIsEmpty(futureWaitLock) \
+	(!FutureWaitLockIsSet(futureWaitLock))
+
+
+/*
  * These structures hold information passed from lmgr internals to the lock
  * listing user-level functions (in lockfuncs.c).
  */
@@ -419,6 +443,15 @@ extern LOCALLOCK *GetAwaitedLock(void);
 extern void ResetAwaitedLock(void);
 
 extern void RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode);
+
+extern LOCK *LockHashLookup(const LOCKTAG *locktag, uint32 hashcode);
+
+/* Future-wait fast-path migration, called by CheckDeadLock(). */
+extern LOCKTAG *MigrateFutureWaitFastPathLocks(int *out_count);
+extern bool FutureWaitFastPathSnapshotCoversCurrentLocks(LOCKTAG *locktags,
+														 int n);
+extern void RestoreFutureWaitFastPathSnapshot(LOCKTAG *locktags, int n);
+
 extern LockData *GetLockStatusData(void);
 extern BlockedProcsData *GetBlockerStatusData(int blocked_pid);
 

@@ -51,6 +51,8 @@ extern bool CheckRelationLockedByMe(Relation relation, LOCKMODE lockmode,
 extern bool CheckRelationOidLockedByMe(Oid relid, LOCKMODE lockmode,
 									   bool orstronger);
 extern bool LockHasWaitersRelation(Relation relation, LOCKMODE lockmode);
+extern void LockDeclareFutureWait(const LOCKTAG *locktag, LOCKMODE lockmode);
+extern void LockClearFutureWaitSlot(bool partitionLockHeld);
 
 extern void LockRelationIdForSession(LockRelId *relid, LOCKMODE lockmode);
 extern void UnlockRelationIdForSession(LockRelId *relid, LOCKMODE lockmode);

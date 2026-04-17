@@ -74,6 +74,7 @@ typedef struct
 	LOCKTAG		locktag;		/* ID of awaited lock object */
 	LOCKMODE	lockmode;		/* type of lock we're waiting for */
 	int			pid;			/* PID of blocked backend */
+	bool		is_future;		/* was this a declared future-wait edge? */
 } DEADLOCK_INFO;
 
 
@@ -85,6 +86,11 @@ static bool FindLockCycleRecurse(PGPROC *checkProc, int depth,
 								 EDGE *softEdges, int *nSoftEdges);
 static bool FindLockCycleRecurseMember(PGPROC *checkProc,
 									   PGPROC *checkProcLeader,
+									   int depth, EDGE *softEdges, int *nSoftEdges);
+static bool FindLockCycleRecurseWait(PGPROC *checkProc,
+									 PGPROC *checkProcLeader,
+									 int depth, EDGE *softEdges, int *nSoftEdges);
+static bool FindLockCycleRecurseFuture(PGPROC *checkProc,
 									   int depth, EDGE *softEdges, int *nSoftEdges);
 static bool ExpandConstraints(EDGE *constraints, int nConstraints);
 static bool TopoSort(LOCK *lock, EDGE *constraints, int nConstraints,
@@ -504,7 +510,8 @@ FindLockCycleRecurse(PGPROC *checkProc,
 	 * If the process is waiting, there is an outgoing waits-for edge to each
 	 * process that blocks it.
 	 */
-	if (!dlist_node_is_detached(&checkProc->waitLink) &&
+	if ((!dlist_node_is_detached(&checkProc->waitLink) ||
+		 FutureWaitLockIsSet(&checkProc->futureWaitLock)) &&
 		FindLockCycleRecurseMember(checkProc, checkProc, depth, softEdges,
 								   nSoftEdges))
 		return true;
@@ -538,6 +545,34 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 						   int depth,
 						   EDGE *softEdges, /* output argument */
 						   int *nSoftEdges) /* output argument */
+{
+	/* Follow outgoing edges from a real lock wait, if any. */
+	if (!dlist_node_is_detached(&checkProc->waitLink) &&
+		FindLockCycleRecurseWait(checkProc, checkProcLeader, depth,
+								 softEdges, nSoftEdges))
+		return true;
+
+	/*
+	 * A future-wait slot is only useful when another backend is already
+	 * waiting and reaches this proc through the waits-for graph.  Do not start
+	 * from our own future slot: until we actually request that lock, there is
+	 * no current wait to break.
+	 */
+	if (checkProc != MyProc &&
+		checkProc == checkProcLeader &&
+		FutureWaitLockIsSet(&checkProc->futureWaitLock) &&
+		FindLockCycleRecurseFuture(checkProc, depth, softEdges, nSoftEdges))
+		return true;
+
+	return false;
+}
+
+static bool
+FindLockCycleRecurseWait(PGPROC *checkProc,
+						 PGPROC *checkProcLeader,
+						 int depth,
+						 EDGE *softEdges, /* output argument */
+						 int *nSoftEdges) /* output argument */
 {
 	PGPROC	   *proc;
 	LOCK	   *lock = checkProc->waitLock;
@@ -590,6 +625,7 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 						info->locktag = lock->tag;
 						info->lockmode = checkProc->waitLockMode;
 						info->pid = checkProc->pid;
+						info->is_future = false;
 
 						return true;
 					}
@@ -679,6 +715,7 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 					info->locktag = lock->tag;
 					info->lockmode = checkProc->waitLockMode;
 					info->pid = checkProc->pid;
+					info->is_future = false;
 
 					/*
 					 * Add this edge to the list of soft edges in the cycle
@@ -753,6 +790,7 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 					info->locktag = lock->tag;
 					info->lockmode = checkProc->waitLockMode;
 					info->pid = checkProc->pid;
+					info->is_future = false;
 
 					/*
 					 * Add this edge to the list of soft edges in the cycle
@@ -771,6 +809,149 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 	/*
 	 * No conflict detected here.
 	 */
+	return false;
+}
+
+/*
+ * Follow a declared future-wait edge as a hard edge.
+ */
+static bool
+FindLockCycleRecurseFuture(PGPROC *checkProc,
+						   int depth,
+						   EDGE *softEdges, /* output argument */
+						   int *nSoftEdges) /* output argument */
+{
+	FutureWaitLock *futureWaitLock = &checkProc->futureWaitLock;
+	LOCK	   *lock;
+	LockMethod	lockMethodTable;
+	uint32		hashcode;
+	int			conflictMask;
+	LOCKMASK	myHeldLocks = 0;
+	dlist_iter	proclock_iter;
+	dlist_iter	proc_iter;
+
+	Assert(FutureWaitLockIsSet(futureWaitLock));
+	Assert(checkProc != MyProc);
+
+	/*
+	 * Invariant maintained by LockAcquireExtended(): if a proc is really
+	 * waiting on a lock, its future-wait slot (if any) must not describe the
+	 * same (locktag, lockmode).  The slot is cleared at the point we attach
+	 * our waitLink for that exact lock and mode, so the wait walker's
+	 * procLocks scan already subsumes anything this walker would find.
+	 */
+	Assert(dlist_node_is_detached(&checkProc->waitLink) ||
+		   checkProc->waitLockMode != futureWaitLock->mode ||
+		   memcmp(&checkProc->waitLock->tag, &futureWaitLock->locktag,
+				  sizeof(LOCKTAG)) != 0);
+
+	/*
+	 * Look up the shared LOCK object for the declared tag.  It is legal for
+	 * the entry not to exist: the hash table only contains LOCK objects that
+	 * currently have at least one holder or requester, and a future-wait
+	 * declaration can be made before any proclock for that tag is created
+	 * (e.g. RangeVarCallbackForRepack runs inside RangeVarGetRelidExtended
+	 * *before* the caller has actually taken the initial SUE lock on the
+	 * relation, and no other backend may have any lock on it either).  With
+	 * no LOCK object there are no current holders, hence no outgoing edges
+	 * from this future-wait slot, so simply return.
+	 */
+	hashcode = LockTagHashCode(&futureWaitLock->locktag);
+	lock = LockHashLookup(&futureWaitLock->locktag, hashcode);
+	if (lock == NULL)
+		return false;
+
+	lockMethodTable = GetLocksMethodTable(lock);
+	Assert(futureWaitLock->mode > 0 &&
+		   futureWaitLock->mode <= lockMethodTable->numLockModes);
+	conflictMask = lockMethodTable->conflictTab[futureWaitLock->mode];
+
+	/*
+	 * First, follow edges to current holders of conflicting modes.  These
+	 * edges are the future-wait equivalent of the normal hard edges from a
+	 * real waiter to current holders.
+	 */
+	dlist_foreach(proclock_iter, &lock->procLocks)
+	{
+		PROCLOCK   *proclock = dlist_container(PROCLOCK, lockLink, proclock_iter.cur);
+		PGPROC	   *proc = proclock->tag.myProc;
+		PGPROC	   *leader;
+
+		leader = proc->lockGroupLeader == NULL ? proc : proc->lockGroupLeader;
+
+		/* A proc never blocks itself or any other lock group member. */
+		if (leader == checkProc)
+		{
+			myHeldLocks |= proclock->holdMask;
+			continue;
+		}
+
+		if ((proclock->holdMask & conflictMask) != 0)
+		{
+			if (FindLockCycleRecurse(proc, depth + 1,
+									 softEdges, nSoftEdges))
+			{
+				DEADLOCK_INFO *info = &deadlockDetails[depth];
+
+				info->locktag = futureWaitLock->locktag;
+				info->lockmode = futureWaitLock->mode;
+				info->pid = checkProc->pid;
+				info->is_future = true;
+
+				return true;
+			}
+		}
+	}
+
+	/*
+	 * Existing waiters can also become blockers for the future request.  A
+	 * real LockAcquireExtended() first checks lock->waitMask, and if there
+	 * are conflicting waiters it calls JoinWaitQueue().  Model the queue
+	 * position JoinWaitQueue() would choose today, and follow only queued
+	 * requests that would be ahead of that position.
+	 *
+	 * Do not record these as soft edges.  The future requester is not present
+	 * in lock->waitProcs, so the deadlock detector cannot repair such an edge
+	 * by reordering the current wait queue.
+	 */
+	dclist_foreach(proc_iter, &lock->waitProcs)
+	{
+		PGPROC	   *proc = dlist_container(PGPROC, waitLink, proc_iter.cur);
+		PGPROC	   *leader;
+		LOCKMODE	waitLockMode = proc->waitLockMode;
+
+		leader = proc->lockGroupLeader == NULL ? proc : proc->lockGroupLeader;
+
+		if (leader == checkProc)
+			continue;
+
+		/*
+		 * If checkProc already holds locks that conflict with this waiter's
+		 * request, JoinWaitQueue() would insert the future request before
+		 * this waiter.  We are done scanning the queue after considering
+		 * earlier waiters.
+		 */
+		if (myHeldLocks != 0 &&
+			(lockMethodTable->conflictTab[waitLockMode] & myHeldLocks) != 0)
+			break;
+
+		if ((LOCKBIT_ON(waitLockMode) & conflictMask) != 0)
+		{
+			if (FindLockCycleRecurse(proc, depth + 1,
+									 softEdges, nSoftEdges))
+			{
+				DEADLOCK_INFO *info = &deadlockDetails[depth];
+
+				info->locktag = futureWaitLock->locktag;
+				info->lockmode = futureWaitLock->mode;
+				info->pid = checkProc->pid;
+				info->is_future = true;
+
+				return true;
+			}
+		}
+	}
+
 	return false;
 }
 
@@ -1078,6 +1259,7 @@ DeadLockReport(void)
 	StringInfoData logbuf;		/* errdetail for server log */
 	StringInfoData locktagbuf;
 	int			i;
+	bool		any_future = false;
 
 	initStringInfo(&clientbuf);
 	initStringInfo(&logbuf);
@@ -1099,12 +1281,15 @@ DeadLockReport(void)
 		resetStringInfo(&locktagbuf);
 
 		DescribeLockTag(&locktagbuf, &info->locktag);
+		any_future |= info->is_future;
 
 		if (i > 0)
 			appendStringInfoChar(&clientbuf, '\n');
 
 		appendStringInfo(&clientbuf,
-						 _("Process %d waits for %s on %s; blocked by process %d."),
+						 info->is_future
+						 ? _("Process %d will request %s on %s (declared future intent); blocked by process %d.")
+						 : _("Process %d waits for %s on %s; blocked by process %d."),
 						 info->pid,
 						 GetLockmodeName(info->locktag.locktag_lockmethodid,
 										 info->lockmode),
@@ -1132,7 +1317,9 @@ DeadLockReport(void)
 
 	ereport(ERROR,
 			(errcode(ERRCODE_T_R_DEADLOCK_DETECTED),
-			 errmsg("deadlock detected"),
+			 errmsg(any_future
+					? "future deadlock detected"
+					: "deadlock detected"),
 			 errdetail_internal("%s", clientbuf.data),
 			 errdetail_log("%s", logbuf.data),
 			 errhint("See server log for query details.")));
@@ -1154,9 +1341,11 @@ RememberSimpleDeadLock(PGPROC *proc1,
 	info->locktag = lock->tag;
 	info->lockmode = lockmode;
 	info->pid = proc1->pid;
+	info->is_future = false;
 	info++;
 	info->locktag = proc2->waitLock->tag;
 	info->lockmode = proc2->waitLockMode;
 	info->pid = proc2->pid;
+	info->is_future = false;
 	nDeadlockDetails = 2;
 }

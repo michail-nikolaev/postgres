@@ -494,6 +494,7 @@ InitProcess(void)
 	MyProc->waitLock = NULL;
 	dlist_node_init(&MyProc->waitLink);
 	MyProc->waitProcLock = NULL;
+	MemSet(&MyProc->futureWaitLock, 0, sizeof(FutureWaitLock));
 	pg_atomic_write_u64(&MyProc->waitStart, 0);
 #ifdef USE_ASSERT_CHECKING
 	{
@@ -691,6 +692,7 @@ InitAuxiliaryProcess(void)
 	MyProc->waitLock = NULL;
 	dlist_node_init(&MyProc->waitLink);
 	MyProc->waitProcLock = NULL;
+	MemSet(&MyProc->futureWaitLock, 0, sizeof(FutureWaitLock));
 	pg_atomic_write_u64(&MyProc->waitStart, 0);
 #ifdef USE_ASSERT_CHECKING
 	{
@@ -824,6 +826,7 @@ LockErrorCleanup(void)
 	HOLD_INTERRUPTS();
 
 	AbortStrongLockAcquire();
+	LockClearFutureWaitSlot(false);
 
 	/* Nothing to do if we weren't waiting for a lock */
 	lockAwaited = GetAwaitedLock();
@@ -934,6 +937,7 @@ ProcKill(int code, Datum arg)
 
 	/* Make sure we're out of the sync rep lists */
 	SyncRepCleanupAtProcExit();
+	LockClearFutureWaitSlot(false);
 
 #ifdef USE_ASSERT_CHECKING
 	{
@@ -1824,6 +1828,17 @@ CheckDeadLock(void)
 {
 	int			i;
 	DeadLockState result;
+	LOCKTAG	   *futureLocks;
+	int			futureLockCount = 0;
+
+retry:
+	/*
+	 * Migrate fast-path holders for relation locks named by declared
+	 * future-wait declarations.  The helper takes and releases lock
+	 * partitions internally while taking its snapshot, so it must run before
+	 * this routine freezes the lock table for the real deadlock check.
+	 */
+	futureLocks = MigrateFutureWaitFastPathLocks(&futureLockCount);
 
 	/*
 	 * Acquire exclusive lock on the entire shared lock data structures. Must
@@ -1837,6 +1852,25 @@ CheckDeadLock(void)
 	 */
 	for (i = 0; i < NUM_LOCK_PARTITIONS; i++)
 		LWLockAcquire(LockHashPartitionLockByIndex(i), LW_EXCLUSIVE);
+
+	/*
+	 * A future-wait declaration can appear after the migration snapshot but
+	 * before this partition-locked graph walk.  If so, release the temporary
+	 * strong-lock counts and retry, so the newly visible future edge cannot
+	 * miss holders that are still in fast-path arrays.
+	 *
+	 * In theory a stream of concurrent declarations could force repeated
+	 * retries, but in practice future-wait declarations are issued only by
+	 * REPACK CONCURRENTLY and are rare, so the loop terminates quickly.
+	 */
+	if (!FutureWaitFastPathSnapshotCoversCurrentLocks(futureLocks,
+													  futureLockCount))
+	{
+		for (i = NUM_LOCK_PARTITIONS; --i >= 0;)
+			LWLockRelease(LockHashPartitionLockByIndex(i));
+		RestoreFutureWaitFastPathSnapshot(futureLocks, futureLockCount);
+		goto retry;
+	}
 
 	/*
 	 * Check to see if we've been awoken by anyone in the interim.
@@ -1901,6 +1935,8 @@ CheckDeadLock(void)
 check_done:
 	for (i = NUM_LOCK_PARTITIONS; --i >= 0;)
 		LWLockRelease(LockHashPartitionLockByIndex(i));
+
+	RestoreFutureWaitFastPathSnapshot(futureLocks, futureLockCount);
 
 	return result;
 }

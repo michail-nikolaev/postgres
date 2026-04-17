@@ -102,6 +102,9 @@ extern void AtEOSubXact_on_commit_actions(bool isCommit,
 extern void RangeVarCallbackMaintainsTable(const RangeVar *relation,
 										   Oid relId, Oid oldRelId,
 										   void *arg);
+extern void RangeVarCallbackForRepack(const RangeVar *relation,
+									  Oid relId, Oid oldRelId,
+									  void *arg);
 
 extern void RangeVarCallbackOwnsRelation(const RangeVar *relation,
 										 Oid relId, Oid oldRelId, void *arg);

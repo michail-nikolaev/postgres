@@ -314,6 +314,19 @@ typedef struct
 
 static volatile FastPathStrongRelationLockData *FastPathStrongRelationLocks;
 
+/*
+ * Count of active future-wait declarations that could conflict with relation
+ * fast-path locks.  This is only a skip hint for CheckDeadLock(); the actual
+ * future-wait locktags are read from PGPROC.futureWaitLock while all lock
+ * partitions are held.
+ */
+typedef struct FutureWaitFastPathCtlData
+{
+	pg_atomic_uint32 count;
+} FutureWaitFastPathCtlData;
+
+static FutureWaitFastPathCtlData *FutureWaitFastPathCtl = NULL;
+
 static void LockManagerShmemRequest(void *arg);
 static void LockManagerShmemInit(void *arg);
 
@@ -488,12 +501,18 @@ LockManagerShmemRequest(void *arg)
 					   .size = sizeof(FastPathStrongRelationLockData),
 					   .ptr = (void **) (void *) &FastPathStrongRelationLocks,
 		);
+
+	ShmemRequestStruct(.name = "Future Wait Fast Path Control",
+					   .size = sizeof(FutureWaitFastPathCtlData),
+					   .ptr = (void **) &FutureWaitFastPathCtl,
+		);
 }
 
 static void
 LockManagerShmemInit(void *arg)
 {
 	SpinLockInit(&FastPathStrongRelationLocks->mutex);
+	pg_atomic_init_u32(&FutureWaitFastPathCtl->count, 0);
 }
 
 /*
@@ -626,6 +645,374 @@ DoLockModesConflict(LOCKMODE mode1, LOCKMODE mode2)
 		return true;
 
 	return false;
+}
+
+/*
+ * LockHashLookup -- look up a LOCK by locktag and precomputed hashcode.
+ *
+ * Returns NULL if no LOCK exists for this tag.
+ *
+ * Callers MUST hold the partition lock covering hashcode in LW_EXCLUSIVE
+ * mode, and MUST treat the returned pointer as valid only while that
+ * partition lock remains held: the LOCK entry can be removed from the hash
+ * table by LockRelease() under the same partition lock, so dropping the
+ * lock invalidates the pointer.
+ *
+ * Today the only caller is the deadlock detector, which satisfies both
+ * requirements by acquiring every lock-manager partition lock exclusively
+ * before walking the wait-for graph, and uses the result to resolve a
+ * declared future-wait edge's locktag into a live LOCK *.  New callers
+ * from outside that context should be reviewed carefully.
+ */
+LOCK *
+LockHashLookup(const LOCKTAG *locktag, uint32 hashcode)
+{
+	Assert(LWLockHeldByMeInMode(LockHashPartitionLock(hashcode),
+								LW_EXCLUSIVE));
+
+	return (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
+												locktag,
+												hashcode,
+												HASH_FIND,
+												NULL);
+}
+
+static inline bool
+FutureWaitLockMatches(const FutureWaitLock *futureWaitLock,
+					  const LOCKTAG *locktag, LOCKMODE lockmode)
+{
+	return FutureWaitLockIsSet(futureWaitLock) &&
+		futureWaitLock->mode == lockmode &&
+		memcmp(&futureWaitLock->locktag, locktag, sizeof(LOCKTAG)) == 0;
+}
+
+static inline bool
+FutureWaitNeedsFastPathMigration(const FutureWaitLock *futureWaitLock)
+{
+	return FutureWaitLockIsSet(futureWaitLock) &&
+		ConflictsWithRelationFastPath(&futureWaitLock->locktag,
+									  futureWaitLock->mode);
+}
+
+/*
+ * LockClearFutureWaitSlotIfMatch -- clear our future-wait slot if it matches
+ * a lock that we have now acquired or started waiting for.
+ */
+static void
+LockClearFutureWaitSlotIfMatch(const LOCKTAG *locktag, LOCKMODE lockmode,
+							   bool partitionLockHeld)
+{
+	if (!FutureWaitLockMatches(&MyProc->futureWaitLock, locktag, lockmode))
+		return;
+
+	LockClearFutureWaitSlot(partitionLockHeld);
+}
+
+/*
+ * LockDeclareFutureWait -- publish a hard future waits-for edge.
+ *
+ * The caller declares that this backend intends to request lockmode on
+ * locktag later.  The declaration becomes visible to deadlock detection
+ * before the real lock acquisition happens.
+ *
+ * Only one future-wait slot is supported per backend, and parallel workers
+ * (non-leader lock-group members) cannot declare a future wait.  REPACK
+ * CONCURRENTLY is the only current caller and satisfies both constraints.
+ */
+void
+LockDeclareFutureWait(const LOCKTAG *locktag, LOCKMODE lockmode)
+{
+	uint32		hashcode;
+	LWLock	   *partitionLock;
+
+	Assert(MyProc != NULL);
+	Assert(MyProc->lockGroupLeader == NULL ||
+		   MyProc->lockGroupLeader == MyProc);
+	Assert(!LockHeldByMe(locktag, lockmode, true));
+	Assert(FutureWaitLockIsEmpty(&MyProc->futureWaitLock));
+
+	hashcode = LockTagHashCode(locktag);
+	partitionLock = LockHashPartitionLock(hashcode);
+
+	/*
+	 * Bump the fast-path migration hint before publishing the slot.  A
+	 * concurrent CheckDeadLock() may see the hint before the slot is visible,
+	 * which is harmless; the reverse ordering would allow it to observe a
+	 * future edge without migrating fast-path holders for that relation.
+	 */
+	if (ConflictsWithRelationFastPath(locktag, lockmode))
+		pg_atomic_fetch_add_u32(&FutureWaitFastPathCtl->count, 1);
+
+	LWLockAcquire(partitionLock, LW_EXCLUSIVE);
+
+	MyProc->futureWaitLock.locktag = *locktag;
+	MyProc->futureWaitLock.mode = lockmode;
+
+	LWLockRelease(partitionLock);
+}
+
+/*
+ * LockClearFutureWaitSlot -- clear this backend's declared future wait, if any.
+ */
+void
+LockClearFutureWaitSlot(bool partitionLockHeld)
+{
+	LWLock	   *partitionLock;
+	LOCKTAG		clearedTag;
+	LOCKMODE	clearedMode;
+	bool		cleared = false;
+
+	if (MyProc == NULL || FutureWaitLockIsEmpty(&MyProc->futureWaitLock))
+		return;
+
+	partitionLock =
+		LockHashPartitionLock(LockTagHashCode(&MyProc->futureWaitLock.locktag));
+	if (!partitionLockHeld)
+		LWLockAcquire(partitionLock, LW_EXCLUSIVE);
+	else
+		Assert(LWLockHeldByMeInMode(partitionLock, LW_EXCLUSIVE));
+
+	if (FutureWaitLockIsSet(&MyProc->futureWaitLock))
+	{
+		clearedTag = MyProc->futureWaitLock.locktag;
+		clearedMode = MyProc->futureWaitLock.mode;
+		MemSet(&MyProc->futureWaitLock, 0, sizeof(FutureWaitLock));
+		cleared = true;
+	}
+
+	if (!partitionLockHeld)
+		LWLockRelease(partitionLock);
+
+	if (cleared && ConflictsWithRelationFastPath(&clearedTag, clearedMode))
+	{
+		Assert(pg_atomic_read_u32(&FutureWaitFastPathCtl->count) > 0);
+		pg_atomic_fetch_sub_u32(&FutureWaitFastPathCtl->count, 1);
+	}
+}
+
+/*
+ * FutureWaitLocktagSnapshotContains -- linear membership test over a
+ * locktag snapshot.
+ *
+ * n is bounded by the number of declared future waits (effectively the
+ * number of concurrent REPACK CONCURRENTLY commands), which in practice
+ * is 0 or 1, so a linear scan is cheaper than building a hash or keeping
+ * the array sorted.
+ */
+static bool
+FutureWaitLocktagSnapshotContains(LOCKTAG *locktags, int n,
+								  const LOCKTAG *locktag)
+{
+	for (int i = 0; i < n; i++)
+	{
+		if (memcmp(&locktags[i], locktag, sizeof(LOCKTAG)) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * SnapshotFutureWaitFastPathLocks -- copy the current fast-path-relevant
+ * future-wait tags while all lock partitions are held.
+ *
+ * The caller holds every lock-manager partition lock exclusively, so this
+ * function must not take any LWLock.  palloc is safe here because the
+ * memory context machinery does not take LWLocks; a palloc failure would
+ * ereport out of the deadlock check but not deadlock against itself.
+ */
+static LOCKTAG *
+SnapshotFutureWaitFastPathLocks(int *out_count)
+{
+	LOCKTAG	   *locktags;
+	int			n = 0;
+
+	*out_count = 0;
+
+	locktags = palloc_array(LOCKTAG, ProcGlobal->allProcCount);
+
+	for (int i = 0; i < ProcGlobal->allProcCount; i++)
+	{
+		PGPROC	   *proc = GetPGProcByNumber(i);
+		FutureWaitLock *futureWaitLock = &proc->futureWaitLock;
+
+		if (!FutureWaitNeedsFastPathMigration(futureWaitLock))
+			continue;
+
+		Assert(LWLockHeldByMeInMode(LockHashPartitionLock(
+										LockTagHashCode(&futureWaitLock->locktag)),
+									LW_EXCLUSIVE));
+
+		if (!FutureWaitLocktagSnapshotContains(locktags, n,
+											   &futureWaitLock->locktag))
+		{
+			Assert(n < ProcGlobal->allProcCount);
+			locktags[n++] = futureWaitLock->locktag;
+		}
+	}
+
+	if (n == 0)
+	{
+		pfree(locktags);
+		return NULL;
+	}
+
+	*out_count = n;
+	return locktags;
+}
+
+/*
+ * MigrateFutureWaitFastPathLocks -- make fast-path holders visible to the
+ * deadlock detector for currently declared future waits.
+ *
+ * Future-wait declarations do not take a real strong lock yet, so they do not
+ * trigger the normal fast-path transfer performed by LockAcquireExtended().
+ * This helper takes a snapshot of current fast-path-relevant future waits,
+ * installs temporary strong-lock counter bumps for those relation hash
+ * partitions, and transfers existing fast-path holders of those relations
+ * into the main lock table.
+ *
+ * The returned snapshot must remain active until CheckDeadLock() has finished
+ * its partition-locked graph walk.  New fast-path holders cannot appear for
+ * migrated tags while the temporary strong-lock counter bumps are active.  If
+ * a new future-wait tag appears after this snapshot, CheckDeadLock() detects
+ * that with FutureWaitFastPathSnapshotCoversCurrentLocks() and retries.
+ */
+LOCKTAG *
+MigrateFutureWaitFastPathLocks(int *out_count)
+{
+	LockMethod	lockMethodTable = LockMethods[DEFAULT_LOCKMETHOD];
+	LOCKTAG	   *locktags;
+	int			n;
+
+	*out_count = 0;
+
+	/* Cheap path: no active declaration can involve fast-path holders. */
+	if (pg_atomic_read_u32(&FutureWaitFastPathCtl->count) == 0)
+		return NULL;
+
+	for (int i = 0; i < NUM_LOCK_PARTITIONS; i++)
+		LWLockAcquire(LockHashPartitionLockByIndex(i), LW_EXCLUSIVE);
+
+	locktags = SnapshotFutureWaitFastPathLocks(&n);
+
+	for (int i = NUM_LOCK_PARTITIONS; --i >= 0;)
+		LWLockRelease(LockHashPartitionLockByIndex(i));
+
+	if (locktags == NULL)
+		return NULL;
+
+	/*
+	 * Block new fast-path acquisitions for this snapshot before transferring
+	 * existing holders to the main table.
+	 */
+	SpinLockAcquire(&FastPathStrongRelationLocks->mutex);
+	for (int i = 0; i < n; i++)
+	{
+		uint32		hashcode = LockTagHashCode(&locktags[i]);
+		uint32		fasthashcode = FastPathStrongLockHashPartition(hashcode);
+
+		FastPathStrongRelationLocks->count[fasthashcode]++;
+	}
+	SpinLockRelease(&FastPathStrongRelationLocks->mutex);
+
+	for (int i = 0; i < n; i++)
+	{
+		uint32		hashcode = LockTagHashCode(&locktags[i]);
+
+		if (!FastPathTransferRelationLocks(lockMethodTable, &locktags[i],
+										   hashcode))
+		{
+			SpinLockAcquire(&FastPathStrongRelationLocks->mutex);
+			for (int j = 0; j < n; j++)
+			{
+				uint32		restorehashcode = LockTagHashCode(&locktags[j]);
+				uint32		restorefasthashcode =
+					FastPathStrongLockHashPartition(restorehashcode);
+
+				Assert(FastPathStrongRelationLocks->count[restorefasthashcode]
+					   > 0);
+				FastPathStrongRelationLocks->count[restorefasthashcode]--;
+			}
+			SpinLockRelease(&FastPathStrongRelationLocks->mutex);
+			pfree(locktags);
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("out of shared memory"),
+					 errhint("You might need to increase \"%s\".", "max_locks_per_transaction")));
+		}
+	}
+
+	*out_count = n;
+	return locktags;
+}
+
+/*
+ * FutureWaitFastPathSnapshotCoversCurrentLocks -- does the active snapshot
+ * cover all fast-path-relevant future waits currently visible to the deadlock
+ * detector?
+ *
+ * Caller must hold all lock partitions.  If this returns false, a declaration
+ * raced with the previous snapshot and CheckDeadLock() must retry migration
+ * before walking the waits-for graph.
+ */
+bool
+FutureWaitFastPathSnapshotCoversCurrentLocks(LOCKTAG *locktags, int n)
+{
+	/*
+	 * With no snapshot and no in-progress fast-path-relevant declaration,
+	 * there cannot be anything to validate.  If the counter is nonzero, still
+	 * scan: a declaration may have incremented the counter before publishing
+	 * its slot, causing the snapshot to be empty.
+	 */
+	if (locktags == NULL &&
+		pg_atomic_read_u32(&FutureWaitFastPathCtl->count) == 0)
+		return true;
+
+	for (int i = 0; i < ProcGlobal->allProcCount; i++)
+	{
+		PGPROC	   *proc = GetPGProcByNumber(i);
+		FutureWaitLock *futureWaitLock = &proc->futureWaitLock;
+
+		if (!FutureWaitNeedsFastPathMigration(futureWaitLock))
+			continue;
+
+		Assert(LWLockHeldByMeInMode(LockHashPartitionLock(
+										LockTagHashCode(&futureWaitLock->locktag)),
+									LW_EXCLUSIVE));
+
+		if (!FutureWaitLocktagSnapshotContains(locktags, n,
+											   &futureWaitLock->locktag))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * RestoreFutureWaitFastPathSnapshot -- undo the fast-path strong-lock counter
+ * bumps for a snapshot returned by MigrateFutureWaitFastPathLocks().
+ *
+ * Must be called after CheckDeadLock() has released all partition locks.
+ */
+void
+RestoreFutureWaitFastPathSnapshot(LOCKTAG *locktags, int n)
+{
+	if (locktags == NULL)
+		return;
+
+	SpinLockAcquire(&FastPathStrongRelationLocks->mutex);
+	for (int i = 0; i < n; i++)
+	{
+		uint32		hashcode = LockTagHashCode(&locktags[i]);
+		uint32		fasthashcode = FastPathStrongLockHashPartition(hashcode);
+
+		Assert(FastPathStrongRelationLocks->count[fasthashcode] > 0);
+		FastPathStrongRelationLocks->count[fasthashcode]--;
+	}
+	SpinLockRelease(&FastPathStrongRelationLocks->mutex);
+
+	pfree(locktags);
 }
 
 /*
@@ -937,6 +1324,8 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	 */
 	if (locallock->nLocks > 0)
 	{
+		Assert(!FutureWaitLockMatches(&MyProc->futureWaitLock, locktag,
+									  lockmode));
 		GrantLockLocal(locallock, owner);
 		if (locallock->lockCleared)
 			return LOCKACQUIRE_ALREADY_CLEAR;
@@ -1012,6 +1401,7 @@ LockAcquireExtended(const LOCKTAG *locktag,
 				 */
 				locallock->lock = NULL;
 				locallock->proclock = NULL;
+				LockClearFutureWaitSlotIfMatch(locktag, lockmode, false);
 				GrantLockLocal(locallock, owner);
 				return LOCKACQUIRE_OK;
 			}
@@ -1225,6 +1615,20 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		Assert(!dontWait);
 		PROCLOCK_PRINT("LockAcquire: sleeping on lock", proclock);
 		LOCK_PRINT("LockAcquire: sleeping on lock", lock, lockmode);
+
+		/*
+		 * We have attached waitLink and are about to sleep on exactly the
+		 * (locktag, lockmode) we had declared as a future wait.  Remote
+		 * walkers will now see us as a real waiter on this lock, and
+		 * FindLockCycleRecurseWait() will scan lock->procLocks with the same
+		 * conflictMask the future walker would have used.  Clearing the
+		 * future slot now, while we still hold the partition lock, keeps
+		 * the invariant "future slot set means not yet really waiting for the
+		 * same lock and mode" and removes duplicate work from the deadlock
+		 * detector.
+		 */
+		LockClearFutureWaitSlotIfMatch(locktag, lockmode, true);
+
 		LWLockRelease(partitionLock);
 
 		waitResult = WaitOnLock(locallock, owner);
@@ -1247,7 +1651,10 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		}
 	}
 	else
+	{
+		LockClearFutureWaitSlotIfMatch(locktag, lockmode, true);
 		LWLockRelease(partitionLock);
+	}
 	Assert(waitResult == PROC_WAIT_STATUS_OK);
 
 	/* The lock was granted to us.  Update the local lock entry accordingly */
@@ -2327,6 +2734,9 @@ LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)
 	if (lockmethodid <= 0 || lockmethodid >= lengthof(LockMethods))
 		elog(ERROR, "unrecognized lock method: %d", lockmethodid);
 	lockMethodTable = LockMethods[lockmethodid];
+
+	if (lockmethodid == DEFAULT_LOCKMETHOD)
+		LockClearFutureWaitSlot(false);
 
 #ifdef LOCK_DEBUG
 	if (*(lockMethodTable->trace_flag))

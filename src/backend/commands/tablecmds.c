@@ -19762,6 +19762,39 @@ RangeVarCallbackMaintainsTable(const RangeVar *relation,
 }
 
 /*
+ * Callback to RangeVarGetRelidExtended() for REPACK.  For concurrent repack,
+ * declare the future AccessExclusiveLock before the caller locks the table
+ * with ShareUpdateExclusiveLock, so deadlock checks can see the pending
+ * request while the weaker lock is held or awaited.
+ */
+void
+RangeVarCallbackForRepack(const RangeVar *relation,
+						  Oid relId, Oid oldRelId, void *arg)
+{
+	ClusterParams *params = arg;
+	LOCKTAG		locktag;
+	Oid			dbid;
+
+	RangeVarCallbackMaintainsTable(relation, relId, oldRelId, NULL);
+
+	if ((params->options & CLUOPT_CONCURRENT) == 0)
+		return;
+
+	if (relId == oldRelId)
+		return;
+
+	if (OidIsValid(oldRelId))
+		LockClearFutureWaitSlot(false);
+
+	if (!OidIsValid(relId))
+		return;
+
+	dbid = IsSharedRelation(relId) ? InvalidOid : MyDatabaseId;
+	SET_LOCKTAG_RELATION(locktag, dbid, relId);
+	LockDeclareFutureWait(&locktag, AccessExclusiveLock);
+}
+
+/*
  * Callback to RangeVarGetRelidExtended() for TRUNCATE processing.
  */
 static void

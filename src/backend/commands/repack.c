@@ -2326,8 +2326,8 @@ process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
 	tableOid = RangeVarGetRelidExtended(stmt->relation->relation,
 										lockmode,
 										0,
-										RangeVarCallbackMaintainsTable,
-										NULL);
+										RangeVarCallbackForRepack,
+										params);
 	rel = table_open(tableOid, NoLock);
 
 	/*
