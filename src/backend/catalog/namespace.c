@@ -415,8 +415,18 @@ spcache_insert(const char *searchPath, Oid roleid)
 	}
 }
 
+/* Wrapper preserving the historical signature (no upgrade intent). */
+Oid
+RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
+						 uint32 flags,
+						 RangeVarGetRelidCallback callback, void *callback_arg)
+{
+	return RangeVarGetRelidWithUpgradeIntent(relation, lockmode, NoLock,
+											 flags, callback, callback_arg);
+}
+
 /*
- * RangeVarGetRelidExtended
+ * RangeVarGetRelidWithUpgradeIntent
  *		Given a RangeVar describing an existing relation,
  *		select the proper namespace and look up the relation OID.
  *
@@ -435,13 +445,17 @@ spcache_insert(const char *searchPath, Oid roleid)
  * return value of InvalidOid could either mean the relation is missing or it
  * could not be locked.
  *
+ * If upgradeMode is not NoLock, an upgrade-intent announcement is installed
+ * atomically with the grant; see LockAcquireExtended.
+ *
  * Callback allows caller to check permissions or acquire additional locks
  * prior to grabbing the relation lock.
  */
 Oid
-RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
-						 uint32 flags,
-						 RangeVarGetRelidCallback callback, void *callback_arg)
+RangeVarGetRelidWithUpgradeIntent(const RangeVar *relation, LOCKMODE lockmode,
+								  LOCKMODE upgradeMode, uint32 flags,
+								  RangeVarGetRelidCallback callback,
+								  void *callback_arg)
 {
 	uint64		inval_count;
 	Oid			relId;
@@ -451,6 +465,9 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 
 	/* verify that flags do no conflict */
 	Assert(!((flags & RVR_NOWAIT) && (flags & RVR_SKIP_LOCKED)));
+	/* Upgrade intent requires the blocking acquisition path. */
+	Assert(upgradeMode == NoLock ||
+		   !(flags & (RVR_NOWAIT | RVR_SKIP_LOCKED)));
 
 	/*
 	 * We check the catalog name and then ignore it.
@@ -590,7 +607,12 @@ RangeVarGetRelidExtended(const RangeVar *relation, LOCKMODE lockmode,
 		if (!OidIsValid(relId))
 			AcceptInvalidationMessages();
 		else if (!(flags & (RVR_NOWAIT | RVR_SKIP_LOCKED)))
-			LockRelationOid(relId, lockmode);
+		{
+			if (upgradeMode != NoLock)
+				LockRelationOidWithUpgradeIntent(relId, lockmode, upgradeMode);
+			else
+				LockRelationOid(relId, lockmode);
+		}
 		else if (!ConditionalLockRelationOid(relId, lockmode))
 		{
 			int			elevel = (flags & RVR_SKIP_LOCKED) ? DEBUG1 : ERROR;

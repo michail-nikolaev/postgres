@@ -2322,12 +2322,25 @@ process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
 				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				errmsg("ANALYZE option must be specified when a column list is provided"));
 
-	/* Find, lock, and check permissions on the table. */
-	tableOid = RangeVarGetRelidExtended(stmt->relation->relation,
-										lockmode,
-										0,
-										RangeVarCallbackMaintainsTable,
-										NULL);
+	/*
+	 * Find, lock, and check permissions on the table.
+	 *
+	 * For CONCURRENTLY, announce the future AEL upgrade so a conflicting
+	 * holder is preempted instead of stalling us through the copy phase.
+	 */
+	if ((params->options & CLUOPT_CONCURRENT) != 0)
+		tableOid = RangeVarGetRelidWithUpgradeIntent(stmt->relation->relation,
+													 lockmode,
+													 AccessExclusiveLock,
+													 0,
+													 RangeVarCallbackMaintainsTable,
+													 NULL);
+	else
+		tableOid = RangeVarGetRelidExtended(stmt->relation->relation,
+											lockmode,
+											0,
+											RangeVarCallbackMaintainsTable,
+											NULL);
 	rel = table_open(tableOid, NoLock);
 
 	/*
@@ -3055,6 +3068,10 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	/*
 	 * Acquire AccessExclusiveLock on the table, its TOAST relation (if there
 	 * is one), all its indexes, so that we can swap the files.
+	 *
+	 * The upgrade intent announced at initial SUEL acquisition makes the
+	 * detector preempt a blocker on a deadlock here, preserving the work
+	 * already done.
 	 */
 	LockRelationOid(old_table_oid, AccessExclusiveLock);
 

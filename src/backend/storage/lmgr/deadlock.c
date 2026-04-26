@@ -125,6 +125,13 @@ static int	maxPossibleConstraints;
 static DEADLOCK_INFO *deadlockDetails;
 static int	nDeadlockDetails;
 
+/*
+ * Parallel to deadlockDetails[]: live PGPROCs forming each edge of the
+ * detected cycle.  Valid only while all partition locks are held.  Used by
+ * DeadLockCheck to pick a victim under the protected-upgrade rule.
+ */
+static PGPROC **deadlockProcs;
+
 /* PGPROC pointer of any blocking autovacuum worker found */
 static PGPROC *blocking_autovacuum_proc = NULL;
 
@@ -148,11 +155,12 @@ InitDeadLockChecking(void)
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 
 	/*
-	 * FindLockCycle needs at most MaxBackends entries in visitedProcs[] and
-	 * deadlockDetails[].
+	 * FindLockCycle needs at most MaxBackends entries in visitedProcs[],
+	 * deadlockDetails[], and deadlockProcs[].
 	 */
 	visitedProcs = (PGPROC **) palloc(MaxBackends * sizeof(PGPROC *));
 	deadlockDetails = (DEADLOCK_INFO *) palloc(MaxBackends * sizeof(DEADLOCK_INFO));
+	deadlockProcs = (PGPROC **) palloc(MaxBackends * sizeof(PGPROC *));
 
 	/*
 	 * TopoSort needs to consider at most MaxBackends wait-queue entries, and
@@ -219,10 +227,14 @@ InitDeadLockChecking(void)
 DeadLockState
 DeadLockCheck(PGPROC *proc)
 {
+	bool		victims_canceled = false;
+
+retry:
 	/* Initialize to "no constraints" */
 	nCurConstraints = 0;
 	nPossibleConstraints = 0;
 	nWaitOrders = 0;
+	nDeadlockDetails = 0;
 
 	/* Initialize to not blocked by an autovacuum worker */
 	blocking_autovacuum_proc = NULL;
@@ -241,6 +253,72 @@ DeadLockCheck(PGPROC *proc)
 		nWaitOrders = 0;
 		if (!FindLockCycle(proc, possibleConstraints, &nSoftEdges))
 			elog(FATAL, "deadlock seems to have disappeared");
+
+		/*
+		 * Protected-upgrade resolution: if our wait is the announced upgrade
+		 * for our proclock, cancel a blocker instead of MyProc and re-run the
+		 * full check (not just FindLockCycle) so soft cycles still get a
+		 * chance at queue rearrangement.  Partition locks are held throughout,
+		 * so the loop is bounded by MaxBackends.
+		 *
+		 * deadlockProcs[0] is always MyProc; start at the direct blocker.
+		 * Skip other protected upgraders (don't preempt them) and
+		 * anti-wraparound autovacuums (canceling them is worse than losing
+		 * our work).  If no acceptable victim exists, fall through to
+		 * DS_HARD_DEADLOCK.
+		 */
+		if (MyProc->waitProcLock != NULL &&
+			MyProc->waitProcLock->upgradeIntent == MyProc->waitLockMode)
+		{
+			PGPROC	   *victim = NULL;
+
+			for (int i = 1; i < nDeadlockDetails; i++)
+			{
+				PGPROC	   *w = deadlockProcs[i];
+
+				if (w == NULL || w == MyProc)
+					continue;
+
+				/* Don't preempt another protected upgrader. */
+				if (w->waitProcLock != NULL &&
+					w->waitProcLock->upgradeIntent == w->waitLockMode)
+					continue;
+
+				/*
+				 * PROC_IS_AUTOVACUUM is set once at startup, safe lockless.
+				 * Read PROC_VACUUM_FOR_WRAPAROUND only if we can grab
+				 * ProcArrayLock conditionally; otherwise skip this candidate.
+				 */
+				if (w->statusFlags & PROC_IS_AUTOVACUUM)
+				{
+					uint8		statusFlags;
+
+					if (!LWLockConditionalAcquire(ProcArrayLock, LW_SHARED))
+						continue;
+
+					statusFlags = ProcGlobal->statusFlags[w->pgxactoff];
+					LWLockRelease(ProcArrayLock);
+
+					if (statusFlags & PROC_VACUUM_FOR_WRAPAROUND)
+						continue;
+				}
+
+				Assert(w->waitLock != NULL);
+				Assert(!dlist_node_is_detached(&w->waitLink));
+				victim = w;
+				break;
+			}
+
+			if (victim != NULL)
+			{
+				RemoveFromWaitQueue(victim,
+									LockTagHashCode(&(victim->waitLock->tag)),
+									PROC_WAIT_STATUS_PREEMPTED);
+				SetLatch(&victim->procLatch);
+				victims_canceled = true;
+				goto retry;
+			}
+		}
 
 		return DS_HARD_DEADLOCK;	/* cannot find a non-deadlocked state */
 	}
@@ -273,7 +351,9 @@ DeadLockCheck(PGPROC *proc)
 	}
 
 	/* Return code tells caller if we had to escape a deadlock or not */
-	if (nWaitOrders > 0)
+	if (victims_canceled)
+		return DS_PREEMPT_DEADLOCK;
+	else if (nWaitOrders > 0)
 		return DS_SOFT_DEADLOCK;
 	else if (blocking_autovacuum_proc != NULL)
 		return DS_BLOCKED_BY_AUTOVACUUM;
@@ -590,6 +670,7 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 						info->locktag = lock->tag;
 						info->lockmode = checkProc->waitLockMode;
 						info->pid = checkProc->pid;
+						deadlockProcs[depth] = checkProc;
 
 						return true;
 					}
@@ -679,6 +760,7 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 					info->locktag = lock->tag;
 					info->lockmode = checkProc->waitLockMode;
 					info->pid = checkProc->pid;
+					deadlockProcs[depth] = checkProc;
 
 					/*
 					 * Add this edge to the list of soft edges in the cycle
@@ -753,6 +835,7 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 					info->locktag = lock->tag;
 					info->lockmode = checkProc->waitLockMode;
 					info->pid = checkProc->pid;
+					deadlockProcs[depth] = checkProc;
 
 					/*
 					 * Add this edge to the list of soft edges in the cycle
@@ -1159,4 +1242,5 @@ RememberSimpleDeadLock(PGPROC *proc1,
 	info->lockmode = proc2->waitLockMode;
 	info->pid = proc2->pid;
 	nDeadlockDetails = 2;
+	deadlockProcs[0] = deadlockProcs[1] = NULL;
 }

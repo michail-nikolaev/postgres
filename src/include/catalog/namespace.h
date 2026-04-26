@@ -99,6 +99,13 @@ typedef void (*RangeVarGetRelidCallback) (const RangeVar *relation, Oid relId,
 	RangeVarGetRelidExtended(relation, lockmode, \
 							 (missing_ok) ? RVR_MISSING_OK : 0, NULL, NULL)
 
+extern Oid	RangeVarGetRelidWithUpgradeIntent(const RangeVar *relation,
+											  LOCKMODE lockmode,
+											  LOCKMODE upgradeMode,
+											  uint32 flags,
+											  RangeVarGetRelidCallback callback,
+											  void *callback_arg);
+
 extern Oid	RangeVarGetRelidExtended(const RangeVar *relation,
 									 LOCKMODE lockmode, uint32 flags,
 									 RangeVarGetRelidCallback callback,

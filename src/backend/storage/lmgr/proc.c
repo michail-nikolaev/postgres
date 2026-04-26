@@ -854,7 +854,8 @@ LockErrorCleanup(void)
 	if (!dlist_node_is_detached(&MyProc->waitLink))
 	{
 		/* We could not have been granted the lock yet */
-		RemoveFromWaitQueue(MyProc, lockAwaited->hashcode);
+		RemoveFromWaitQueue(MyProc, lockAwaited->hashcode,
+							PROC_WAIT_STATUS_ERROR);
 	}
 	else
 	{
@@ -1135,10 +1136,11 @@ AuxiliaryPidGetProc(int pid)
  *
  * Result is one of the following:
  *
- *  PROC_WAIT_STATUS_OK       - lock was immediately granted
- *  PROC_WAIT_STATUS_WAITING  - joined the wait queue; call ProcSleep()
- *  PROC_WAIT_STATUS_ERROR    - immediate deadlock was detected, or would
- *                              need to wait and dontWait == true
+ *  PROC_WAIT_STATUS_OK         - lock immediately granted
+ *  PROC_WAIT_STATUS_WAITING    - joined the wait queue; call ProcSleep()
+ *  PROC_WAIT_STATUS_ERROR      - immediate deadlock or dontWait failure
+ *  PROC_WAIT_STATUS_PREEMPTED  - cycle proven against an announced upgrade;
+ *                                caller must raise a deadlock error
  *
  * NOTES: The process queue is now a priority queue for locking.
  */
@@ -1239,9 +1241,15 @@ JoinWaitQueue(LOCALLOCK *locallock, LockMethod lockMethodTable, bool dontWait)
 					 * can't do that until we are *on* the wait queue. So, set
 					 * a flag to check below, and break out of loop.  Also,
 					 * record deadlock info for later message.
+					 *
+					 * If this wait is our announced upgrade, skip the early
+					 * exit so the full detector can preempt a blocker.
 					 */
-					RememberSimpleDeadLock(MyProc, lockmode, lock, proc);
-					early_deadlock = true;
+					if (proclock->upgradeIntent != lockmode)
+					{
+						RememberSimpleDeadLock(MyProc, lockmode, lock, proc);
+						early_deadlock = true;
+					}
 					break;
 				}
 				/* I must go before this waiter.  Check special case. */
@@ -1269,6 +1277,75 @@ JoinWaitQueue(LOCALLOCK *locallock, LockMethod lockMethodTable, bool dontWait)
 	 */
 	if (early_deadlock)
 		return PROC_WAIT_STATUS_ERROR;
+
+	/*
+	 * Fast-fail: if some holder's announced upgrade conflicts with a mode we
+	 * already hold, and its current holdMask conflicts with our request, a
+	 * future cycle is inevitable.  Don't wait deadlock_timeout for the same
+	 * conclusion.  Skipped when we are the announced upgrader, when we hold
+	 * nothing here, or when no holder has any announcement.
+	 *
+	 * This is only a fast-fail check for cycles already visible in the main
+	 * lock table.  Fast-path locks can hide edges.  For example, while waiting
+	 * for ShareUpdateExclusiveLock, this backend may still hold weaker fast-path
+	 * locks on the same relation, since ShareUpdateExclusiveLock does not itself
+	 * force fast-path transfer.  Such an edge becomes visible only later, e.g.
+	 * when another backend's AccessExclusiveLock upgrade transfers fast-path
+	 * locks.  The full deadlock detector handles that case.
+	 *
+	 * We could cheaply include modes this backend holds locally, via
+	 * LockMethodLocalHash.  That catches the direct case where this backend holds
+	 * a weak fast-path lock and waits behind an announced stronger upgrade, but
+	 * it cannot see hidden fast-path edges owned by third backends in longer
+	 * cycles.
+	 *
+	 * Making upgrade intent visible to the fast-path mechanism would catch more
+	 * cases, e.g. by treating upgradeIntent as conflicting for
+	 * ConflictsWithRelationFastPath() and keeping FastPathStrongRelationLocks
+	 * bumped until the upgrade is consumed.  However, that would pessimize the
+	 * whole concurrent operation: ordinary weak relation locks would stop using
+	 * the fast path and contend in the main lock table.
+	 *
+	 * Transferring fast-path locks from DeadLockCheck() only when needed would
+	 * avoid that penalty, but is lock-ordering-sensitive: DeadLockCheck() already
+	 * holds all lock partition LWLocks, while fast-path transfer needs
+	 * fpInfoLocks and may acquire partition LWLocks in the normal order.  A safe
+	 * design would need probe/retry logic, making it worthwhile only if hidden
+	 * longer fast-path cycles must be preempted early.
+	 */
+	if (proclock->upgradeIntent != lockmode && myHeldLocks != 0 &&
+		lock->nUpgradeIntent > 0)
+	{
+		dlist_iter	iter;
+
+		dlist_foreach(iter, &lock->procLocks)
+		{
+			PROCLOCK   *holder = dlist_container(PROCLOCK, lockLink, iter.cur);
+
+			if (holder->upgradeIntent == NoLock)
+				continue;
+
+			/* Skip self (we're in lock->procLocks too). */
+			if (holder == proclock)
+				continue;
+
+			/* Same lock group: not a cycle. */
+			if (leader != NULL && holder->groupLeader == leader)
+				continue;
+
+			/* Must the holder later wait for me? */
+			if ((lockMethodTable->conflictTab[holder->upgradeIntent] &
+				 myHeldLocks) == 0)
+				continue;
+
+			/* Must I wait for the holder now? */
+			if ((lockMethodTable->conflictTab[lockmode] &
+				 holder->holdMask) == 0)
+				continue;
+
+			return PROC_WAIT_STATUS_PREEMPTED;
+		}
+	}
 
 	/*
 	 * At this point we know that we'd really need to sleep. If we've been
@@ -1308,8 +1385,10 @@ JoinWaitQueue(LOCALLOCK *locallock, LockMethod lockMethodTable, bool dontWait)
  *
  * Result is one of the following:
  *
- *  PROC_WAIT_STATUS_OK      - lock was granted
- *  PROC_WAIT_STATUS_ERROR   - a deadlock was detected
+ *  PROC_WAIT_STATUS_OK         - lock granted
+ *  PROC_WAIT_STATUS_ERROR      - deadlock detected
+ *  PROC_WAIT_STATUS_PREEMPTED  - canceled by another backend's DeadLockCheck
+ *                                to break a protected-upgrade cycle
  */
 ProcWaitStatus
 ProcSleep(LOCALLOCK *locallock)
@@ -1562,16 +1641,19 @@ ProcSleep(LOCALLOCK *locallock)
 
 		/*
 		 * If awoken after the deadlock check interrupt has run, increment the
-		 * lock statistics counters and if log_lock_waits is on, then report
-		 * about the wait.
+		 * lock statistics counters and, if log_lock_waits is on, report about
+		 * the wait. Also report a wait that another backend preempted before
+		 * our own deadlock timeout fired.
 		 */
-		if (deadlock_state != DS_NOT_YET_CHECKED)
+		if (deadlock_state != DS_NOT_YET_CHECKED ||
+			(myWaitStatus == PROC_WAIT_STATUS_PREEMPTED && log_lock_waits))
 		{
 			long		secs;
 			int			usecs;
 			long		msecs;
 
-			INJECTION_POINT("deadlock-timeout-fired", NULL);
+			if (deadlock_state != DS_NOT_YET_CHECKED)
+				INJECTION_POINT("deadlock-timeout-fired", NULL);
 			TimestampDifference(get_timeout_start_time(DEADLOCK_TIMEOUT),
 								GetCurrentTimestamp(),
 								&secs, &usecs);
@@ -1607,6 +1689,13 @@ ProcSleep(LOCALLOCK *locallock)
 				if (deadlock_state == DS_SOFT_DEADLOCK)
 					ereport(LOG,
 							(errmsg("process %d avoided deadlock for %s on %s by rearranging queue order after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs),
+							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+												   "Processes holding the lock: %s. Wait queue: %s.",
+												   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				else if (deadlock_state == DS_PREEMPT_DEADLOCK)
+					ereport(LOG,
+							(errmsg("process %d avoided deadlock for %s on %s by canceling a blocking lock wait after %ld.%03d ms",
 									MyProcPid, modename, buf.data, msecs, usecs),
 							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
 												   "Processes holding the lock: %s. Wait queue: %s.",
@@ -1659,16 +1748,13 @@ ProcSleep(LOCALLOCK *locallock)
 									MyProcPid, modename, buf.data, msecs, usecs)));
 				else
 				{
-					Assert(myWaitStatus == PROC_WAIT_STATUS_ERROR);
+					Assert(myWaitStatus == PROC_WAIT_STATUS_ERROR ||
+						   myWaitStatus == PROC_WAIT_STATUS_PREEMPTED);
 
 					/*
-					 * Currently, the deadlock checker always kicks its own
-					 * process, which means that we'll only see
-					 * PROC_WAIT_STATUS_ERROR when deadlock_state ==
-					 * DS_HARD_DEADLOCK, and there's no need to print
-					 * redundant messages.  But for completeness and
-					 * future-proofing, print a message if it looks like
-					 * someone else kicked us off the lock.
+					 * Self-detected hard deadlocks log via DeadLockReport;
+					 * skip the redundant LOG.  Otherwise (e.g. preempted),
+					 * emit it here.
 					 */
 					if (deadlock_state != DS_HARD_DEADLOCK)
 						ereport(LOG,
@@ -1870,14 +1956,16 @@ CheckDeadLock(void)
 		 * Get this process out of wait state. (Note: we could do this more
 		 * efficiently by relying on lockAwaited, but use this coding to
 		 * preserve the flexibility to kill some other transaction than the
-		 * one detecting the deadlock.)
+		 * one detecting the deadlock.  DS_PREEMPT_DEADLOCK exercises that
+		 * already.)
 		 *
 		 * RemoveFromWaitQueue sets MyProc->waitStatus to
 		 * PROC_WAIT_STATUS_ERROR, so ProcSleep will report an error after we
 		 * return.
 		 */
 		Assert(MyProc->waitLock != NULL);
-		RemoveFromWaitQueue(MyProc, LockTagHashCode(&(MyProc->waitLock->tag)));
+		RemoveFromWaitQueue(MyProc, LockTagHashCode(&(MyProc->waitLock->tag)),
+							PROC_WAIT_STATUS_ERROR);
 
 		/*
 		 * We're done here.  Transaction abort caused by the error that

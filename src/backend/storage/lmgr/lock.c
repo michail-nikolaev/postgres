@@ -59,6 +59,9 @@ bool		log_lock_failures = false;
 #define NLOCKENTS() \
 	mul_size(max_locks_per_xact, add_size(MaxBackends, max_prepared_xacts))
 
+#define LOCKMODE_SELF_CONFLICTS(conflictTab, lockmode) \
+	(((conflictTab)[(lockmode)] & LOCKBIT_ON(lockmode)) != 0)
+
 
 /*
  * Data structures defining the semantics of the standard lock methods.
@@ -384,7 +387,7 @@ LOCK_PRINT(const char *where, const LOCK *lock, LOCKMODE type)
 		elog(LOG,
 			 "%s: lock(%p) id(%u,%u,%u,%u,%u,%u) grantMask(%x) "
 			 "req(%d,%d,%d,%d,%d,%d,%d)=%d "
-			 "grant(%d,%d,%d,%d,%d,%d,%d)=%d wait(%d) type(%s)",
+			 "grant(%d,%d,%d,%d,%d,%d,%d)=%d wait(%d) upgradeIntent(%d) type(%s)",
 			 where, lock,
 			 lock->tag.locktag_field1, lock->tag.locktag_field2,
 			 lock->tag.locktag_field3, lock->tag.locktag_field4,
@@ -397,6 +400,7 @@ LOCK_PRINT(const char *where, const LOCK *lock, LOCKMODE type)
 			 lock->granted[4], lock->granted[5], lock->granted[6],
 			 lock->granted[7], lock->nGranted,
 			 dclist_count(&lock->waitProcs),
+			 lock->nUpgradeIntent,
 			 LockMethods[LOCK_LOCKMETHOD(*lock)]->lockModeNames[type]);
 }
 
@@ -406,10 +410,11 @@ PROCLOCK_PRINT(const char *where, const PROCLOCK *proclockP)
 {
 	if (LOCK_DEBUG_ENABLED(&proclockP->tag.myLock->tag))
 		elog(LOG,
-			 "%s: proclock(%p) lock(%p) method(%u) proc(%p) hold(%x)",
+			 "%s: proclock(%p) lock(%p) method(%u) proc(%p) hold(%x) upgradeIntent(%d)",
 			 where, proclockP, proclockP->tag.myLock,
 			 PROCLOCK_LOCKMETHOD(*(proclockP)),
-			 proclockP->tag.myProc, (int) proclockP->holdMask);
+			 proclockP->tag.myProc, (int) proclockP->holdMask,
+			 proclockP->upgradeIntent);
 }
 #else							/* not LOCK_DEBUG */
 
@@ -427,6 +432,7 @@ static void BeginStrongLockAcquire(LOCALLOCK *locallock, uint32 fasthashcode);
 static void FinishStrongLockAcquire(void);
 static ProcWaitStatus WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner);
 static void waitonlock_error_callback(void *arg);
+pg_noreturn static void ReportPreemptDeadlock(LOCALLOCK *locallock);
 static void ReleaseLockIfHeld(LOCALLOCK *locallock, bool sessionLock);
 static void LockReassignOwner(LOCALLOCK *locallock, ResourceOwner parent);
 static bool UnGrantLock(LOCK *lock, LOCKMODE lockmode,
@@ -808,12 +814,16 @@ LockAcquire(const LOCKTAG *locktag,
 			bool sessionLock,
 			bool dontWait)
 {
-	return LockAcquireExtended(locktag, lockmode, sessionLock, dontWait,
-							   true, NULL, false);
+	return LockAcquireExtended(locktag, lockmode, NoLock, sessionLock,
+							   dontWait, true, NULL, false);
 }
 
 /*
  * LockAcquireExtended - allows us to specify additional options
+ *
+ * upgradeIntent is NoLock or a stronger mode the caller will try to acquire
+ * later; when set, it is installed on the PROCLOCK atomically with the grant.
+ * See README "Protected Lock Upgrades".
  *
  * reportMemoryError specifies whether a lock request that fills the lock
  * table should generate an ERROR or not.  Passing "false" allows the caller
@@ -832,6 +842,7 @@ LockAcquire(const LOCKTAG *locktag,
 LockAcquireResult
 LockAcquireExtended(const LOCKTAG *locktag,
 					LOCKMODE lockmode,
+					LOCKMODE upgradeIntent,
 					bool sessionLock,
 					bool dontWait,
 					bool reportMemoryError,
@@ -851,12 +862,23 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	bool		found_conflict;
 	ProcWaitStatus waitResult;
 	bool		log_lock = false;
+	bool		upgradeIntentSet = false;
 
 	if (lockmethodid <= 0 || lockmethodid >= lengthof(LockMethods))
 		elog(ERROR, "unrecognized lock method: %d", lockmethodid);
 	lockMethodTable = LockMethods[lockmethodid];
 	if (lockmode <= 0 || lockmode > lockMethodTable->numLockModes)
 		elog(ERROR, "unrecognized lock mode: %d", lockmode);
+
+	/*
+	 * Announcement requires a self-conflicting non-fast-path lockmode (the
+	 * fast path can't carry one) and a strictly stronger target.
+	 */
+	Assert(upgradeIntent == NoLock ||
+		   (!EligibleForRelationFastPath(locktag, lockmode) &&
+			LOCKMODE_SELF_CONFLICTS(lockMethodTable->conflictTab, lockmode) &&
+			upgradeIntent > lockmode &&
+			upgradeIntent <= lockMethodTable->numLockModes));
 
 	if (RecoveryInProgress() && !InRecovery &&
 		(locktag->locktag_type == LOCKTAG_OBJECT ||
@@ -933,9 +955,13 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	 *
 	 * If lockCleared is already set, caller need not worry about absorbing
 	 * sinval messages related to the lock's object.
+	 *
+	 * Upgrade intent must be installed at the first grant, not on re-entry.
 	 */
 	if (locallock->nLocks > 0)
 	{
+		Assert(upgradeIntent == NoLock);
+
 		GrantLockLocal(locallock, owner);
 		if (locallock->lockCleared)
 			return LOCKACQUIRE_ALREADY_CLEAR;
@@ -1094,6 +1120,19 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	lock = proclock->tag.myLock;
 	locallock->lock = lock;
 
+	if (upgradeIntent != NoLock)
+	{
+		/* It is not allowed to change upgradeIntent mode */
+		Assert(proclock->upgradeIntent == NoLock ||
+			   proclock->upgradeIntent == upgradeIntent);
+		upgradeIntentSet = (proclock->upgradeIntent == NoLock);
+		if (upgradeIntentSet)
+		{
+			proclock->upgradeIntent = upgradeIntent;
+			lock->nUpgradeIntent++;
+		}
+	}
+
 	/*
 	 * If lock requested conflicts with locks requested by waiters, must join
 	 * wait queue.  Otherwise, check for conflict with already-held locks.
@@ -1121,17 +1160,25 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		waitResult = JoinWaitQueue(locallock, lockMethodTable, dontWait);
 	}
 
-	if (waitResult == PROC_WAIT_STATUS_ERROR)
+	if (waitResult == PROC_WAIT_STATUS_ERROR ||
+		waitResult == PROC_WAIT_STATUS_PREEMPTED)
 	{
 		/*
-		 * We're not getting the lock because a deadlock was detected already
-		 * while trying to join the wait queue, or because we would have to
-		 * wait but the caller requested no blocking.
-		 *
+		 * Not getting the lock: deadlock detected while joining the queue,
+		 * preempted by another backend's protected upgrade, or dontWait.
 		 * Undo the changes to shared entries before releasing the partition
 		 * lock.
 		 */
 		AbortStrongLockAcquire();
+
+		/* If we just installed upgrade intent but never got the lock, undo it. */
+		if (upgradeIntentSet &&
+			(proclock->holdMask & LOCKBIT_ON(lockmode)) == 0)
+		{
+			proclock->upgradeIntent = NoLock;
+			Assert(lock->nUpgradeIntent > 0);
+			lock->nUpgradeIntent--;
+		}
 
 		if (proclock->holdMask == 0)
 		{
@@ -1208,6 +1255,8 @@ LockAcquireExtended(const LOCKTAG *locktag,
 				*locallockp = NULL;
 			return LOCKACQUIRE_NOT_AVAIL;
 		}
+		else if (waitResult == PROC_WAIT_STATUS_PREEMPTED)
+			ReportPreemptDeadlock(locallock);
 		else
 		{
 			DeadLockReport();
@@ -1236,13 +1285,14 @@ LockAcquireExtended(const LOCKTAG *locktag,
 
 		if (waitResult == PROC_WAIT_STATUS_ERROR)
 		{
-			/*
-			 * We failed as a result of a deadlock, see CheckDeadLock(). Quit
-			 * now.
-			 */
 			Assert(!dontWait);
 			DeadLockReport();
 			/* DeadLockReport() will not return */
+		}
+		else if (waitResult == PROC_WAIT_STATUS_PREEMPTED)
+		{
+			Assert(!dontWait);
+			ReportPreemptDeadlock(locallock);
 		}
 	}
 	else
@@ -1319,6 +1369,7 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 		dclist_init(&lock->waitProcs);
 		lock->nRequested = 0;
 		lock->nGranted = 0;
+		lock->nUpgradeIntent = 0;
 		MemSet(lock->requested, 0, sizeof(int) * MAX_LOCKMODES);
 		MemSet(lock->granted, 0, sizeof(int) * MAX_LOCKMODES);
 		LOCK_PRINT("LockAcquire: new", lock, lockmode);
@@ -1390,6 +1441,7 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 			proc->lockGroupLeader : proc;
 		proclock->holdMask = 0;
 		proclock->releaseMask = 0;
+		proclock->upgradeIntent = NoLock;
 		/* Add proclock to appropriate lists */
 		dlist_push_tail(&lock->procLocks, &proclock->lockLink);
 		dlist_push_tail(&proc->myProcLocks[partition], &proclock->procLink);
@@ -1413,9 +1465,13 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 		 * about user-level coding practices that are in fact safe in context.
 		 * It can be enabled to help find system-level problems.
 		 *
+		 * Skip for an announced upgrade: the detector handles those cycles
+		 * by canceling a blocker.
+		 *
 		 * XXX Doing numeric comparison on the lockmodes is a hack; it'd be
 		 * better to use a table.  For now, though, this works.
 		 */
+		if (proclock->upgradeIntent != lockmode)
 		{
 			int			i;
 
@@ -1671,6 +1727,19 @@ GrantLock(LOCK *lock, PROCLOCK *proclock, LOCKMODE lockmode)
 	if (lock->granted[lockmode] == lock->requested[lockmode])
 		lock->waitMask &= LOCKBIT_OFF(lockmode);
 	proclock->holdMask |= LOCKBIT_ON(lockmode);
+
+	/* The announced target was just granted; clear the announcement. */
+	if (proclock->upgradeIntent != NoLock)
+	{
+		Assert(proclock->upgradeIntent >= lockmode);
+		if (proclock->upgradeIntent == lockmode)
+		{
+			proclock->upgradeIntent = NoLock;
+			Assert(lock->nUpgradeIntent > 0);
+			lock->nUpgradeIntent--;
+		}
+	}
+
 	LOCK_PRINT("GrantLock", lock, lockmode);
 	Assert((lock->nGranted > 0) && (lock->granted[lockmode] > 0));
 	Assert(lock->nGranted <= lock->nRequested);
@@ -1727,6 +1796,16 @@ UnGrantLock(LOCK *lock, LOCKMODE lockmode,
 	 * Now fix the per-proclock state.
 	 */
 	proclock->holdMask &= LOCKBIT_OFF(lockmode);
+
+	/* Releasing the last held mode also retires any pending announcement. */
+	if (proclock->upgradeIntent != NoLock &&
+		proclock->holdMask == 0)
+	{
+		proclock->upgradeIntent = NoLock;
+		Assert(lock->nUpgradeIntent > 0);
+		lock->nUpgradeIntent--;
+	}
+
 	PROCLOCK_PRINT("UnGrantLock: updated", proclock);
 
 	return wakeupNeeded;
@@ -1881,6 +1960,29 @@ AbortStrongLockAcquire(void)
 	locallock->holdsStrongLockCount = false;
 	StrongLockInProgress = NULL;
 	SpinLockRelease(&FastPathStrongRelationLocks->mutex);
+}
+
+/*
+ * ereport a deadlock for a protected-upgrade preemption.  Use log_lock_waits
+ * for the cycle details from the protected backend's side.
+ */
+pg_noreturn static void
+ReportPreemptDeadlock(LOCALLOCK *locallock)
+{
+	StringInfoData buf;
+	const char *modename;
+
+	initStringInfo(&buf);
+	DescribeLockTag(&buf, &locallock->tag.lock);
+	modename = GetLockmodeName(locallock->tag.lock.locktag_lockmethodid,
+							   locallock->tag.mode);
+
+	pgstat_report_deadlock();
+	ereport(ERROR,
+			(errcode(ERRCODE_T_R_DEADLOCK_DETECTED),
+			 errmsg("deadlock detected"),
+			 errdetail("Process %d could not acquire %s on %s because another backend holds a conflicting lock and has announced a future upgrade that would form a deadlock cycle.",
+					   MyProcPid, modename, buf.data)));
 }
 
 /*
@@ -2042,8 +2144,10 @@ waitonlock_error_callback(void *arg)
 
 /*
  * Remove a proc from the wait-queue it is on (caller must know it is on one).
- * This is only used when the proc has failed to get the lock, so we set its
- * waitStatus to PROC_WAIT_STATUS_ERROR.
+ * Used when the proc has failed to get the lock; the caller passes the
+ * waitStatus to publish (PROC_WAIT_STATUS_ERROR for ordinary failure or
+ * PROC_WAIT_STATUS_PREEMPTED when the wait was canceled to break a cycle
+ * with a protected upgrade).
  *
  * Appropriate partition lock must be held by caller.  Also, caller is
  * responsible for signaling the proc if needed.
@@ -2051,7 +2155,7 @@ waitonlock_error_callback(void *arg)
  * NB: this does not clean up any locallock object that may exist for the lock.
  */
 void
-RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode)
+RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode, ProcWaitStatus newStatus)
 {
 	LOCK	   *waitLock = proc->waitLock;
 	PROCLOCK   *proclock = proc->waitProcLock;
@@ -2060,6 +2164,8 @@ RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode)
 
 	/* Make sure proc is waiting */
 	Assert(proc->waitStatus == PROC_WAIT_STATUS_WAITING);
+	Assert(newStatus == PROC_WAIT_STATUS_ERROR ||
+		   newStatus == PROC_WAIT_STATUS_PREEMPTED);
 	Assert(!dlist_node_is_detached(&proc->waitLink));
 	Assert(waitLock);
 	Assert(!dclist_is_empty(&waitLock->waitProcs));
@@ -2078,10 +2184,18 @@ RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode)
 	if (waitLock->granted[lockmode] == waitLock->requested[lockmode])
 		waitLock->waitMask &= LOCKBIT_OFF(lockmode);
 
+	/* Wait canceled => the announcement (if any) no longer applies. */
+	if (proclock->upgradeIntent != NoLock)
+	{
+		proclock->upgradeIntent = NoLock;
+		Assert(waitLock->nUpgradeIntent > 0);
+		waitLock->nUpgradeIntent--;
+	}
+
 	/* Clean up the proc's own state, and pass it the ok/fail signal */
 	proc->waitLock = NULL;
 	proc->waitProcLock = NULL;
-	proc->waitStatus = PROC_WAIT_STATUS_ERROR;
+	proc->waitStatus = newStatus;
 
 	/*
 	 * Delete the proclock immediately if it represents no already-held locks.
@@ -3697,6 +3811,8 @@ PostPrepare_Locks(FullTransactionId fxid)
 			Assert(lock->nGranted >= 0);
 			Assert(lock->nGranted <= lock->nRequested);
 			Assert((proclock->holdMask & ~lock->grantMask) == 0);
+			/* upgradeIntent is not supported for PREPARE TRANSACTION. */
+			Assert(proclock->upgradeIntent == NoLock);
 
 			/* Ignore it if nothing to release (must be a session lock) */
 			if (proclock->releaseMask == 0)
@@ -4397,6 +4513,7 @@ lock_twophase_recover(FullTransactionId fxid, uint16 info,
 		dclist_init(&lock->waitProcs);
 		lock->nRequested = 0;
 		lock->nGranted = 0;
+		lock->nUpgradeIntent = 0;
 		MemSet(lock->requested, 0, sizeof(int) * MAX_LOCKMODES);
 		MemSet(lock->granted, 0, sizeof(int) * MAX_LOCKMODES);
 		LOCK_PRINT("lock_twophase_recover: new", lock, lockmode);
@@ -4460,6 +4577,7 @@ lock_twophase_recover(FullTransactionId fxid, uint16 info,
 		proclock->groupLeader = proc;
 		proclock->holdMask = 0;
 		proclock->releaseMask = 0;
+		proclock->upgradeIntent = NoLock;
 		/* Add proclock to appropriate lists */
 		dlist_push_tail(&lock->procLocks, &proclock->lockLink);
 		dlist_push_tail(&proc->myProcLocks[partition],

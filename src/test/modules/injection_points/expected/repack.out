@@ -1,4 +1,4 @@
-Parsed test spec with 2 sessions
+Parsed test spec with 4 sessions
 
 starting permutation: wait_before_lock change_existing change_new change_subxact1 change_subxact2 check2 wakeup_before_lock check1
 injection_points_attach
@@ -105,6 +105,185 @@ count
 -----
     0
 (1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: wait_before_lock begin_txn lock_table_ae s3_wakeup end_txn
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step wait_before_lock: 
+	REPACK (CONCURRENTLY) repack_test USING INDEX repack_test_pkey;
+ <waiting ...>
+step begin_txn: 
+	BEGIN;
+
+step lock_table_ae: 
+	LOCK TABLE repack_test IN ACCESS EXCLUSIVE MODE;
+ <waiting ...>
+step s3_wakeup: 
+	SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wait_before_lock: <... completed>
+step lock_table_ae: <... completed>
+step end_txn: 
+	COMMIT;
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: s2_timeout_fast wait_before_lock begin_and_read lock_table_ae s3_wakeup end_txn
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s2_timeout_fast: 
+	SET deadlock_timeout = '10ms';
+
+step wait_before_lock: 
+	REPACK (CONCURRENTLY) repack_test USING INDEX repack_test_pkey;
+ <waiting ...>
+step begin_and_read: 
+	BEGIN;
+	SELECT 1 FROM repack_test LIMIT 1;
+
+?column?
+--------
+       1
+(1 row)
+
+step lock_table_ae: 
+	LOCK TABLE repack_test IN ACCESS EXCLUSIVE MODE;
+ <waiting ...>
+step s3_wakeup: 
+	SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wait_before_lock: <... completed>
+step lock_table_ae: <... completed>
+ERROR:  deadlock detected
+step end_txn: 
+	COMMIT;
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: s2_timeout_fast wait_before_lock begin_and_read lock_table_sue s3_wakeup end_txn
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s2_timeout_fast: 
+	SET deadlock_timeout = '10ms';
+
+step wait_before_lock: 
+	REPACK (CONCURRENTLY) repack_test USING INDEX repack_test_pkey;
+ <waiting ...>
+step begin_and_read: 
+	BEGIN;
+	SELECT 1 FROM repack_test LIMIT 1;
+
+?column?
+--------
+       1
+(1 row)
+
+step lock_table_sue: 
+	LOCK TABLE repack_test IN SHARE UPDATE EXCLUSIVE MODE;
+ <waiting ...>
+step s3_wakeup: 
+	SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step lock_table_sue: <... completed>
+ERROR:  deadlock detected
+step wait_before_lock: <... completed>
+step end_txn: 
+	COMMIT;
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: s2_timeout_fast wait_before_lock begin_and_read s3_begin_txn s3_lock_table_y_sue s3_lock_table_sue lock_table_y_sue s4_wakeup end_txn s3_end_txn
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s2_timeout_fast: 
+	SET deadlock_timeout = '10ms';
+
+step wait_before_lock: 
+	REPACK (CONCURRENTLY) repack_test USING INDEX repack_test_pkey;
+ <waiting ...>
+step begin_and_read: 
+	BEGIN;
+	SELECT 1 FROM repack_test LIMIT 1;
+
+?column?
+--------
+       1
+(1 row)
+
+step s3_begin_txn: 
+	BEGIN;
+
+step s3_lock_table_y_sue: 
+	LOCK TABLE repack_test_y IN SHARE UPDATE EXCLUSIVE MODE;
+
+step s3_lock_table_sue: 
+	LOCK TABLE repack_test IN SHARE UPDATE EXCLUSIVE MODE;
+ <waiting ...>
+step lock_table_y_sue: 
+	LOCK TABLE repack_test_y IN SHARE UPDATE EXCLUSIVE MODE;
+ <waiting ...>
+step s4_wakeup: 
+	SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step lock_table_y_sue: <... completed>
+step s3_lock_table_sue: <... completed>
+ERROR:  deadlock detected
+step end_txn: 
+	COMMIT;
+
+step wait_before_lock: <... completed>
+step s3_end_txn: 
+	COMMIT;
 
 injection_points_detach
 -----------------------

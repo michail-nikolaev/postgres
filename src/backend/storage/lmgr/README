@@ -586,6 +586,32 @@ The caller can then send a cancellation signal.  This implements the
 principle that autovacuum has a low locking priority (eg it must not block
 DDL on the table).
 
+Protected Lock Upgrades
+-----------------------
+
+A backend can announce at initial-lock acquisition that it intends to upgrade
+to a stronger mode later (PROCLOCK->upgradeIntent), installed atomically with
+the grant via LockAcquireExtended.  REPACK CONCURRENTLY uses this so that a
+deadlock on its final SUEL->AEL swap cancels a blocker rather than throwing
+away the copy/rebuild phase.
+
+When a cycle involving the protected backend is detected, a blocking waiter is
+canceled instead of the protected backend.  This can happen either in
+JoinWaitQueue's fast-fail check or in the full DeadLockCheck() during the
+announced upgrade wait.  The fast-fail check is only a cheap early test for
+cycles already visible in the main lock table. It does not force transfer of
+unrelated fast-path relation locks, so it may miss cycles whose edges are still
+hidden in backend-local fast-path state. Such cycles become visible later when a
+conflicting strong lock request transfers the relevant fast-path locks.
+The full deadlock detector handles that case.
+
+Other protected upgraders and anti-wraparound autovacuums are skipped as
+victims. If no acceptable victim exists, the protected backend is canceled as
+usual.
+
+The victim observes preemption via PROC_WAIT_STATUS_PREEMPTED on its
+waitStatus, which LockAcquireExtended turns into a deadlock ereport.
+
 Group Locking
 -------------
 

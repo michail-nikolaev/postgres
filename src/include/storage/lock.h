@@ -131,6 +131,7 @@ typedef const LockMethodData *LockMethod;
  * nRequested -- total requested locks of all types.
  * granted -- count of each lock type currently granted on the lock.
  * nGranted -- total granted locks of all types.
+ * nUpgradeIntent -- # of proclocks here with upgradeIntent set.
  *
  * Note: these counts count 1 for each backend.  Internally to a backend,
  * there may be multiple grabs on a particular lock, but this is not reflected
@@ -150,6 +151,7 @@ typedef struct LOCK
 	int			nRequested;		/* total of requested[] array */
 	int			granted[MAX_LOCKMODES]; /* counts of granted locks */
 	int			nGranted;		/* total of granted[] array */
+	int			nUpgradeIntent; /* see LOCK comment above */
 } LOCK;
 
 #define LOCK_LOCKMETHOD(lock) ((LOCKMETHODID) (lock).tag.locktag_lockmethodid)
@@ -206,6 +208,7 @@ typedef struct PROCLOCK
 	PGPROC	   *groupLeader;	/* proc's lock group leader, or proc itself */
 	LOCKMASK	holdMask;		/* bitmask for lock types currently held */
 	LOCKMASK	releaseMask;	/* bitmask for lock types to be released */
+	LOCKMODE	upgradeIntent;	/* announced future upgrade target, or NoLock */
 	dlist_node	lockLink;		/* list link in LOCK's list of proclocks */
 	dlist_node	procLink;		/* list link in PGPROC's list of proclocks */
 } PROCLOCK;
@@ -342,9 +345,21 @@ typedef enum
 	DS_NO_DEADLOCK,				/* no deadlock detected */
 	DS_SOFT_DEADLOCK,			/* deadlock avoided by queue rearrangement */
 	DS_HARD_DEADLOCK,			/* deadlock, no way out but ERROR */
+	DS_PREEMPT_DEADLOCK,		/* resolved by canceling a blocking waiter */
 	DS_BLOCKED_BY_AUTOVACUUM,	/* no deadlock; queue blocked by autovacuum
 								 * worker */
 } DeadLockState;
+
+/*
+ * Lock-wait status set by RemoveFromWaitQueue and read by the waiter on wakeup
+ */
+typedef enum
+{
+	PROC_WAIT_STATUS_OK,
+	PROC_WAIT_STATUS_WAITING,
+	PROC_WAIT_STATUS_ERROR,
+	PROC_WAIT_STATUS_PREEMPTED,
+} ProcWaitStatus;
 
 /*
  * The lockmgr's shared hash tables are partitioned to reduce contention.
@@ -386,6 +401,7 @@ extern LockAcquireResult LockAcquire(const LOCKTAG *locktag,
 									 bool dontWait);
 extern LockAcquireResult LockAcquireExtended(const LOCKTAG *locktag,
 											 LOCKMODE lockmode,
+											 LOCKMODE upgradeIntent,
 											 bool sessionLock,
 											 bool dontWait,
 											 bool reportMemoryError,
@@ -418,7 +434,8 @@ extern void GrantAwaitedLock(void);
 extern LOCALLOCK *GetAwaitedLock(void);
 extern void ResetAwaitedLock(void);
 
-extern void RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode);
+extern void RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode,
+								ProcWaitStatus newStatus);
 extern LockData *GetLockStatusData(void);
 extern BlockedProcsData *GetBlockerStatusData(int blocked_pid);
 

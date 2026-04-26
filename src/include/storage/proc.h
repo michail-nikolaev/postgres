@@ -146,13 +146,6 @@ extern PGDLLIMPORT int FastPathLockGroupsPerBackend;
 #define DELAY_CHKPT_COMPLETE	(1<<1)
 #define DELAY_CHKPT_IN_COMMIT	(DELAY_CHKPT_START | 1<<2)
 
-typedef enum
-{
-	PROC_WAIT_STATUS_OK,
-	PROC_WAIT_STATUS_WAITING,
-	PROC_WAIT_STATUS_ERROR,
-} ProcWaitStatus;
-
 /*
  * Each backend has a PGPROC struct in shared memory.  There is also a list of
  * currently-unused PGPROC structs that will be reallocated to new backends.

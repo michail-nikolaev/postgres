@@ -106,14 +106,27 @@ SetLocktagRelationOid(LOCKTAG *tag, Oid relid)
 void
 LockRelationOid(Oid relid, LOCKMODE lockmode)
 {
+	LockRelationOidWithUpgradeIntent(relid, lockmode, NoLock);
+}
+
+/*
+ *		LockRelationOidWithUpgradeIntent
+ *
+ * Lock and atomically announce a future upgrade to `upgradeMode`.  See
+ * LockAcquireExtended for semantics.
+ */
+void
+LockRelationOidWithUpgradeIntent(Oid relid, LOCKMODE lockmode,
+								 LOCKMODE upgradeMode)
+{
 	LOCKTAG		tag;
 	LOCALLOCK  *locallock;
 	LockAcquireResult res;
 
 	SetLocktagRelationOid(&tag, relid);
 
-	res = LockAcquireExtended(&tag, lockmode, false, false, true, &locallock,
-							  false);
+	res = LockAcquireExtended(&tag, lockmode, upgradeMode, false, false, true,
+							  &locallock, false);
 
 	/*
 	 * Now that we have the lock, check for invalidation messages, so that we
@@ -156,8 +169,8 @@ ConditionalLockRelationOid(Oid relid, LOCKMODE lockmode)
 
 	SetLocktagRelationOid(&tag, relid);
 
-	res = LockAcquireExtended(&tag, lockmode, false, true, true, &locallock,
-							  false);
+	res = LockAcquireExtended(&tag, lockmode, NoLock, false, true, true,
+							  &locallock, false);
 
 	if (res == LOCKACQUIRE_NOT_AVAIL)
 		return false;
@@ -190,8 +203,8 @@ LockRelationId(LockRelId *relid, LOCKMODE lockmode)
 
 	SET_LOCKTAG_RELATION(tag, relid->dbId, relid->relId);
 
-	res = LockAcquireExtended(&tag, lockmode, false, false, true, &locallock,
-							  false);
+	res = LockAcquireExtended(&tag, lockmode, NoLock, false, false, true,
+							  &locallock, false);
 
 	/*
 	 * Now that we have the lock, check for invalidation messages; see notes
@@ -253,8 +266,8 @@ LockRelation(Relation relation, LOCKMODE lockmode)
 						 relation->rd_lockInfo.lockRelId.dbId,
 						 relation->rd_lockInfo.lockRelId.relId);
 
-	res = LockAcquireExtended(&tag, lockmode, false, false, true, &locallock,
-							  false);
+	res = LockAcquireExtended(&tag, lockmode, NoLock, false, false, true,
+							  &locallock, false);
 
 	/*
 	 * Now that we have the lock, check for invalidation messages; see notes
@@ -285,8 +298,8 @@ ConditionalLockRelation(Relation relation, LOCKMODE lockmode)
 						 relation->rd_lockInfo.lockRelId.dbId,
 						 relation->rd_lockInfo.lockRelId.relId);
 
-	res = LockAcquireExtended(&tag, lockmode, false, true, true, &locallock,
-							  false);
+	res = LockAcquireExtended(&tag, lockmode, NoLock, false, true, true,
+							  &locallock, false);
 
 	if (res == LOCKACQUIRE_NOT_AVAIL)
 		return false;
@@ -590,8 +603,8 @@ ConditionalLockTuple(Relation relation, const ItemPointerData *tid, LOCKMODE loc
 					  ItemPointerGetBlockNumber(tid),
 					  ItemPointerGetOffsetNumber(tid));
 
-	return (LockAcquireExtended(&tag, lockmode, false, true, true, NULL,
-								logLockFailure) != LOCKACQUIRE_NOT_AVAIL);
+	return (LockAcquireExtended(&tag, lockmode, NoLock, false, true, true,
+								NULL, logLockFailure) != LOCKACQUIRE_NOT_AVAIL);
 }
 
 /*
@@ -748,8 +761,8 @@ ConditionalXactLockTableWait(TransactionId xid, bool logLockFailure)
 
 		SET_LOCKTAG_TRANSACTION(tag, xid);
 
-		if (LockAcquireExtended(&tag, ShareLock, false, true, true, NULL,
-								logLockFailure)
+		if (LockAcquireExtended(&tag, ShareLock, NoLock, false, true, true,
+								NULL, logLockFailure)
 			== LOCKACQUIRE_NOT_AVAIL)
 			return false;
 
@@ -1042,8 +1055,8 @@ ConditionalLockDatabaseObject(Oid classid, Oid objid, uint16 objsubid,
 					   objid,
 					   objsubid);
 
-	res = LockAcquireExtended(&tag, lockmode, false, true, true, &locallock,
-							  false);
+	res = LockAcquireExtended(&tag, lockmode, NoLock, false, true, true,
+							  &locallock, false);
 
 	if (res == LOCKACQUIRE_NOT_AVAIL)
 		return false;
@@ -1122,8 +1135,8 @@ ConditionalLockSharedObject(Oid classid, Oid objid, uint16 objsubid,
 					   objid,
 					   objsubid);
 
-	res = LockAcquireExtended(&tag, lockmode, false, true, true, &locallock,
-							  false);
+	res = LockAcquireExtended(&tag, lockmode, NoLock, false, true, true,
+							  &locallock, false);
 
 	if (res == LOCKACQUIRE_NOT_AVAIL)
 		return false;
