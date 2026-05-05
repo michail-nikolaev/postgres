@@ -1158,6 +1158,21 @@ SnapBuildProcessRunningXacts(SnapBuild *builder, XLogRecPtr lsn, xl_running_xact
 	TransactionId xmin;
 
 	/*
+	 * A database-specific xl_running_xacts record only describes XIDs of
+	 * transactions running in running->dbid; XIDs of transactions in other
+	 * databases (including possibly our own) are missing from xids[] and not
+	 * accounted for in oldestRunningXid/nextXid.  Such a record may only be
+	 * consumed by a decoder that itself opted out of cluster-wide tracking
+	 * (db_specific == true).  Otherwise we could mark the snapshot
+	 * SNAPBUILD_CONSISTENT while transactions older than running->nextXid are
+	 * still in progress in another database, causing their later commits to
+	 * be silently dropped from the decoded change stream (data loss in
+	 * downstream subscribers).
+	 */
+	if (!db_specific && OidIsValid(running->dbid))
+		return;
+
+	/*
 	 * If we're not consistent yet, inspect the record to see whether it
 	 * allows to get closer to being consistent. If we are consistent, dump
 	 * our snapshot so others or we, after a restart, can use it.
