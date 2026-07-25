@@ -24,7 +24,7 @@ use Test::More;
 
 use FindBin;
 use lib $FindBin::RealBin;
-use StressConcurrently;
+use Stress::Bespoke;
 
 my $stressval = stress_plan(skip =>
 	'skipping disabled pg_dump stress test');

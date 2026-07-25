@@ -1,0 +1,273 @@
+src/test/stress/DESIGN
+
+Plan: a pluggable stress suite
+==============================
+
+This is the design for reworking src/test/stress from 36 hand-written
+files into a composable suite.  Nothing here is upstream yet, so this is
+a rewrite rather than a migration: names, numbering and the contents of
+StressConcurrently.pm are all free to change.
+
+Why rework it at all
+====================
+
+The suite has two jobs and currently does neither cleanly.
+
+- Discovery.  Run randomized concurrent workloads against the
+  CONCURRENTLY commands and see what breaks.  This is what the suite is
+  good at: it has found five distinct backend bugs so far.
+
+- Regression.  Once a bug is fixed, keep it fixed.  The suite is weak
+  here, and the weakness is structural: 016_foreign_keys.pl reproduced
+  the RI conindid race about once in 15 runs at the default duration, so
+  a CI run would have passed roughly 93% of the time with the bug
+  reintroduced.  A probabilistic test is a bug finder, not a guard.
+
+Meanwhile the files themselves duplicate heavily: 24 of 36 declare the
+same tbl(id int PRIMARY KEY, val int), and 13 share the same DDL
+rotation verbatim.  Adding a new dimension means copying a file and
+editing the interesting 20%, which is why gaps (row locks, subxacts,
+index-only scans, exclusion constraints) went unnoticed until someone
+went looking.
+
+The plan therefore splits the two jobs, and makes the discovery half
+composable so that coverage is enumerable instead of archaeological.
+
+Layer 0: three changes worth making regardless
+==============================================
+
+These are independent of the restructuring and each is small.
+
+1. Diagnosability by default.  stress_init_node() sets
+
+       log_error_verbosity = verbose
+       backtrace_functions = 'relation_open'
+       log_lock_waits = on
+
+   and, for standby environments, log_recovery_conflict_waits = on.
+   None of these produce output unless something goes wrong.  Two of
+   the bugs diagnosed so far took ~30 re-runs to pin down purely
+   because the failing message arrived without a call site; with a
+   backtrace it was one run.  The same applies to the standby standoff,
+   which only became readable once recovery conflict waits were logged.
+
+2. Seeded randomness.  stress_seed() takes stress_seed=N from
+   PG_TEST_EXTRA (or picks and reports one), seeds Perl's rand, and is
+   passed to pgbench as --random-seed.  Several tests choose variants
+   with a bare int(rand(2)), so today two runs of the same file test
+   different things and a failure cannot be replayed.
+
+3. One REPACK tolerance helper.  REPACK (CONCURRENTLY) is not MVCC-safe
+   yet: a snapshot spanning its relfilenode swap may see a table empty.
+   Roughly ten files open-code the "tolerate empty, hold anything else
+   to the full invariant" dance.  Behind one helper it can be disabled
+   in one place (stress_strict_mvcc=1) to check whether REPACK has
+   become MVCC-safe, and deleted in one place when it has.
+
+Layer 1: pgbench's schema as the base
+=====================================
+
+Use pgbench -i -s N rather than bespoke per-file setup, at two scales:
+s=1, where the single branch row makes every tpcb-like transaction
+collide, and s=50, where the indexes are large enough to be multi-level
+and a concurrent build has real work to do.  Both are in the CI set.
+This buys:
+
+- Scalable loading with no setup code per scenario.
+
+- A stronger invariant than the current single-column sum.  Every
+  tpcb-like transaction applies the same delta to one account, one
+  teller and one branch, and records it, so at every commit boundary
+
+      sum(abalance) = sum(tbalance) = sum(bbalance) = sum(delta)
+
+  across pgbench_accounts, pgbench_tellers, pgbench_branches and
+  pgbench_history.  That is a four-way cross-check over four relations
+  instead of one column of one table, and it comes with a realistic hot
+  spot: with a small scale factor the branch rows are heavily
+  contended.
+
+- A natural spread of DDL targets in one schema: a large table
+  (accounts), a tiny one (branches), an append-only one (history).
+
+Two adjustments are needed.  pgbench_history has no primary key, so it
+gets one before REPACK can decode it; and the scale factor becomes a
+knob, since it trades table size against contention.
+
+Bespoke schemas do not disappear entirely.  What fits the model gets
+ported: the TOAST payload/md5 pair and the exclusion-constraint slots
+become schema decorators plus their own check plugins, since both are
+really "an extra column shape and an extra invariant" on top of an
+ordinary workload.  What does not fit stays hand-written: the SSI
+gapless sequence, whose whole point is a table with no unique
+constraint and a very specific transaction shape, and pg_dump's
+dump-and-restore comparison, which is an external process rather than a
+workload.  Those two keep their own files and pick up only the Layer 0
+helpers.
+
+Layer 2: five registries
+========================
+
+Everything a scenario is made of lives in a named registry entry.  Each
+entry declares what it needs and what it cannot be combined with, so a
+bad combination fails when the scenario is built, with a clear message,
+rather than halfway through a run.
+
+  schema   pgbench, +toast_column, +generated, +identity, +partitioned,
+           +exclusion_slot, +fk_child, +matview, +jsonb_column
+
+  indexes  btree_bid, btree_abalance, unique_expr, covering, partial,
+           expr_txid, gin_jsonb, gist_range, brin_aid, hash_bid, spgist
+
+  load     tpcb_like, simple_update, select_only, bulk_copy,
+           upsert_merge, cursor_hold, plancache, subxact_churn,
+           row_lock, twophase, toast_rewrite, generated_update,
+           replica_role_apply
+
+  ddl      index:       create_index_concurrently, drop_index_concurrently,
+                        reindex_index_concurrently, reindex_table_concurrently,
+                        reindex_blocking
+           repack:      repack_concurrently, repack_using_index, repack_blocking
+           partition:   attach_partition, detach_partition_concurrently,
+                        detach_finalize, create_partition, drop_partition,
+                        split_partition, merge_partition,
+                        partitionwise_index_build
+           table:       alter_table_rewrite, set_unlogged, truncate
+           maintenance: vacuum, vacuum_freeze, analyze
+           matview:     refresh_matview_concurrently
+
+  check    balances, row_counts, amcheck, index_vs_seq, ios_vs_seq,
+           visibility_map, row_lock_durability, no_slot_leak,
+           decoding_off, no_orphans, distinct_slots, replica_match,
+           dump_restore
+
+  env      standalone, standby, subscription, cross_database, crash_loop,
+           cancellation, lock_exhaustion
+
+How many of those DDL commands are in flight at once is itself a
+dimension, not a property of the harness:
+
+  ddl_concurrency => 1      one advisory-lock gate, one command at a time
+                   => N      a gate per table, N commands overlapping
+                   => none   no gate at all
+
+Overlapping REPACKs are what exposed the logical-decoding activation
+race, so this belongs in the matrix rather than in one special file.
+
+The partition family deserves its own note: attaching and detaching
+partitions, splitting and merging them, and the documented
+build-per-partition-then-attach dance for a partitioned index all change
+the shape of a relation while CONCURRENTLY commands are mid-flight, and
+each of them interacts differently with the partition descriptor a
+concurrent query is holding.  It is gated by +partitioned.
+
+Environments carry their own GUCs, because getting those wrong is itself
+a source of false failures: the standby environment sets a finite
+max_standby_streaming_delay (never -1, which lets replay wait forever on
+a reader that is itself blocked on a lock replay holds) and runs pgbench
+with --max-tries so that recovery-conflict cancellations are retried
+rather than aborting the run; lock_exhaustion sets a deliberately small
+max_locks_per_transaction; and so on.
+
+Composition uses pgbench's own mechanism
+========================================
+
+pgbench already supports weighted script composition:
+
+    pgbench -f load.sql@3 -f ddl.sql@1 -f checks.sql@2
+
+The current suite welds everything into a single script and then
+generates \if chains to pick a branch -- which is what
+stress_variant_switch() and the switch inside stress_ddl_gate() are for.
+With one script per plugin those disappear.  The advisory-lock gate
+survives, as its own script, because serializing the DDL client is still
+wanted.
+
+Layer 3: scenarios, CI set and soak set
+=======================================
+
+A scenario is a named tuple:
+
+    repack_dml => {
+        schema  => ['pgbench'],
+        indexes => ['btree_abalance'],
+        load    => ['tpcb_like@3', 'row_lock@1'],
+        ddl     => ['repack_concurrently', 'reindex_table_concurrently',
+                    'drop_create_index'],
+        checks  => ['balances', 'amcheck', 'index_vs_seq'],
+        env     => 'standalone',
+        tags    => ['ci'],
+    }
+
+Each scenario gets a small stub file under t/ so that meson and prove
+see stable test names, run them in parallel and keep per-test logs; the
+stub is a few lines and the substance lives in the catalogue.
+
+  CI set     A fixed list of about ten scenarios chosen for breadth per
+             second, roughly six seconds each.  Fixed, not sampled: a CI
+             failure has to be reproducible and attributable to a name.
+
+  Soak set   stress_mode=soak in PG_TEST_EXTRA, on the same suite, walks
+             the whole catalogue plus seeded random combinations under a
+             wall-clock budget at a high stress_concurrently.  This is
+             where the discovery value actually is; the six-second
+             default rarely catches anything.
+
+A --list mode prints the dimension-by-scenario coverage matrix, so gaps
+are mechanical to spot rather than something someone has to go looking
+for.
+
+Deterministic regression guards: deferred
+=========================================
+
+Injection-point tests that would fail every time rather than one run in
+fifteen are out of scope for now.  The consequence is worth stating
+plainly so it is a choice rather than an oversight: the fixed races are
+guarded probabilistically, and at the default duration a reintroduced
+bug would usually go unnoticed by a single CI run.  Soak mode is what
+covers them, and it only covers them if it actually runs.
+
+One race is not covered at all by any amount of soaking: the
+SxactGlobalXmin window in SetNewSxactGlobalXmin(), which is too narrow
+to hit without an injection point.
+
+Reproducing the standby standoff
+================================
+
+One target for the new system, once it exists: the replay-versus-reader
+standoff found while fixing the planner's handling of a concurrently
+dropped index.  Replay acquires an AccessExclusiveLock and then waits on
+a snapshot conflict with a reader that is itself blocked on that lock;
+hot standby's deadlock check does not cover that shape, so with
+max_standby_streaming_delay = -1 nothing breaks the cycle.
+
+That needs a standby environment with a -1 delay, readers holding a
+snapshot across a statement boundary, and a DDL rotation that makes
+replay take relation locks -- all of which are ordinary registry
+entries.  If a scenario built from them reproduces it reliably, that is
+the reproducer to take to -hackers.
+
+Constraints the implementation must hold to
+===========================================
+
+- Every generated script is written into the test's basedir and the
+  exact pgbench command line is logged.  A declarative layer that cannot
+  be reproduced by hand outside the harness is worse than the
+  duplication it replaces.
+
+- A bespoke escape hatch stays supported.  Not every invariant fits the
+  model, and the ones that do not are among the most valuable tests.
+
+- The CI set stays a fixed list.  Combination explosion belongs in soak
+  mode, behind a seed.
+
+How it lands
+============
+
+In one pass: the registries, the catalogue, the stub files and the
+deletion of the 36 existing files in a single commit.  The suite is not
+upstream, so there is no interim state to keep working and no history to
+preserve.  The risk that buys is a large commit, and the mitigation is
+that the old files stay in the branch's history to compare against --
+every invariant they check must appear as a check plugin or a bespoke
+file, and that mapping is worth writing down as the port proceeds.

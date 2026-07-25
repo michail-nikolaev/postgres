@@ -3,61 +3,80 @@ src/test/stress/README
 Stress tests for CONCURRENTLY commands
 ======================================
 
-This directory contains a test suite that stresses concurrent
-operations that are expected to behave transparently to other sessions:
-commands with a CONCURRENTLY option (REPACK, CREATE INDEX, REINDEX,
-DROP INDEX, REFRESH MATERIALIZED VIEW, ALTER TABLE ... DETACH
-PARTITION), logical replication apply racing with local modifications
-on the subscriber, replication slot creation/removal, SERIALIZABLE
-transactions racing with each other and with DDL, hot standbys
-replaying such DDL while serving queries, crash recovery in the middle
-of such commands, and VACUUM running alongside them.  The workloads
-they run against include plain and bulk DML, COPY, upserts and MERGE
-against unique indexes, foreign key checks and exclusion constraints,
-out-of-line (TOASTed) values, cursors and cached plans held across the
-DDL, row locks and EvalPlanQual rechecks, subtransactions deep enough
-to overflow a backend's subxid cache, index-only scans reading through
-the visibility map, and partitioned tables.  The
-workloads run via pgbench against concurrently modified tables,
-verifying invariants of the data and checking the resulting indexes
-with the amcheck extension.  Any SQL error or broken invariant makes
-pgbench abort (--exit-on-abort), failing the test.
+This directory stresses the commands that are meant to behave
+transparently to other sessions: the CONCURRENTLY variants of REPACK,
+CREATE INDEX, REINDEX, DROP INDEX, REFRESH MATERIALIZED VIEW and ALTER
+TABLE ... DETACH PARTITION, together with the machinery they lean on --
+logical decoding, replication slots, the visibility map, the plan cache.
 
-The tests are not deterministic: they rely on timing and randomized
-workloads to catch anomalies, so a passing run does not prove the
-absence of bugs.  They are cheap enough to run by default, and their
-duration can be scaled up for more thorough runs.
+Each test runs a pgbench workload whose clients maintain an invariant
+while one of those commands runs against the same tables, and checks
+that invariant along with the resulting indexes.  Any SQL error or
+broken invariant makes pgbench abort (--exit-on-abort), failing the
+test.  The tests are not deterministic: they rely on timing and
+randomized workloads, so a passing run does not prove the absence of
+bugs.  They are cheap enough to run by default, and can be scaled up.
 
-Duration scaling
-================
+How a test is built
+===================
 
-The run time of each test is controlled by the stress_concurrently
-value in PG_TEST_EXTRA:
+A test is a scenario: a named combination of plugins, listed in
+t/Stress/Scenarios.pm, with a stub under t/ that does nothing but run
+it.  The plugins live in t/Stress/Plugins.pm and come in six kinds:
+
+  schema    what tables exist -- the pgbench schema, plus decorators
+            that each add a table with an invariant of its own
+  indexes   what is built on them, across every access method
+  load      what changes the data while preserving those invariants
+  ddl       what runs concurrently with that
+  check     what must hold regardless, during and after the run
+  env       what the cluster looks like: standalone, a hot standby, a
+            subscriber, a cluster being killed and restarted, and so on
+
+The scenario names entries from each; t/Stress/Run.pm validates the
+combination, builds the cluster, writes one pgbench script per load and
+per check plus one for the DDL rotation, and runs them as a weighted
+mix.  Adding a dimension means adding a plugin, not copying a file.
+
+Two tests are not scenarios, because what they check is not a workload
+with an invariant: 900_serializable.pl and 901_pg_dump.pl.  They use the
+helpers in t/Stress/Bespoke.pm.
+
+See DESIGN for why it is built this way, and PORTING for where the
+coverage of each of the older hand-written tests ended up -- including
+what is not yet covered to the same depth.
+
+Duration scaling and reproducing a failure
+==========================================
+
+The run time of each test is controlled by the stress_concurrently value
+in PG_TEST_EXTRA:
 
     make check PG_TEST_EXTRA='stress_concurrently=10'
 
-Each test file is calibrated so that a value of 1 makes it run for
-about 6 seconds, and the increase should be roughly linear; a value of
-0 disables the suite.  If PG_TEST_EXTRA does not mention
+Each scenario is calibrated so that a value of 1 makes it run for about
+six seconds, and the increase should be roughly linear; a value of 0
+disables the suite.  If PG_TEST_EXTRA does not mention
 stress_concurrently at all, a value of 1 is assumed, except in
 environments that declare themselves slow by setting
 PG_TEST_TIMEOUT_DEFAULT (such as Valgrind buildfarm animals), where the
-suite is skipped; use an explicit stress_concurrently value to override
-that.
+suite is skipped.
 
-Shared helpers
-==============
+Every run reports the seed it used:
 
-Boilerplate common to the tests -- deciding whether to run based on the
-stress_concurrently value, and setting up a node with the usual
-settings -- lives in t/StressConcurrently.pm.  Each test loads it with
+    # stress_seed is 1336750692
 
-    use FindBin;
-    use lib $FindBin::RealBin;
-    use StressConcurrently;
+Passing it back reproduces the same choices, both in Perl and in
+pgbench:
 
-and calls stress_plan() and stress_init_node().  The workload each test
-runs is spelled out inline, since that is what makes each test distinct.
+    make check PG_TEST_EXTRA='stress_seed=1336750692'
+
+The generated pgbench scripts are written into the test's data directory
+and echoed into its log, and the pgbench command line is logged too, so
+a failing scenario can be replayed by hand.  Every node also runs with
+verbose errors, backtraces for relation_open and log_lock_waits on:
+these produce no output unless something goes wrong, and a failure that
+arrives without its call site is expensive to chase.
 
 Running the tests
 =================

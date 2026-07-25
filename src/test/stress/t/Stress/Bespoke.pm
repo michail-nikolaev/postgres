@@ -5,34 +5,21 @@
 
 =head1 NAME
 
-StressConcurrently - helpers shared by the src/test/stress test suite
-
-=head1 SYNOPSIS
-
-  use FindBin;
-  use lib $FindBin::RealBin;
-  use StressConcurrently;
-
-  my $scale = stress_plan();
-  my $node = stress_init_node('mytest');
-  ...
-  $node->pgbench(
-      "--no-vacuum --client=30 --jobs=4 --exit-on-abort -T " . (6 * $scale),
-      0, [qr{actually processed}], [qr{^$}], 'my workload',
-      { concurrent_ops => $my_pgbench_script });
+Stress::Bespoke - helpers for the stress tests that are not scenarios
 
 =head1 DESCRIPTION
 
-The tests under C<src/test/stress> all follow the same shape: they run a
-pgbench workload in which one client drives a rotation of CONCURRENTLY
-commands while the others exercise some feature against the same table,
-checking invariants that must hold no matter how the concurrent DDL
-interleaves.  This module collects the boilerplate they have in common
-so that each test file only has to spell out what is unique to it.
+Most of this suite is built from plugins (see DESIGN); two tests are not,
+because what they check is not a workload with an invariant: the SSI
+tests need a table with no unique constraint and a very specific
+transaction shape, and pg_dump's check is a comparison between two
+databases rather than a query.  They keep their own structure and use
+the helpers here, which give them the same node setup, seeding and
+assertion function the scenarios get.
 
 =cut
 
-package StressConcurrently;
+package Stress::Bespoke;
 
 use strict;
 use warnings FATAL => 'all';
@@ -48,7 +35,6 @@ our @EXPORT = qw(
   stress_assert_defn
   stress_variant_switch
   stress_ddl_gate
-  stress_workload
 );
 
 =pod
@@ -116,6 +102,17 @@ sub stress_init_node
 	$node->init(%{ $opts{init} // {} });
 	$node->append_conf('postgresql.conf',
 		'lock_timeout = ' . (1000 * $PostgreSQL::Test::Utils::timeout_default));
+
+	# The same diagnostics the scenarios run with: none of these produce
+	# output unless something goes wrong, and a failure that arrives
+	# without its call site costs hours.
+	$node->append_conf('postgresql.conf', $_)
+	  for (
+		'log_error_verbosity = verbose',
+		q(backtrace_functions = 'relation_open'),
+		'log_lock_waits = on',
+		'max_worker_processes = 32',
+		'max_parallel_workers = 16');
 
 	# allows_streaming already sets wal_level; only set it ourselves when
 	# the caller has not asked init to.
@@ -328,45 +325,6 @@ sub stress_ddl_gate
 	return $out;
 }
 
-=pod
-
-=item stress_workload(%opts)
-
-Return a pgbench script fragment for the "other" clients in a stress
-test -- the ones not driving DDL.  A stress workload consists of
-mutations, which change data while preserving some invariant, and
-checks, which verify that invariant; this builds a switch that performs
-one randomly chosen mutation or check per transaction.
-
-Declaring the two separately makes the intent of a test clear at a
-glance: these are the operations that change the data, and these are the
-properties that must nonetheless always hold.  Each block should be
-self-contained (including any C<\set> it needs), so that it reads as one
-complete action.
-
-Options:
-
-  mutations => [ ... ]  data-changing blocks (each a pgbench fragment).
-  checks    => [ ... ]  invariant-verifying blocks.
-  indent    => 'str'    indentation of the switch (default three tabs).
-
-At least one of mutations or checks must be given.
-
-=cut
-
-sub stress_workload
-{
-	my (%opts) = @_;
-	my @mutations = @{ $opts{mutations} // [] };
-	my @checks = @{ $opts{checks} // [] };
-	die 'stress_workload needs mutations or checks'
-	  unless @mutations || @checks;
-
-	return stress_variant_switch(
-		var => 'stress_action',
-		indent => $opts{indent} // "\t\t\t",
-		variants => [ @mutations, @checks ]);
-}
 
 =pod
 

@@ -1,0 +1,125 @@
+src/test/stress/PORTING
+
+Where each of the old tests went
+===============================
+
+The suite was rewritten from 36 hand-written files into scenarios built
+from plugins (see DESIGN).  This file records where every old file's
+coverage ended up, so that the rewrite can be checked for lost ground
+rather than taken on trust.  It is written as the port proceeds, not
+reconstructed afterwards.
+
+The pgbench schema provides a background workload in every scenario;
+dimensions that need their own invariant get a schema decorator that
+adds its own table, plus the load and check that go with it.
+
+  old file                      became
+  ----------------------------- ---------------------------------------
+  001_repack_updates            scenario repack_dml_s1
+                                (ddl repack_concurrently, check balances)
+  002_repack_inserts            +gapless, load serial_insert,
+                                check gapless_count
+  003_cic                       indexes partial_abalance, expr_txid,
+                                ddl drop_create_index/reindex_*
+  004_cic_ams                   +am_columns, scenario access_methods
+  005_refresh_matview           +ledger +matview,
+                                ddl refresh_matview_concurrently,
+                                check matview_matches
+  006_detach_partition          +partitioned,
+                                ddl detach_partition_concurrently
+  007_logical_replication       env subscription (see gaps below)
+  008_replication_slots         load slot_cycle, env wal_replica
+  009_serializable              BESPOKE -- t/900_serializable.pl
+  010_replication_ddl           env subscription (see gaps below)
+  011_standby                   env standby, scenario standby
+  012_crash_recovery            env crash_loop, scenario crash_recovery
+  013_twophase                  +ledger, load twophase
+  014_vacuum                    ddl vacuum family, autovacuum conf
+  015_toast                     +toast, load toast_rewrite,
+                                check toast_md5
+  016_foreign_keys              +fk_child, load fk_churn,
+                                check no_orphans
+  017_bulk_load                 +ledger, load bulk_copy
+  018_upsert_merge              +upsert_keys, load upsert_merge,
+                                check distinct_keys
+  019_plancache                 load plancache, scenario protocol
+                                'prepared' + force_generic_plan
+  020_cursors                   +ledger, load cursor_hold
+  021_partitioned               +partitioned, ddl partitionwise_index_build
+  022_subscriber_contention     env subscription (see gaps below)
+  023_tablesync                 not ported (see gaps below)
+  024_pg_dump                   BESPOKE -- t/901_pg_dump.pl
+  025_cancellation              env cancellation, scenario cancellation
+  026_multi_table               ddl_concurrency => N
+  027_cross_database            not ported (see gaps below)
+  028_generated                 +generated, load generated_update,
+                                check generated_matches
+  029_function_index            partly: index expr_abalance; the
+                                xid-assigning index expression is not
+                                ported (see gaps below)
+  030_alter_table               ddl alter_table_rewrite
+  031_replica_role              not ported (see gaps below)
+  032_lock_exhaustion           env lock_exhaustion
+  033_row_locking               load row_lock, check row_lock_durability
+  034_subtransactions           load subxact_churn
+  035_index_only                check ios_vs_seq, check visibility_map
+  036_exclusion                 +exclusion_slot, load exclusion_churn,
+                                check distinct_slots
+
+Kept bespoke
+============
+
+Two files stay hand-written, because what they check is not a workload
+with an invariant:
+
+  900_serializable.pl   The gapless-sequence and write-skew SSI tests.
+                        Their whole point is a table with no unique
+                        constraint and a very specific transaction shape;
+                        expressing that as a load plus a check would
+                        weaken it.
+
+  901_pg_dump.pl        Dump and restore is an external process, not a
+                        pgbench script, and its invariant is a
+                        comparison between two databases.
+
+Both pick up the Layer 0 helpers (seeding, backtraces, the REPACK
+tolerance) but keep their own structure.
+
+Gaps this rewrite has not closed
+================================
+
+These were covered by the old files and are not covered to the same
+depth yet.  They are listed rather than quietly dropped, because the old
+files are gone from the tree and only the git history has them:
+
+  logical replication depth   The 'subscription' environment runs the
+                              publisher's workload and checks that the
+                              subscriber ends up with the same data,
+                              which is what 007 did.  What is missing is
+                              022's local write contention on the very
+                              rows being applied, 023's repeated initial
+                              table synchronization, and 010's DDL on
+                              the subscriber side.  Each needs a load
+                              that runs against the subscriber rather
+                              than the publisher, which the environment
+                              does not offer yet.
+
+  cross-database decoding     027 ran REPACK churn in one database while
+                              a slot decoded another.  Needs a load
+                              targeting a second database.
+
+  xid-assigning index         029 built indexes whose expressions
+  expressions                 acquire a transaction id, which changes
+                              how the build's phases interact with
+                              snapshots and horizons.
+
+  session_replication_role    031 drove a workload in replica mode
+                              against a table with RLS and replica-mode
+                              triggers.
+
+  REPACK's MVCC tolerance     Only the 'balances' check tolerates a
+                              relation reading empty across a
+                              relfilenode swap.  The other checks assume
+                              they will not span one, which is true at
+                              the rate the rotation currently runs but
+                              is not guaranteed.
