@@ -13,13 +13,20 @@
 #
 # The standby concurrently runs reader clients that verify the sum
 # invariant and occasionally check an index with amcheck, while
-# replaying the DDL churn; max_standby_streaming_delay = -1 makes
-# replay wait for the readers instead of canceling them, so any SQL
-# error or broken invariant on the standby fails the test.
+# replaying the DDL churn.  Replay is allowed to cancel a reader it
+# conflicts with (see max_standby_streaming_delay below); pgbench
+# retries the transaction when that happens, so any other SQL error or
+# broken invariant on the standby still fails the test.
 #
 # Afterwards, the replayed data must match the primary exactly, and the
 # standby must survive promotion with the invariant intact and its
 # indexes passing amcheck.
+#
+# This is also the regression test for the planner's handling of an
+# index that replay drops underneath a standby reader: before that was
+# fixed, a reader here would fail with "could not open relation with OID
+# <n>" about one run in five at stress_concurrently=4, while the primary
+# was running DROP INDEX CONCURRENTLY or REINDEX CONCURRENTLY.
 use strict;
 use warnings FATAL => 'all';
 
@@ -85,8 +92,21 @@ my $sum = $primary->safe_psql('postgres',
 $primary->backup('bkp');
 my $standby = PostgreSQL::Test::Cluster->new('standby');
 $standby->init_from_backup($primary, 'bkp', has_streaming => 1);
-# Make replay wait for standby queries rather than canceling them.
-$standby->append_conf('postgresql.conf', 'max_standby_streaming_delay = -1');
+# Give replay a generous but finite grace period before it cancels a
+# conflicting query.  It must not be -1: replay acquires the
+# AccessExclusiveLocks the primary logged before it applies the records
+# that conflict with a reader's snapshot, so with -1 it can end up
+# waiting forever on a reader that is itself blocked on a lock replay is
+# holding.  Nothing detects that cycle -- hot standby's deadlock check
+# covers the startup process waiting *for* a lock, not waiting on a
+# snapshot while holding one -- so it would only come apart when the
+# reader hits lock_timeout, a long way further on.  A finite delay lets
+# replay cancel the reader instead, which is the documented way out.
+$standby->append_conf('postgresql.conf', 'max_standby_streaming_delay = 5s');
+# These two only produce output when something actually waits, and they
+# are what makes such a standoff readable after the fact.
+$standby->append_conf('postgresql.conf', 'log_recovery_conflict_waits = on');
+$standby->append_conf('postgresql.conf', 'log_lock_waits = on');
 $standby->start;
 
 # The primary runs balanced updates plus a DDL rotation.
@@ -147,8 +167,12 @@ my @common = (
 my @primary_cmd = (
 	@common, '--client=20', '-p', $primary->port,
 	'-h', $primary->host, '-f', $primary_sql, 'postgres');
+# A query cancelled by a recovery conflict fails with a serialization
+# error, which is exactly what pgbench retries for; without this the
+# first such cancellation would abort the run.  Retried transactions are
+# only counted, not printed, so the stderr check below still holds.
 my @standby_cmd = (
-	@common, '--client=10', '-p', $standby->port,
+	@common, '--client=10', '--max-tries=100', '-p', $standby->port,
 	'-h', $standby->host, '-f', $standby_sql, 'postgres');
 
 my ($pri_out, $pri_err, $sby_out, $sby_err) = ('', '', '', '');
