@@ -38,6 +38,10 @@ tests += {
       't/030_alter_table.pl',
       't/031_replica_role.pl',
       't/032_lock_exhaustion.pl',
+      't/033_row_locking.pl',
+      't/034_subtransactions.pl',
+      't/035_index_only.pl',
+      't/036_exclusion.pl',
     ],
   },
 }

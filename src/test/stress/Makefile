@@ -13,7 +13,7 @@ subdir = src/test/stress
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
-EXTRA_INSTALL = contrib/amcheck contrib/test_decoding
+EXTRA_INSTALL = contrib/amcheck contrib/pg_visibility contrib/test_decoding
 
 check:
 	$(prove_check)

@@ -13,9 +13,11 @@ transactions racing with each other and with DDL, hot standbys
 replaying such DDL while serving queries, crash recovery in the middle
 of such commands, and VACUUM running alongside them.  The workloads
 they run against include plain and bulk DML, COPY, upserts and MERGE
-against unique indexes, foreign key checks, out-of-line (TOASTed)
-values, cursors and cached plans held across the DDL, and partitioned
-tables.  The
+against unique indexes, foreign key checks and exclusion constraints,
+out-of-line (TOASTed) values, cursors and cached plans held across the
+DDL, row locks and EvalPlanQual rechecks, subtransactions deep enough
+to overflow a backend's subxid cache, index-only scans reading through
+the visibility map, and partitioned tables.  The
 workloads run via pgbench against concurrently modified tables,
 verifying invariants of the data and checking the resulting indexes
 with the amcheck extension.  Any SQL error or broken invariant makes
