@@ -384,6 +384,19 @@ EnableLogicalDecoding(void)
 
 	LWLockAcquire(LogicalDecodingControlLock, LW_EXCLUSIVE);
 
+	/*
+	 * Recheck, as a concurrent activation could have completed while we were
+	 * waiting on the barrier above.  If we wrote another activation record
+	 * here, logical slots whose decoding started after that concurrent
+	 * activation could encounter it in their WAL stream.
+	 */
+	if (LogicalDecodingCtl->logical_decoding_enabled)
+	{
+		LogicalDecodingCtl->pending_disable = false;
+		LWLockRelease(LogicalDecodingControlLock);
+		return;
+	}
+
 	START_CRIT_SECTION();
 
 	/*
