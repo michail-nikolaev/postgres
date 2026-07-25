@@ -1442,7 +1442,7 @@ our %ENVS = (
 				# would ever match.
 				Test::More::like(
 					$stderr,
-					qr/canceling statement due to statement timeout|(?:relation|index) "[^"]+" (?:already exists|does not exist)|skipping reindex of invalid index|deadlock detected/,
+					qr/canceling statement due to statement timeout|(?:relation|index) "[^"]+" (?:already exists|does not exist)|skipping reindex of invalid index|cannot cluster on (?:invalid|partial) index|deadlock detected/,
 					'interrupted command failed only in expected ways')
 				  or Test::More::diag("unexpected error: $stderr");
 			}
