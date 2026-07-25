@@ -17,20 +17,11 @@
 # intact.  Any SQL error, RI violation or broken invariant aborts
 # pgbench, failing the test.
 #
-# XXX This test is occasionally seen to fail (order of once in ~15
-# runs) with:
-#
-#   ERROR:  could not open relation with OID <n>
-#
-# raised from a foreign-key check while a REPACK (CONCURRENTLY) or
-# REINDEX CONCURRENTLY of the referenced parent's primary-key index is
-# in progress -- apparently the RI lookup resolves the parent's index
-# to an OID that the concurrent rebuild is dropping.  It is not clear
-# yet whether this is a genuine RI-vs-CONCURRENTLY race worth fixing in
-# the backend, or a transient the test should tolerate; it is left here
-# as-is deliberately, so that it keeps surfacing until that is decided.
-# See also the REPACK (CONCURRENTLY) MVCC-safety caveat referenced in
-# the other tests.
+# This is also the regression test for the stale conindid race in the RI
+# fast path: before that was fixed, an INSERT or UPDATE on the child
+# running while REINDEX INDEX CONCURRENTLY rebuilt the parent's primary
+# key would fail with "could not open relation with OID <n>", about once
+# in 15 runs at stress_concurrently=1 and one run in three at 4.
 use strict;
 use warnings FATAL => 'all';
 
