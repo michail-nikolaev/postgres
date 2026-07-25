@@ -1,0 +1,74 @@
+src/test/stress/README
+
+Stress tests for CONCURRENTLY commands
+======================================
+
+This directory contains a test suite that stresses concurrent
+operations that are expected to behave transparently to other sessions:
+commands with a CONCURRENTLY option (REPACK, CREATE INDEX, REINDEX,
+DROP INDEX, REFRESH MATERIALIZED VIEW, ALTER TABLE ... DETACH
+PARTITION), logical replication apply racing with local modifications
+on the subscriber, replication slot creation/removal, SERIALIZABLE
+transactions racing with each other and with DDL, hot standbys
+replaying such DDL while serving queries, crash recovery in the middle
+of such commands, and VACUUM running alongside them.  The workloads
+they run against include plain and bulk DML, COPY, upserts and MERGE
+against unique indexes, foreign key checks, out-of-line (TOASTed)
+values, cursors and cached plans held across the DDL, and partitioned
+tables.  The
+workloads run via pgbench against concurrently modified tables,
+verifying invariants of the data and checking the resulting indexes
+with the amcheck extension.  Any SQL error or broken invariant makes
+pgbench abort (--exit-on-abort), failing the test.
+
+The tests are not deterministic: they rely on timing and randomized
+workloads to catch anomalies, so a passing run does not prove the
+absence of bugs.  They are cheap enough to run by default, and their
+duration can be scaled up for more thorough runs.
+
+Duration scaling
+================
+
+The run time of each test is controlled by the stress_concurrently
+value in PG_TEST_EXTRA:
+
+    make check PG_TEST_EXTRA='stress_concurrently=10'
+
+Each test file is calibrated so that a value of 1 makes it run for
+about 6 seconds, and the increase should be roughly linear; a value of
+0 disables the suite.  If PG_TEST_EXTRA does not mention
+stress_concurrently at all, a value of 1 is assumed, except in
+environments that declare themselves slow by setting
+PG_TEST_TIMEOUT_DEFAULT (such as Valgrind buildfarm animals), where the
+suite is skipped; use an explicit stress_concurrently value to override
+that.
+
+Shared helpers
+==============
+
+Boilerplate common to the tests -- deciding whether to run based on the
+stress_concurrently value, and setting up a node with the usual
+settings -- lives in t/StressConcurrently.pm.  Each test loads it with
+
+    use FindBin;
+    use lib $FindBin::RealBin;
+    use StressConcurrently;
+
+and calls stress_plan() and stress_init_node().  The workload each test
+runs is spelled out inline, since that is what makes each test distinct.
+
+Running the tests
+=================
+
+NOTE: You must have given the --enable-tap-tests argument to configure.
+
+Run
+    make check
+or
+    make installcheck
+You can use "make installcheck" if you previously did "make install".
+In that case, the code in the installation tree is tested.  With
+"make check", a temporary installation tree is built from the current
+sources and then tested.
+
+See src/test/perl/README for more info about running these tests.

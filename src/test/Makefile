@@ -20,6 +20,7 @@ SUBDIRS = \
 	postmaster \
 	recovery \
 	regress \
+	stress \
 	subscription
 
 ifeq ($(with_icu),yes)
