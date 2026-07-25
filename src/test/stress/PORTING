@@ -27,10 +27,11 @@ adds its own table, plus the load and check that go with it.
                                 check matview_matches
   006_detach_partition          +partitioned,
                                 ddl detach_partition_concurrently
-  007_logical_replication       env subscription (see gaps below)
+  007_logical_replication       env subscription, scenario subscription
   008_replication_slots         load slot_cycle, env wal_replica
   009_serializable              BESPOKE -- t/900_serializable.pl
-  010_replication_ddl           env subscription (see gaps below)
+  010_replication_ddl           env subscription: it rebuilds the
+                                subscriber's own indexes under apply
   011_standby                   env standby, scenario standby
   012_crash_recovery            env crash_loop, scenario crash_recovery
   013_twophase                  +ledger, load twophase
@@ -46,8 +47,11 @@ adds its own table, plus the load and check that go with it.
                                 'prepared' + force_generic_plan
   020_cursors                   +ledger, load cursor_hold
   021_partitioned               +partitioned, ddl partitionwise_index_build
-  022_subscriber_contention     env subscription (see gaps below)
-  023_tablesync                 not ported (see gaps below)
+  022_subscriber_contention     load subscriber_churn,
+                                load subscriber_delete_reinsert
+  023_tablesync                 env subscription: it drops a table from
+                                the publication and adds it back, which
+                                makes the next refresh copy it afresh
   024_pg_dump                   BESPOKE -- t/901_pg_dump.pl
   025_cancellation              env cancellation, scenario cancellation
   026_multi_table               ddl_concurrency => N
@@ -92,17 +96,13 @@ These were covered by the old files and are not covered to the same
 depth yet.  They are listed rather than quietly dropped, because the old
 files are gone from the tree and only the git history has them:
 
-  logical replication depth   The 'subscription' environment runs the
-                              publisher's workload and checks that the
-                              subscriber ends up with the same data,
-                              which is what 007 did.  What is missing is
-                              022's local write contention on the very
-                              rows being applied, 023's repeated initial
-                              table synchronization, and 010's DDL on
-                              the subscriber side.  Each needs a load
-                              that runs against the subscriber rather
-                              than the publisher, which the environment
-                              does not offer yet.
+  rebuilding the replica      The subscription environment rebuilds the
+  identity index              subscriber's secondary index and repacks
+                              its table under apply, but not the index
+                              behind the replica identity: doing that
+                              changes its OID and trips an assertion in
+                              the apply worker's FindReplTupleInLocalRel.
+                              That is worth its own investigation.
 
   cross-database decoding     027 ran REPACK churn in one database while
                               a slot decoded another.  Needs a load
@@ -117,9 +117,10 @@ files are gone from the tree and only the git history has them:
                               against a table with RLS and replica-mode
                               triggers.
 
-  REPACK's MVCC tolerance     Only the 'balances' check tolerates a
-                              relation reading empty across a
-                              relfilenode swap.  The other checks assume
-                              they will not span one, which is true at
-                              the rate the rotation currently runs but
-                              is not guaranteed.
+  REPACK's MVCC tolerance     stress_repack_tolerated() now expresses
+                              the caveat in one place, and the checks
+                              that read a repacked relation use it.  What
+                              is still open is the loads: one of them had
+                              to be written to survive an empty read (see
+                              subscriber_delete_reinsert), and others may
+                              need the same.

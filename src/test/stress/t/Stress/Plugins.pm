@@ -48,7 +48,37 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
-our @EXPORT_OK = qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS);
+our @EXPORT_OK =
+  qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS stress_repack_tolerated);
+
+=pod
+
+=head2 The REPACK tolerance
+
+REPACK (CONCURRENTLY) is not MVCC-safe yet: a snapshot that spans its
+relfilenode swap can find the table empty.  Every check that reads a
+relation the rotation may repack has to allow for that, and nothing
+else: an empty read is tolerated, a partial or otherwise wrong one is
+not.
+
+C<stress_repack_tolerated($count_expr)> returns the SQL condition that
+expresses it, so the caveat lives in one place.  Setting
+C<stress_strict_mvcc=1> in PG_TEST_EXTRA turns the tolerance off, which
+is how to find out whether REPACK has become MVCC-safe; when it has,
+this function and its callers are what has to be removed.
+
+=cut
+
+sub stress_repack_tolerated
+{
+	my ($count_expr) = @_;
+	return '' if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_strict_mvcc=1\b/;
+	return "$count_expr = 0 OR ";
+}
+
+# Extra nodes need names of their own, and soak mode builds many of them
+# in one test.
+my $node_seq = 0;
 
 # Rows in the tables the decorators add.  Small enough to stay cheap,
 # large enough that an index over one has more than a single page.
@@ -748,6 +778,58 @@ our %LOAD = (
 		),
 	},
 
+	# Local writes on the subscriber, against the very rows being
+	# applied.  The column is the subscriber's own and is indexed, so
+	# these updates are never HOT: they move the rows around underneath
+	# the apply worker's lookups.
+	subscriber_churn => {
+		weight => 3,
+		target => 'subscriber',
+		script => q(
+			\set aid random(1, :naccounts)
+			UPDATE pgbench_accounts SET sub_local = sub_local + 1
+				WHERE aid = :aid;
+		),
+	},
+
+	# A row deleted and inserted again under the same key in one
+	# transaction.  That is atomic, so at every commit boundary the row
+	# is present exactly once -- but while it runs, the row's only live
+	# version belongs to an uncommitted transaction, which is the state
+	# the apply worker's tuple lookup has to cope with.
+	#
+	# The value comes from DELETE ... RETURNING rather than a separate
+	# read: the apply worker may change the row between a read and the
+	# delete, and re-inserting a stale value would silently undo what it
+	# applied.  The advisory lock keeps two of these off the same key.
+	subscriber_delete_reinsert => {
+		weight => 1,
+		target => 'subscriber',
+		# Deleting an account row, even for the instant this transaction
+		# holds it, breaks a foreign key pointed at it.
+		conflicts => { schema => ['fk_child'] },
+		script => q(
+			\set aid random(1, :naccounts)
+			BEGIN;
+			SELECT pg_advisory_xact_lock(:aid);
+			-- The delete is wrapped so that this always returns exactly
+			-- one row: REPACK (CONCURRENTLY) is not MVCC-safe yet, and a
+			-- statement that spans its swap can find the table empty and
+			-- delete nothing.  When that happens the row is still there
+			-- in the new relfilenode, so there is nothing to put back.
+			WITH d AS (DELETE FROM pgbench_accounts WHERE aid = :aid
+					RETURNING bid, abalance)
+				SELECT COUNT(*) AS n, COALESCE(MAX(bid), 0) AS bid,
+					COALESCE(MAX(abalance), 0) AS abalance FROM d \gset del_
+			\sleep 1 ms
+			\if :del_n > 0
+				INSERT INTO pgbench_accounts(aid, bid, abalance, sub_local)
+					VALUES (:aid, :del_bid, :del_abalance, 0);
+			\endif
+			COMMIT;
+		),
+	},
+
 	# DML through the partitioned parent, routed across all partitions,
 	# with both rows of the pair in the same partition so that each
 	# partition's sum is invariant on its own.
@@ -875,6 +957,11 @@ our %DDL = (
 	# table a new relfilenode with every index rebuilt, so a REINDEX or
 	# REPACK that was waiting resumes against a table of a new shape.
 	alter_table_rewrite => {
+		# Adding and dropping a column changes the shape of a published
+		# table, and the subscriber does not follow: apply then fails on
+		# every change until the column is gone again, and the
+		# subscription never catches up.
+		conflicts => { env => ['subscription'] },
 		variants => sub {
 			my ($ctx) = @_;
 			return (
@@ -942,7 +1029,23 @@ our %DDL = (
 		requires => { schema => ['partitioned'] },
 		variants => sub {
 			my ($ctx) = @_;
-			my @stmts = ('CREATE INDEX pgb_part_val_idx ON ONLY pgb_part(val);');
+
+			# Start by clearing up after a previous attempt: this
+			# sequence is several statements long and the run can end
+			# anywhere in it, leaving the parent index, or a partition
+			# index that was built but not yet attached, behind.
+			# Dropping the parent takes its attached indexes with it.
+			# IF EXISTS says so with a NOTICE when there is nothing to
+			# drop, which is the normal case and would go to pgbench's
+			# stderr, where the run insists on silence.
+			my @stmts = (
+				'SET client_min_messages = warning;',
+				'DROP INDEX IF EXISTS pgb_part_val_idx;');
+			push @stmts, "DROP INDEX IF EXISTS pgb_part_${_}_val_idx;"
+			  for (1 .. 4);
+			push @stmts, 'RESET client_min_messages;';
+
+			push @stmts, 'CREATE INDEX pgb_part_val_idx ON ONLY pgb_part(val);';
 			for my $i (1 .. 4)
 			{
 				push @stmts,
@@ -1067,12 +1170,15 @@ our %CHECK = (
 	toast_md5 => {
 		weight => 1,
 		requires => { schema => ['toast'] },
-		script => q(
-			SELECT stress_assert(bad = 0,
+		script => sub {
+			my $tol = stress_repack_tolerated('cnt');
+			return qq(
+			SELECT stress_assert(${tol}bad = 0,
 				format('%s rows whose payload does not match its md5', bad))
-			FROM (SELECT COUNT(*) AS bad FROM pgb_toast
-				WHERE md5(payload) <> h) x;
-		),
+			FROM (SELECT COUNT(*) FILTER (WHERE md5(payload) <> h) AS bad,
+				COUNT(*) AS cnt FROM pgb_toast) x;
+			);
+		},
 		final => sub {
 			my ($node, $ctx) = @_;
 			Test::More::is(
@@ -1087,12 +1193,15 @@ our %CHECK = (
 	generated_matches => {
 		weight => 1,
 		requires => { schema => ['generated'] },
-		script => q(
-			SELECT stress_assert(bad = 0,
+		script => sub {
+			my $tol = stress_repack_tolerated('cnt');
+			return qq(
+			SELECT stress_assert(${tol}bad = 0,
 				format('%s rows whose generated column does not match', bad))
-			FROM (SELECT COUNT(*) AS bad FROM pgb_gen
-				WHERE gen <> base * 2 + 1) x;
-		),
+			FROM (SELECT COUNT(*) FILTER (WHERE gen <> base * 2 + 1) AS bad,
+				COUNT(*) AS cnt FROM pgb_gen) x;
+			);
+		},
 		final => sub {
 			my ($node, $ctx) = @_;
 			Test::More::is(
@@ -1106,13 +1215,22 @@ our %CHECK = (
 	no_orphans => {
 		weight => 1,
 		requires => { schema => ['fk_child'] },
-		script => q(
-			SELECT stress_assert(orphans = 0,
+		script => sub {
+			# Both relations are in the rotation's reach, so either of
+			# them reading empty has to be allowed for: an empty parent
+			# table would make every child row look like an orphan.
+			my $tol = stress_repack_tolerated('LEAST(children, parents)');
+			return qq(
+			SELECT stress_assert(${tol}orphans = 0,
 				format('%s child rows reference a missing parent', orphans))
-			FROM (SELECT COUNT(*) AS orphans FROM pgb_child c
-				WHERE NOT EXISTS (SELECT 1 FROM pgbench_accounts a
-					WHERE a.aid = c.aid)) x;
-		),
+			FROM (SELECT
+				(SELECT COUNT(*) FROM pgb_child c WHERE NOT EXISTS
+					(SELECT 1 FROM pgbench_accounts a WHERE a.aid = c.aid))
+					AS orphans,
+				(SELECT COUNT(*) FROM pgb_child) AS children,
+				(SELECT COUNT(*) FROM pgbench_accounts) AS parents) x;
+			);
+		},
 		final => sub {
 			my ($node, $ctx) = @_;
 			Test::More::is(
@@ -1189,6 +1307,8 @@ our %CHECK = (
 			SELECT COUNT(*) AS cnt, COALESCE(SUM(abalance), 0) AS sum
 				FROM pgbench_accounts WHERE abalance > 0 \gset seq_
 			COMMIT;
+			-- Both reads are in one snapshot, so a swap that empties the
+			-- table empties both of them; they still have to agree.
 			SELECT stress_assert(:idx_cnt = :seq_cnt AND :idx_sum = :seq_sum,
 				format('index scan (%s rows, sum %s) disagrees with seq scan (%s rows, sum %s)',
 					:idx_cnt, :idx_sum, :seq_cnt, :seq_sum));
@@ -1224,6 +1344,8 @@ our %CHECK = (
 	row_lock_durability => {
 		weight => 1,
 		requires => { schema => ['ledger'] },
+		# Takes row locks, so it cannot run on a standby.
+		writes => 1,
 		script => q(
 			\set lo random(1, :ledger_rows - 4)
 			BEGIN;
@@ -1284,10 +1406,14 @@ our %CHECK = (
 	no_slot_leak => {
 		final => sub {
 			my ($node, $ctx) = @_;
+			# A subscription owns a slot on the publisher for as long as
+			# it exists, and that slot has no row here to recognize it by,
+			# so compare against what was there before the workload
+			# started: REPACK's transient slot is what must be gone.
 			Test::More::is(
-				$node->safe_psql(
-					'postgres', 'SELECT COUNT(*) FROM pg_replication_slots'),
-				'0', 'no replication slot leaked');
+				$node->safe_psql('postgres', $ctx->{slot_query}),
+				$ctx->{baseline_slots},
+				'no replication slot leaked');
 		},
 	},
 );
@@ -1491,10 +1617,10 @@ our %ENVS = (
 		setup => sub {
 			my ($primary, $ctx) = @_;
 
-			$primary->backup('stress_bkp');
-			my $standby = PostgreSQL::Test::Cluster->new('stress_standby');
-			$standby->init_from_backup($primary, 'stress_bkp',
-				has_streaming => 1);
+			my $bkp = 'stress_bkp_' . ++$node_seq;
+			$primary->backup($bkp);
+			my $standby = PostgreSQL::Test::Cluster->new("stress_standby_$node_seq");
+			$standby->init_from_backup($primary, $bkp, has_streaming => 1);
 
 			# A finite delay, never -1: replay takes the
 			# AccessExclusiveLocks the primary logged before it applies
@@ -1522,23 +1648,42 @@ our %ENVS = (
 			# recovery conflict fails with a serialization error, which is
 			# what pgbench retries for; without that the first
 			# cancellation would end the run.
-			my $pri_cmd = $ctx->{pgbench_cmd}->();
-			my $sby_cmd = $ctx->{pgbench_cmd}->(
-				node => $ctx->{standby},
-				files => $ctx->{check_opts},
-				clients => 10,
-				args => '--max-tries=100');
-
 			my ($po, $pe, $so, $se) = ('', '', '', '');
-			my $ph = IPC::Run::start($pri_cmd, '>', \$po, '2>', \$pe);
-			my $sh = IPC::Run::start($sby_cmd, '>', \$so, '2>', \$se);
+			my $ph =
+			  IPC::Run::start($ctx->{pgbench_cmd}->(), '>', \$po, '2>', \$pe);
+
+			# Only the checks that do not write can run against a
+			# standby.  With none of them there is nothing to run there:
+			# pgbench given no script of its own falls back to its
+			# built-in one, which writes.
+			my $sh;
+			if (@{ $ctx->{ro_check_opts} })
+			{
+				$sh = IPC::Run::start(
+					$ctx->{pgbench_cmd}->(
+						node => $ctx->{standby},
+						files => $ctx->{ro_check_opts},
+						clients => 10,
+						args => '--max-tries=100'),
+					'>', \$so, '2>', \$se);
+			}
+			else
+			{
+				Test::More::note('no read-only checks; standby only replays');
+			}
+
 			IPC::Run::finish($ph);
-			IPC::Run::finish($sh);
+			IPC::Run::finish($sh) if $sh;
 
 			Test::More::like($po, qr{actually processed}, 'primary workload ran');
 			Test::More::like($pe, $ctx->{stderr_re}, 'primary reported nothing');
-			Test::More::like($so, qr{actually processed}, 'standby workload ran');
-			Test::More::like($se, $ctx->{stderr_re}, 'standby reported nothing');
+			if ($sh)
+			{
+				Test::More::like($so, qr{actually processed},
+					'standby workload ran');
+				Test::More::like($se, $ctx->{stderr_re},
+					'standby reported nothing');
+			}
 			return;
 		},
 		final => sub {
@@ -1570,10 +1715,21 @@ our %ENVS = (
 		setup => sub {
 			my ($publisher, $ctx) = @_;
 
-			my $subscriber = PostgreSQL::Test::Cluster->new('stress_subscriber');
-			$subscriber->init;
-			$subscriber->append_conf('postgresql.conf',
-				'max_logical_replication_workers = 8');
+			my $subscriber =
+			  PostgreSQL::Test::Cluster->new('stress_subscriber_' . ++$node_seq);
+			# The subscriber gets rebuilt underneath its own apply
+			# worker, and REPACK (CONCURRENTLY) needs the slots and WAL
+			# level that logical decoding asks for.
+			$subscriber->init(allows_streaming => 'logical');
+			$subscriber->append_conf('postgresql.conf', $_)
+			  for (
+				'max_logical_replication_workers = 8',
+				# The test cluster default is 10, which the subscriber's
+				# own workload plus its apply and sync workers exceed.
+				'max_connections = 50',
+				'max_worker_processes = 32',
+				'log_error_verbosity = verbose',
+				'log_lock_waits = on');
 			$subscriber->start;
 
 			# The subscriber needs the same tables.  Take them from the
@@ -1586,8 +1742,21 @@ our %ENVS = (
 				'--quiet', '--file', $dumpfile, '--dbname',
 				$subscriber->connstr('postgres'));
 
+			# A column of the subscriber's own, indexed so that local
+			# updates to it are never HOT and really do move the rows the
+			# apply worker is looking up.
+			$subscriber->safe_psql(
+				'postgres', q(
+				ALTER TABLE pgbench_accounts ADD COLUMN sub_local int DEFAULT 0;
+				CREATE INDEX pgb_sub_local_idx ON pgbench_accounts(sub_local);
+			));
+
+			# Named tables rather than FOR ALL TABLES, so that one can be
+			# dropped from the publication and added back to force a fresh
+			# table synchronization.
+			my $tables = join ', ', @{ $ctx->{tables} };
 			$publisher->safe_psql('postgres',
-				'CREATE PUBLICATION stress_pub FOR ALL TABLES');
+				"CREATE PUBLICATION stress_pub FOR TABLE $tables");
 			my $connstr = $publisher->connstr . ' dbname=postgres';
 			$subscriber->safe_psql('postgres',
 				"CREATE SUBSCRIPTION stress_sub CONNECTION '$connstr' "
@@ -1598,10 +1767,99 @@ our %ENVS = (
 			push @{ $ctx->{extra_nodes} }, $subscriber;
 			return;
 		},
+		run => sub {
+			my ($publisher, $ctx) = @_;
+			my $subscriber = $ctx->{subscriber};
+
+			my ($po, $pe, $so, $se) = ('', '', '', '');
+			my $ph = IPC::Run::start($ctx->{pgbench_cmd}->(), '>', \$po, '2>', \$pe);
+
+			# The subscriber runs its own loads, if the scenario has any,
+			# against the rows being applied to it.
+			my $sh;
+			if (@{ $ctx->{sub_opts} })
+			{
+				$sh = IPC::Run::start(
+					$ctx->{pgbench_cmd}->(
+						node => $subscriber,
+						files => $ctx->{sub_opts},
+						clients => 10),
+					'>', \$so, '2>', \$se);
+			}
+
+			# Meanwhile the subscriber's own table is rebuilt underneath
+			# the apply worker, and one table is resynchronized from
+			# scratch by taking it out of the publication and putting it
+			# back.
+			#
+			# The replica identity index is deliberately not rebuilt here:
+			# doing so changes its OID and trips an assertion in the apply
+			# worker's FindReplTupleInLocalRel, which is a separate
+			# problem from the ones this scenario is about.
+			my $deadline = time() + $ctx->{duration};
+			my $resync = 0;
+			while (time() < $deadline)
+			{
+				my $pick = int(rand(4));
+				if ($pick == 0)
+				{
+					$subscriber->safe_psql('postgres',
+						'REPACK (CONCURRENTLY) pgbench_accounts');
+				}
+				elsif ($pick == 1)
+				{
+					$subscriber->safe_psql('postgres',
+						'REINDEX INDEX CONCURRENTLY pgb_sub_local_idx');
+				}
+				elsif ($pick == 2)
+				{
+					$subscriber->safe_psql(
+						'postgres', q(
+						DROP INDEX CONCURRENTLY pgb_sub_local_idx;
+						CREATE INDEX CONCURRENTLY pgb_sub_local_idx
+							ON pgbench_accounts(sub_local);
+					));
+				}
+				else
+				{
+					# Taking a table out of the publication and adding it
+					# back makes the next refresh copy it from scratch,
+					# which restarts the table synchronization worker.
+					$publisher->safe_psql('postgres',
+						'ALTER PUBLICATION stress_pub DROP TABLE pgbench_tellers');
+					$subscriber->safe_psql('postgres',
+						'ALTER SUBSCRIPTION stress_sub REFRESH PUBLICATION');
+					$publisher->safe_psql('postgres',
+						'ALTER PUBLICATION stress_pub ADD TABLE pgbench_tellers');
+					$subscriber->safe_psql('postgres',
+						'ALTER SUBSCRIPTION stress_sub REFRESH PUBLICATION');
+					$resync++;
+				}
+			}
+
+			IPC::Run::finish($ph);
+			IPC::Run::finish($sh) if $sh;
+
+			Test::More::like($po, qr{actually processed}, 'publisher workload ran');
+			Test::More::like($pe, $ctx->{stderr_re}, 'publisher reported nothing');
+			if ($sh)
+			{
+				Test::More::like($so, qr{actually processed},
+					'subscriber workload ran');
+				Test::More::like($se, $ctx->{stderr_re},
+					'subscriber reported nothing');
+			}
+			Test::More::note("$resync table resynchronizations");
+			return;
+		},
 		final => sub {
 			my ($publisher, $ctx) = @_;
 			my $subscriber = $ctx->{subscriber};
 
+			# Everything must be subscribed again before the comparison,
+			# whatever the resynchronization was doing when time ran out.
+			$subscriber->safe_psql('postgres',
+				'ALTER SUBSCRIPTION stress_sub REFRESH PUBLICATION');
 			$publisher->wait_for_catchup('stress_sub');
 			my $q = 'SELECT COUNT(*), COALESCE(SUM(abalance), 0) '
 			  . 'FROM pgbench_accounts';

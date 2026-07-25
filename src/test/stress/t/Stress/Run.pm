@@ -42,7 +42,11 @@ use PostgreSQL::Test::Utils;
 use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS);
 use Stress::Scenarios qw(%SCENARIOS);
 
-our @EXPORT = qw(run_scenario stress_seed stress_assert_defn);
+our @EXPORT = qw(run_scenario run_one stress_seed stress_assert_defn);
+
+# Node names have to be unique within a run, and soak mode runs many
+# scenarios in one test.
+my $run_counter = 0;
 
 =pod
 
@@ -170,9 +174,12 @@ sub _validate
 			{
 				foreach my $cname (@{ $defn->{conflicts}->{$ckind} })
 				{
+					# 'env' is a single value rather than a list.
 					die "$kind '$name' cannot be combined with "
 					  . "$ckind '$cname'"
-					  if grep { $_ eq $cname } @{ $spec->{$ckind} // [] };
+					  if $ckind eq 'env'
+					  ? $spec->{env} eq $cname
+					  : grep { $_ eq $cname } @{ $spec->{$ckind} // [] };
 				}
 			}
 		}
@@ -270,6 +277,27 @@ sub run_scenario
 	{
 		plan skip_all => "skipping disabled stress scenario $name";
 	}
+
+	run_one($name, $spec);
+	done_testing();
+	return;
+}
+
+=pod
+
+=item run_one($name, $spec)
+
+Run one combination, given directly rather than looked up.  Used by
+run_scenario() and by soak mode, which runs many in a single test and
+therefore calls done_testing() itself.
+
+=cut
+
+sub run_one
+{
+	my ($name, $spec) = @_;
+
+	my $scale = PostgreSQL::Test::Utils::stress_concurrently_scale();
 	note "running scenario $name at stressval $scale";
 	my $seed = stress_seed();
 
@@ -284,7 +312,9 @@ sub run_scenario
 	#
 	# The cluster the environment asks for.
 	#
-	my $node = PostgreSQL::Test::Cluster->new($name);
+	$run_counter++;
+	my $node_name = $run_counter > 1 ? "${name}_$run_counter" : $name;
+	my $node = PostgreSQL::Test::Cluster->new($node_name);
 	# The environment decides how the cluster is initialized: a standby
 	# or a subscriber needs the primary set up for replication before it
 	# can connect at all.
@@ -400,17 +430,39 @@ sub run_scenario
 	# helper functions already in place so a backup carries them.
 	$env->{setup}->($node, $ctx) if $env->{setup};
 
+	# Whatever slots the environment legitimately created -- a
+	# subscription owns one for as long as it exists -- are the baseline
+	# the leak check measures against.  Table synchronization slots come
+	# and go on their own, so they are no part of it.
+	$ctx->{slot_query} =
+	  q{SELECT COALESCE(string_agg(slot_name, ',' ORDER BY slot_name), '')}
+	  . q{ FROM pg_replication_slots}
+	  . q{ WHERE slot_name NOT LIKE 'pg\_%\_sync\_%'};
+	$ctx->{baseline_slots} = $node->safe_psql('postgres', $ctx->{slot_query});
+
 	#
 	# One script per load, one per check with a script, one for the DDL.
 	# pgbench mixes them by weight, which is what makes the composition
 	# work without a switch at the top of a single script.
 	#
 	my %files;
+	my %sub_files;
 	foreach my $lname (@{ $spec->{load} })
 	{
 		my $l = $LOAD{$lname};
-		$files{ "load_$lname.sql\@" . ($l->{weight} // 1) } =
+		my $body =
 		  _dedent(ref $l->{script} eq 'CODE' ? $l->{script}->($ctx) : $l->{script});
+		# A load may be aimed at the subscriber instead: it then runs
+		# against that node, in its own mix, rather than joining the
+		# workload the DDL rotation is running against.
+		if (($l->{target} // '') eq 'subscriber')
+		{
+			$sub_files{ "subload_$lname.sql\@" . ($l->{weight} // 1) } = $body;
+		}
+		else
+		{
+			$files{ "load_$lname.sql\@" . ($l->{weight} // 1) } = $body;
+		}
 	}
 	foreach my $cname (@{ $spec->{checks} // [] })
 	{
@@ -424,15 +476,15 @@ sub run_scenario
 	# The files themselves land in the node's basedir, which is removed
 	# when the test passes, so put them in the log as well: a scenario
 	# that cannot be read back is not reproducible by hand.
-	foreach my $fn (sort keys %files)
+	foreach my $fn (sort keys %files, sort keys %sub_files)
 	{
-		note "--- $fn ---\n$files{$fn}";
+		note "--- $fn ---\n" . ($files{$fn} // $sub_files{$fn});
 	}
 
 	# Write the scripts out and remember two sets of --file options: all
 	# of them, and the read-only checks alone, which is what a standby
 	# can be given.
-	my (@all_opts, @check_opts, @noddl_opts);
+	my (@all_opts, @check_opts, @ro_check_opts, @noddl_opts);
 	foreach my $fn (sort keys %files)
 	{
 		(my $bare = $fn) =~ s/\@\d+$//;
@@ -440,8 +492,13 @@ sub run_scenario
 		PostgreSQL::Test::Utils::append_to_file($path, $files{$fn});
 		my $weight = ($fn =~ /\@(\d+)$/) ? "\@$1" : '';
 		push @all_opts, '--file' => "$path$weight";
-		push @check_opts, '--file' => "$path$weight" if $bare =~ /^check_/;
 		push @noddl_opts, '--file' => "$path$weight" unless $bare eq 'ddl.sql';
+		next unless $bare =~ /^check_(.*)\.sql$/;
+		push @check_opts, '--file' => "$path$weight";
+		# A check that takes row locks or otherwise writes cannot run
+		# against a standby, however read-only it looks.
+		push @ro_check_opts, '--file' => "$path$weight"
+		  unless $CHECK{$1}->{writes};
 	}
 
 	# Everything the scripts refer to is passed in explicitly rather than
@@ -465,17 +522,41 @@ sub run_scenario
 		];
 	};
 
-	# --random-seed makes pgbench announce the seed on stderr.  Allow
-	# exactly that line and nothing else, so any real complaint -- an
-	# aborted client, a failed assertion -- still fails the test.
-	my $stderr_re = qr{\A(?:pgbench: setting random seed to \d+\n)?\z};
+	# What pgbench is allowed to say.  --random-seed makes it announce
+	# the seed, and a rotation that can interrupt a concurrent reindex --
+	# a rewriting ALTER TABLE taking the table away mid-build, say --
+	# leaves invalid indexes behind, which the next REINDEX reports and
+	# skips.  Both are expected; anything else, an aborted client or a
+	# failed assertion, still fails the test.
+	my $stderr_re = qr{
+		\A
+		(?:pgbench:\ setting\ random\ seed\ to\ \d+\n)?
+		(?:
+			WARNING:\ \ skipping\ reindex\ of\ invalid\ index\ "[^"]+"\n
+			(?:HINT:\ \ [^\n]*\n)?
+		)*
+		\z
+	}x;
 
 	$ctx->{pgbench_cmd} = $pgbench_cmd;
 	$ctx->{all_opts} = \@all_opts;
 	$ctx->{check_opts} = \@check_opts;
+	$ctx->{ro_check_opts} = \@ro_check_opts;
 	# Everything but the DDL, for an environment that issues the commands
 	# itself rather than letting a pgbench client do it.
 	$ctx->{noddl_opts} = \@noddl_opts;
+
+	# The subscriber-targeted loads, written next to the others.
+	my @sub_opts;
+	foreach my $fn (sort keys %sub_files)
+	{
+		(my $bare = $fn) =~ s/\@\d+$//;
+		my $path = $node->basedir . '/' . $bare;
+		PostgreSQL::Test::Utils::append_to_file($path, $sub_files{$fn});
+		my $weight = ($fn =~ /\@(\d+)$/) ? "\@$1" : '';
+		push @sub_opts, '--file' => "$path$weight";
+	}
+	$ctx->{sub_opts} = \@sub_opts;
 	$ctx->{ddl_variants} =
 	  [ map { $DDL{$_}->{variants}->($ctx) } @{ $spec->{ddl} } ];
 	$ctx->{stderr_re} = $stderr_re;
@@ -523,7 +604,6 @@ sub run_scenario
 
 	$_->stop for @{ $ctx->{extra_nodes} // [] };
 	$node->stop;
-	done_testing();
 	return;
 }
 

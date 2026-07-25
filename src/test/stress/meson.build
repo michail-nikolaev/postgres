@@ -25,6 +25,7 @@ tests += {
       't/116_access_methods.pl',
       't/900_serializable.pl',
       't/901_pg_dump.pl',
+      't/999_soak.pl',
     ],
   },
 }
