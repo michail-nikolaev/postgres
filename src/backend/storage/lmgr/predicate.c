@@ -2878,12 +2878,14 @@ DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 
 	/*
 	 * Bail out quickly if there are no serializable transactions running.
-	 * It's safe to check this without taking locks because the caller is
-	 * holding an ACCESS EXCLUSIVE lock on the relation.  No new locks which
-	 * would matter here can be acquired while that is held.
 	 */
+	LWLockAcquire(SerializableXactHashLock, LW_SHARED);
 	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
+	{
+		LWLockRelease(SerializableXactHashLock);
 		return;
+	}
+	LWLockRelease(SerializableXactHashLock);
 
 	if (!PredicateLockingNeededForRelation(relation))
 		return;
@@ -3079,16 +3081,14 @@ PredicateLockPageSplit(Relation relation, BlockNumber oldblkno,
 
 	/*
 	 * Bail out quickly if there are no serializable transactions running.
-	 *
-	 * It's safe to do this check without taking any additional locks. Even if
-	 * a serializable transaction starts concurrently, we know it can't take
-	 * any SIREAD locks on the page being split because the caller is holding
-	 * the associated buffer page lock. Memory reordering isn't an issue; the
-	 * memory barrier in the LWLock acquisition guarantees that this read
-	 * occurs while the buffer page lock is held.
 	 */
+	LWLockAcquire(SerializableXactHashLock, LW_SHARED);
 	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
+	{
+		LWLockRelease(SerializableXactHashLock);
 		return;
+	}
+	LWLockRelease(SerializableXactHashLock);
 
 	if (!PredicateLockingNeededForRelation(relation))
 		return;
@@ -4355,12 +4355,14 @@ CheckTableForSerializableConflictIn(Relation relation)
 
 	/*
 	 * Bail out quickly if there are no serializable transactions running.
-	 * It's safe to check this without taking locks because the caller is
-	 * holding an ACCESS EXCLUSIVE lock on the relation.  No new locks which
-	 * would matter here can be acquired while that is held.
 	 */
+	LWLockAcquire(SerializableXactHashLock, LW_SHARED);
 	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
+	{
+		LWLockRelease(SerializableXactHashLock);
 		return;
+	}
+	LWLockRelease(SerializableXactHashLock);
 
 	if (!SerializationNeededForWrite(relation))
 		return;
