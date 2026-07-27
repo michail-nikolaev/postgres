@@ -1087,6 +1087,23 @@ a lead, not a result.
       from it -- matched = 0 against a root list of 1, which is exactly
       the failing arithmetic.
 
+      Something else that was never exercised until 2026-07-27: an
+      arbiter list with more than one index in it.  Every ON CONFLICT
+      here resolved to a primary key, and the only UNIQUE index in the
+      suite was the matview's, so the root list this check counts
+      against was always a single entry -- meaning the code that maps
+      several arbiters onto a partition, dedupes them by parent and
+      counts the ones being concurrently rebuilt had nothing to do.
+      upsert_keys and partitioned_side now each carry a second unique
+      index over the same column as the primary key, so EXPLAIN reports
+
+        Conflict Arbiter Indexes: p_pkey, pgb_part_id_uniq
+
+      on both the plain and the partitioned target.  8 runs of
+      partitions at stressval 4 with that in place were clean, so it did
+      not immediately reach the residual, but it is the arithmetic the
+      failing check performs and it is now being driven.
+
       Reached again on 2026-07-27, and this time by a change to the
       suite rather than by luck: one run in eight of partitions at
       stressval 4, in a control run made after adding the

@@ -216,6 +216,17 @@ our %SCHEMA = (
 	upsert_keys => {
 		setup => q(
 			ALTER TABLE pgbench_accounts ADD COLUMN ukey int DEFAULT 0;
+
+			-- A second unique index over the same column as the primary
+			-- key, so that ON CONFLICT (aid) infers two arbiters rather
+			-- than one.  Every arbiter in this suite used to be a
+			-- primary key, which meant the executor's arbiter list was
+			-- always a single entry and the code that matches several of
+			-- them onto a partition, dedupes them by parent and counts
+			-- the ones being rebuilt was never given anything to do.
+			-- reindex_table_concurrently and the repacks rebuild this
+			-- one along with the rest.
+			CREATE UNIQUE INDEX pgb_aid_uniq ON pgbench_accounts(aid);
 		),
 	},
 
@@ -576,6 +587,10 @@ our %SCHEMA = (
 			CREATE TABLE pgb_part_4 PARTITION OF pgb_part
 				FOR VALUES FROM (7501) TO ($NROWS + 1);
 			ALTER TABLE pgb_part ADD PRIMARY KEY (id);
+			-- See upsert_keys: two inferable arbiters rather than one,
+			-- here on the partitioned table, so the per-partition
+			-- mapping has to match both.
+			CREATE UNIQUE INDEX pgb_part_id_uniq ON pgb_part(id);
 			-- The first sixteen ids are the contention band: they carry
 			-- no value, so partition_upsert_contend can delete and
 			-- re-insert them without moving the sum the checks watch.
