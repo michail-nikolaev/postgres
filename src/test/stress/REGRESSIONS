@@ -342,10 +342,15 @@ test.
                            FATAL exit
       pg_terminate_backend() of the launching backend leaves the
       decoding worker running and its temporary slot held.
-      expect: cancellation, via the no_slot_leak check -- if the
-              environment terminates rather than only cancels.
+      expect: cancellation, via the no_slot_leak check.
       revert: clean.
-      status: untested
+      status: CATCHES, 2 failures in 8 runs at the default duration, as
+              "no replication slot leaked", and 0 in 10 with the fix
+              restored -- but only after the environment was taught to
+              terminate the session as well as cancel the statement.
+              Cancellation raises ERROR and unwinds through PG_FINALLY,
+              which is where the cleanup this commit moved used to live,
+              so an environment that only cancels can never reach it.
 
   2af1dc89282  2026-05-27  Disable logical decoding after REPACK
                            (CONCURRENTLY)
@@ -353,7 +358,15 @@ test.
       expect: overlapping_ddl, whose checks include decoding_disabled:
               it waits for effective_wal_level to fall back to
               'replica' once the workload is over.
-      status: untested
+      revert: conflicts in slotsync.c, which has moved since.  Do not
+              resolve that by hand -- reintroduce the behaviour instead,
+              by passing false rather than true to
+              ReplicationSlotDropAcquired() in repack_worker.c, which is
+              the whole of what the commit changed at the call site.
+      status: CATCHES, 5 failures in 5 runs at the default duration, as
+              "logical decoding was switched back off", and 0 in 5 with
+              the fix restored.  Slow to fail: the check polls, so a
+              failing run waits out the timeout.
 
   93a3e6839bf  2026-06-09  Fix race when logical decoding activation is
                            concurrently interrupted.
