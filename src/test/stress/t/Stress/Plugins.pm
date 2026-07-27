@@ -725,6 +725,41 @@ our %LOAD = (
 		),
 	},
 
+	# Upserts that really do insert.  upsert_merge only ever meets rows
+	# that already exist, so it always takes the matched path and never
+	# reaches speculative insertion -- and speculative insertion is where
+	# an arbiter index that two transactions disagree about does its
+	# damage.  Here the keys live in a narrow band above the ones pgbench
+	# created, and a quarter of the work deletes them again, so a key is
+	# forever going missing and being raced for by several clients at
+	# once.  The rows carry no balance, so the four-way total is
+	# untouched no matter how many of them exist.
+	upsert_contend => {
+		weight => 3,
+		requires => { schema => ['upsert_keys'] },
+		script => q(
+			\set k random(:naccounts + 1, :naccounts + 16)
+			\set v random(1, 100000)
+			\set mode random(0, 3)
+			\if :mode = 0
+				DELETE FROM pgbench_accounts WHERE aid = :k;
+			\elif :mode = 1
+				-- Naming the constraint rather than the attribute
+				-- resolves the arbiter a different way, and during a
+				-- rebuild several indexes answer to the constraint's
+				-- definition at once.
+				INSERT INTO pgbench_accounts(aid, bid, abalance, ukey)
+					VALUES (:k, 1, 0, :v)
+					ON CONFLICT ON CONSTRAINT pgbench_accounts_pkey
+					DO UPDATE SET ukey = EXCLUDED.ukey;
+			\else
+				INSERT INTO pgbench_accounts(aid, bid, abalance, ukey)
+					VALUES (:k, 1, 0, :v)
+					ON CONFLICT (aid) DO UPDATE SET ukey = EXCLUDED.ukey;
+			\endif
+		),
+	},
+
 	# Nothing but updates to one column, spread evenly over the table.
 	# Where no index covers that column the new version stays on the
 	# page and the old one becomes prunable, so this produces HOT chains

@@ -50,8 +50,8 @@ scenario has to declare:
 
   amcheck        bt_index_parent_check(heapallindexed => true) at the
                  end of the run.  This is what finds heap rows missing
-                 from an index.  It only checks indexes the scenario
-                 declared -- it does not check the pgbench primary keys.
+                 from an index.  It checks the indexes the scenario
+                 declared, and the primary key of each of its tables.
   index_vs_seq   an indexed read and a seqscan of the same snapshot must
                  agree.  Requires the btree_abalance index.
   the invariant  balances, ledger_sum and friends: a wrong answer that
@@ -222,18 +222,70 @@ aborted client, so the suite fails loudly if it hits it.
                            index operations
       Only indisvalid indexes were considered, so two transactions could
       infer different arbiter sets during CIC/RIC.
-      expect: unique_and_gapless (upsert_merge uses ON CONFLICT (k),
-              which is attribute inference -- the shape this fixes)
-      revert: by hand (snapmgr.c hunk plus plancat.c changes since).
-      status: untested
+      expect: unique_and_gapless.
+      revert: git revert conflicts (plancat.c has moved, and this tree
+              changes it too).  Hand-applied instead, which is two lines
+              in infer_arbiter_indexes(): skip !indisvalid rather than
+              !indisready, and drop the "at least one valid" test at the
+              end.  The injection points and specs the commit shipped
+              are not needed to put the bug back.
+      status: CATCHES, 4 failures in 8 runs at stressval 4, as
+
+                ERROR:  duplicate key value violates unique constraint
+                "pgbench_accounts_pkey_ccnew"
+
+              and none in 8 at the default duration, or at stressval 4
+              before the tuning below.  8 runs with the fix restored are
+              clean.
+
+              Two things had to change first, and the second is the
+              interesting one:
+
+              - Nothing swapped the index the upserts actually resolve
+                to.  Every arbiter here is pgbench_accounts_pkey, and
+                the standard rotation reaches a primary key only through
+                reindex_table_concurrently, as one index among the
+                table's.  unique_and_gapless now runs
+                reindex_pkey_concurrently as well.
+              - No upsert in the suite ever inserted.  upsert_merge's
+                own comment says it: the row always exists, so all three
+                of its modes take the matched path.  That means
+                speculative insertion -- the thing an inconsistent
+                arbiter set breaks -- was never reached at all.  The new
+                upsert_contend load keeps 16 keys above pgbench's range
+                appearing and disappearing, so several clients race to
+                insert the same absent key.
+
+              Both were confirmed against the deterministic gate for
+              this bug, test_misc/010_index_concurrently_upsert, which
+              fails immediately with the same reintroduction: that is
+              what said the hand-application was right and the scenario,
+              not the revert, was what needed work.
 
   2bc7e886fc1  2025-12-01  Fix ON CONFLICT ON CONSTRAINT during REINDEX
                            CONCURRENTLY
       During the swap, several indexes match the constraint's
       definition; only the named one was considered.
-      expect: unique_and_gapless -- upsert_merge now names the
-              constraint in one of its three modes.
-      status: untested
+      expect: unique_and_gapless -- upsert_contend names the constraint
+              in one of its modes, on a key that may not be there yet.
+      revert: by hand: in infer_arbiter_indexes(), make the branch for
+              "some other index, and a constraint was named" skip the
+              index instead of matching it on the constraint index's
+              attributes.  That is the whole of the behaviour the commit
+              changed; the rest of it is a refactor.
+      status: CATCHES, 4 failures in 8 runs at stressval 8, as
+
+                ERROR:  duplicate key value violates unique constraint
+                "pgbench_accounts_pkey_ccnew"
+
+              and none in 8 at stressval 4.  6 runs with the fix
+              restored are clean at stressval 8.
+
+              It needs twice the stress of bc32a12e0db above because the
+              window is narrower.  There, the arbiter sets disagree for
+              as long as the new index is indisready and not yet valid,
+              which is the whole build; here they disagree only across
+              the instant the constraint's conindid is swapped.
 
   90eae926abb  2025-12-02  Fix ON CONFLICT with REINDEX CONCURRENTLY and
                            partitions
@@ -458,7 +510,21 @@ Catalog state, cancellation and cleanup
       expect: repack_dml_s1, which declares the toasted_predicate index:
               a predicate long enough to push the pg_index row out of
               line, built and rebuilt by the rotation.
-      status: untested
+      revert: by hand, and it is the easiest of these: the commit is
+              five pure additions of PushActiveSnapshot/PopActiveSnapshot
+              around index_set_state_flags() and
+              index_concurrently_set_dead() in index.c and indexcmds.c,
+              each carrying the comment "Updating pg_index might involve
+              TOAST table access".  Delete the five pairs.
+      status: CATCHES, 8 failures in 8 runs at the default duration.
+              On an assertion build it does not arrive as the toast
+              error in the commit message but as
+
+                TRAP: failed Assert("HaveRegisteredOrActiveSnapshot()"),
+                File: "../src/backend/access/heap/heapam.c", Line: 240
+
+              taking the backend down, which is the same missing
+              snapshot caught one frame earlier.
 
   13503eb5905  2023-10-30  Diagnose !indisvalid in more SQL functions.
       pgstatindex and friends on an invalid index left behind by a

@@ -4,6 +4,19 @@
 # The smallest scale there is: one branch row, so every transaction in
 # the mix collides on it, and the DDL runs against tables that are being
 # modified as fast as the lock manager allows.
+#
+# Gates b52adbad467, "Ensure we have a snapshot when updating pg_index
+# entries".  Without it this fails eight runs in eight at the default
+# duration, on an assertion build as
+#
+#   TRAP: failed Assert("HaveRegisteredOrActiveSnapshot()"),
+#   File: "../src/backend/access/heap/heapam.c"
+#
+# taking the backend down; without assertions the same missing snapshot
+# surfaces one frame later as "cannot fetch toast data without an active
+# snapshot".  What this scenario contributes is the toasted_predicate
+# index: its predicate is long enough to push the index's pg_index row
+# out of line, so marking that index valid or dead has to read TOAST.
 use strict;
 use warnings FATAL => 'all';
 
