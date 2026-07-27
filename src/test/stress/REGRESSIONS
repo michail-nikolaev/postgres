@@ -201,9 +201,15 @@ aborted client, so the suite fails loudly if it hits it.
       pg_inherits rows swapping between two get_partition_ancestors()
       calls yields duplicate arbiters and "invalid arbiter index list".
       expect: partitions, as above.
-      revert: clean.
-      status: untested -- but see the open finding below, which is this
-              error message appearing on a tree that has this fix.
+      revert: conflicts in the test it shipped with; revert the
+              execPartition.c hunk alone.
+      status: CATCHES, 3 failures in 8 runs at stressval 4 as "invalid
+              arbiter index list", nothing at the default duration.
+              With the fix, 1 in 20 -- but that run's cause was not
+              captured and this scenario has an intermittent lock
+              timeout of its own, so it is not evidence of a residual.
+              The soak occurrence below is: that one was captured, with
+              this fix in place.
 
 
 DETACH PARTITION CONCURRENTLY
@@ -716,6 +722,12 @@ a lead, not a result.
       runs of a rotation narrowed to reindex plus the detach variants,
       or 10 runs at stressval 3.  So it is rarer than about 1 in 50 at
       those settings, and needs soak time rather than a tighter loop.
+
+      Since revert-testing e6d6e32f424 (3 failures in 8 without it,
+      against this one sighting in 400-odd soak combinations with it),
+      the shape is confirmed as the one that commit addresses -- so this
+      is either a residual case it does not cover, or something that
+      reaches the same elog by another route.
 
       One hypothesis worth testing before assuming a server bug: the
       detach_drop_recreate_partition variant attaches a partition whose

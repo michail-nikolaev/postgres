@@ -10,6 +10,19 @@
 # is revalidated, which is where the detach races have always been
 # found.
 #
+# Without e6d6e32f424, which stops two child indexes that appear to
+# share a parent from both being counted as arbiters, this fails three
+# runs in eight at stress_concurrently=4 with
+#
+#   ERROR:  invalid arbiter index list
+#
+# from the upsert routed through the parent, and nothing at the default
+# duration.  With the fix, one run in twenty still failed here, but that
+# run's cause was not captured and this scenario has an intermittent
+# lock timeout of its own -- see REGRESSIONS -- so it should not be read
+# as a residual.  What is on the record as a residual is a soak run that
+# produced this same error with the fix in place; that one was captured.
+#
 # Without the fix in RelationBuildPublicationDesc() that copes with an
 # empty ancestor list, this fails five runs in eight at
 # stress_concurrently=4 with
