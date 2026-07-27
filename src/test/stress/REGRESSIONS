@@ -83,11 +83,10 @@ heapallindexed catches directly.
       RelationBuildDesc() on the new index does not see the catalog
       change by its next transaction start, so it stops maintaining the
       index; queries using it then silently miss rows.
-      expect: repack_dml_s1, repack_dml_s50 (amcheck, index_vs_seq)
-      revert: by hand -- relcache.c has moved.  The fix is the retry
-              loop in RelationBuildDesc() plus the in-progress
-              invalidation tracking in inval.c; removing the loop is
-              enough.
+      expect: index_build_churn.
+      revert: by hand -- disable the "goto retry" at the end of
+              RelationBuildDesc().  That is the whole of the behaviour;
+              the in_progress_list bookkeeping can stay.
       also:   already guarded upstream by contrib/amcheck/t/002_cic.pl,
               which shipped with this commit and is the direct ancestor
               of this suite's design: pgbench, an advisory lock so only
@@ -95,7 +94,33 @@ heapallindexed catches directly.
               from inside the pgbench script.  Reverting is therefore a
               calibration exercise -- does this suite catch it too, and
               how much faster -- rather than a gap being closed.
-      status: untested
+      status: CATCHES, 2 failures in 8 runs at stressval 8, as
+
+                ERROR:  heap tuple (0,94) from table "pgbench_history"
+                lacks matching index tuple within index
+                "pgb_history_delta_idx"
+
+              and 0 in 6 with the fix restored.  Nothing at the default
+              duration, and nothing at all -- 0 in 15 -- from
+              repack_dml_s1, hot_prune or unique_and_gapless, which is
+              why index_build_churn exists.
+
+              What it needed was rate, not a different mechanism.  The
+              scenarios above spread CREATE INDEX CONCURRENTLY over
+              several rotation entries and several tables, so any one
+              index is rebuilt seldom; 002_cic spends about a third of
+              its transactions on a build-and-check of one index on a
+              tiny table.  index_build_churn copies that: one table, one
+              declared index, a rotation containing nothing but
+              drop_create_index, and 30 clients inserting.  Raising the
+              client count from 10 to 30 took it from 1 in 6 to 2 in 8.
+
+              Calibration answer, since this entry was listed as one:
+              002_cic catches the same reintroduction 2 runs in 2, at
+              the default duration, in a few seconds.  It is strictly
+              better than this suite here and must not be retired on the
+              strength of index_build_churn.  See the note in
+              "Duplicated upstream tests".
 
   3cd9c3b9219  2021-10-23  Fix CREATE INDEX CONCURRENTLY for the newest
                            prepared transactions.
@@ -1412,8 +1437,11 @@ Two rules for that, both learned from the entries above:
 
   candidate                                     covered by
   --------------------------------------------- --------------------
-  contrib/amcheck/t/002_cic.pl                  repack_dml_s1,
-                                                repack_dml_s50
+  contrib/amcheck/t/002_cic.pl                  NOT a candidate; see
+                                                fdd965d074d above.  It
+                                                catches 2 in 2 what
+                                                index_build_churn
+                                                catches 2 in 8.
   contrib/amcheck/t/003_cic_2pc.pl              bulk_and_rewrite
 
 Nothing has earned it yet: every entry above is still "untested".

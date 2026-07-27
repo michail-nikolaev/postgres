@@ -894,6 +894,22 @@ our %LOAD = (
 		),
 	},
 
+	# Nothing but inserts into an append-only table.  This exists to be
+	# raced by a high rate of CREATE INDEX CONCURRENTLY on a small
+	# relation, which is the shape contrib/amcheck's 002_cic uses and
+	# the shape the relcache build race needs: a backend has to absorb
+	# an invalidation while building the descriptor for the new index,
+	# and the chance of that scales with how often an index is built.
+	history_insert => {
+		weight => 1,
+		script => q(
+			\set aid random(1, :naccounts)
+			\set delta random(-5000, 5000)
+			INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
+				VALUES (1, 1, :aid, :delta, CURRENT_TIMESTAMP);
+		),
+	},
+
 	# Writes routed through the hash-partitioned parent, so a detach of
 	# one of its partitions has something to race.
 	hash_dml => {

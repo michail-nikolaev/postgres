@@ -26,6 +26,7 @@ tests += {
       't/117_partitioned_pgbench.pl',
       't/118_hot_prune.pl',
       't/119_hash_and_constraints.pl',
+      't/120_index_build_churn.pl',
       't/999_soak.pl',
     ],
   },
