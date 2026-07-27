@@ -745,7 +745,33 @@ Catalog state, cancellation and cleanup
               environment tolerates the error messages a cancelled
               build produces, and would otherwise notice nothing.
       revert: hand only; the code is from 2012.
-      status: untested
+      revert: not possible by hand on this code, which is the finding.
+              The commit's essential change is ordering: delete the
+              object first, then its outgoing pg_depend links, closing
+              depRel across doDeletion() because that subroutine commits.
+              Putting the links back first -- the pre-2012 order -- makes
+              DROP INDEX CONCURRENTLY fail immediately with
+
+                ERROR:  DROP INDEX CONCURRENTLY must be first action in
+                transaction
+
+              on a plain uncontended drop, because the transaction has
+              already executed a command by the time the concurrent path
+              checks.  Verified both ways on a scratch cluster: the
+              reverted binary refuses every DIC, the restored one drops
+              cleanly.  The modern concurrent-drop path depends on the
+              order the commit introduced, so the 2012 race cannot be
+              recreated by reordering alone -- it would need the
+              surrounding fourteen years of restructuring undone too.
+      status: MISSED, untestable by revert.  6 runs of cancellation with
+              the reordering in place passed, which is itself worth
+              knowing: that environment runs its own DDL and tolerates
+              the errors a cancelled command produces, so a command that
+              fails *every* time is indistinguishable from one that was
+              cancelled.  A binary with DROP INDEX CONCURRENTLY
+              completely broken passes this suite.  If that matters, the
+              cancellation scenario needs an assertion that some DDL
+              attempts succeed, not only that the failures are tolerable.
 
   9511fb37ac7  2020-08-30  Reset indisreplident for an invalid index in
                            DROP INDEX CONCURRENTLY
