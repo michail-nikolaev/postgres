@@ -919,20 +919,47 @@ a lead, not a result.
       reads.  Neither produced a sighting, so that theory is neither
       confirmed nor excluded -- only that 2ms of it is not enough.
 
-      The hypothesis still worth testing is that the fallback which
-      rescues an arbiter being rebuilt cannot run in the case that
-      matters.  It is guarded by "if (unparented_idxs &&
-      arbiterIndexes)" and compares unparented indexes only against
-      arbiters already matched on the same partition; if a leaf has no
-      index whose ancestor is in the root's list -- because a detach
-      removed the link -- then arbiterIndexes is empty, there is nothing
-      to compare against, and the count check fails.  Confirming that
-      needs the state at the point of failure, which is why the error
-      now carries it (see below).  An injection point already exists in
-      that loop, exec-init-partition-after-get-partition-ancestors,
-      which is the tool to reach for next: hold a backend inside the
-      loop and complete a detach around it, rather than hoping load
-      lands in the window.
+      The mid-loop hypothesis is now excluded, by experiment rather
+      than by argument.  The idea was that the leaf's catalog reads see
+      a state the planner's arbiter list does not, because
+      get_partition_ancestors() refreshes the catalog snapshot each time
+      round the loop (the XXX comment above it says so).  The loop has
+      an injection point in it,
+      exec-init-partition-after-get-partition-ancestors, so a backend
+      can be held there while another session tries the DDL.  Four
+      commands were tried, each with lock_timeout so a block shows up as
+      an error rather than a hang:
+
+        REINDEX INDEX CONCURRENTLY <partitioned pkey>
+                                        ShareLock on the relation
+        REINDEX INDEX CONCURRENTLY <leaf pkey>
+                                        ShareLock on a virtual xact
+        ALTER TABLE .. DETACH PARTITION .. CONCURRENTLY
+                                        ShareLock on a virtual xact
+        ALTER INDEX .. ATTACH PARTITION <child index>
+                                        AccessExclusiveLock on the index
+
+      All four blocked on locks the executing backend already holds, and
+      the upsert came out clean every time.  So no catalog change that
+      could disturb the mapping can commit while a backend is inside the
+      loop; the window this file spent 44 runs and two compiled-in
+      sleeps trying to widen does not exist.
+
+      That relocates the race to before the statement takes its locks:
+      the arbiter list is decided when the plan is made, and the leaf's
+      ancestors are read when the executor first opens that partition.
+      A skew between the two has to be established across a statement
+      boundary, not inside one -- which fits the scenario that produces
+      it, since partitions is the one running force_generic_plan with
+      the prepared protocol against an upsert wrapped in a plpgsql
+      function, so its plans are cached and revalidated rather than
+      built fresh.  The shape to try next: cache the plan in one
+      session, let REINDEX CONCURRENTLY on the *partitioned* index
+      complete from another while the first sits idle, then execute the
+      cached plan.  That rebuild gives the parent index a new OID, so a
+      plan still naming the old one would find no leaf index descended
+      from it -- matched = 0 against a root list of 1, which is exactly
+      the failing arithmetic.
 
       Recreating the instrumentation takes two minutes: in
       execPartition.c, above the count check, build a StringInfo naming
