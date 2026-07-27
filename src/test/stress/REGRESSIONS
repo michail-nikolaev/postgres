@@ -335,7 +335,27 @@ its second phase, usually reached through a cached plan.
       expect: partitions, which runs --protocol=prepared with
               force_generic_plan so that plans are cached and
               revalidated while the rotation detaches.
-      status: untested
+      revert: git revert conflicts (execPartition.c has moved a long
+              way).  Hand-applied instead, and it is two lines: put back
+              Assert(partdesc->nparts >= pinfo->nparts) before the
+              mapping branch, and drop the memcmp from that branch's
+              condition so an equal partition count is again taken to
+              mean an equal set.  Those are the two assumptions the
+              commit removed; everything else in it is the machinery for
+              coping without them.
+      status: CATCHES, 3 failures in 8 runs at stressval 4, as
+
+                TRAP: failed Assert("partdesc->nparts >= pinfo->nparts"),
+                File: "../src/backend/executor/execPartition.c"
+
+              taking the backend down -- the assertion failure the
+              commit message leads with, from a cached plan whose
+              partition descriptor lost a partition between planning and
+              ExecInitAppend.  None at the default duration.  8 runs
+              with the fix restored produce no assertion failure (they
+              produce something else; see the open finding on "invalid
+              arbiter index list", which is why the signature and not
+              just the exit status is what to check here).
 
   c899c6839f5  2024-08-12  Fix creation of partition descriptor during
                            concurrent detach+drop
@@ -868,8 +888,15 @@ a lead, not a result.
       stressval 1 with 20 clients.  Replaying that seed did not
       reproduce it, and neither did 30 runs of the same scenario, 12
       runs of a rotation narrowed to reindex plus the detach variants,
-      or 10 runs at stressval 3.  So it is rarer than about 1 in 50 at
-      those settings, and needs soak time rather than a tighter loop.
+      or 10 runs at stressval 3.
+
+      It is not that rare after all: at stressval 4 the partitions
+      scenario reproduces it in 2 runs of 8, on a tree carrying
+      e6d6e32f424, bc32a12e0db and 2bc7e886fc1.  That measurement came
+      out of a control run -- eight runs with dbca3469ebf restored,
+      which were supposed to be clean and were not.  So what the earlier
+      loops were missing was the stressval, not soak time, and this is
+      now cheap to work on: 2026-07-27.
 
       Since revert-testing e6d6e32f424 (3 failures in 8 without it,
       against this one sighting in 400-odd soak combinations with it),

@@ -23,6 +23,18 @@
 # as a residual.  What is on the record as a residual is a soak run that
 # produced this same error with the fix in place; that one was captured.
 #
+# Without dbca3469ebf, "Fix partition pruning setup during DETACH
+# CONCURRENTLY", this fails three runs in eight at
+# stress_concurrently=4 with
+#
+#   TRAP: failed Assert("partdesc->nparts >= pinfo->nparts"),
+#   File: execPartition.c
+#
+# taking the backend down: a cached plan is executed after a detach has
+# removed a partition from the descriptor, and the pruning setup used to
+# assume partitions could only ever be added.  This is what the prepared
+# protocol and force_generic_plan above are for.
+#
 # Without the fix in RelationBuildPublicationDesc() that copes with an
 # empty ancestor list, this fails five runs in eight at
 # stress_concurrently=4 with
