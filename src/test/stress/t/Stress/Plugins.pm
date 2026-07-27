@@ -2504,6 +2504,45 @@ our %CHECK = (
 		},
 	},
 
+	# The statistics functions must refuse an invalid index rather than
+	# reading it.  A failed concurrent build leaves one behind, and its
+	# storage may be torn or half-written, so pgstatindex reading it is
+	# how a "can\'t happen" corruption error gets reported for something
+	# that is merely incomplete.  The invalid index is made here rather
+	# than waited for: a unique build over duplicate values fails and
+	# leaves exactly one.
+	pgstat_rejects_invalid_index => {
+		final => sub {
+			my ($node, $ctx) = @_;
+
+			$node->safe_psql('postgres',
+				'CREATE EXTENSION IF NOT EXISTS pgstattuple');
+			$node->psql(
+				'postgres',
+				'INSERT INTO pgb_bare VALUES (1), (1);'
+				  . 'CREATE UNIQUE INDEX CONCURRENTLY pgb_bare_uniq'
+				  . ' ON pgb_bare(a);',
+				on_error_stop => 0);
+
+			my $invalid = $node->safe_psql(
+				'postgres', q(
+				SELECT COUNT(*) FROM pg_index i
+				WHERE i.indexrelid = to_regclass('pgb_bare_uniq')
+				  AND NOT i.indisvalid));
+			Test::More::is($invalid, '1',
+				'the failed unique build left an invalid index');
+
+			my (undef, undef, $err) =
+			  $node->psql('postgres', "SELECT pgstatindex('pgb_bare_uniq')",
+				on_error_stop => 0);
+			Test::More::like($err, qr/is not valid/,
+				'pgstatindex refuses an invalid index');
+
+			$node->safe_psql('postgres',
+				'DROP INDEX IF EXISTS pgb_bare_uniq');
+		},
+	},
+
 	# REPACK cannot locate tuples by a deferrable key, so it has to
 	# refuse a table whose only identity is one.  Asserting the refusal
 	# is the only way to gate this: a server that accepts the table is

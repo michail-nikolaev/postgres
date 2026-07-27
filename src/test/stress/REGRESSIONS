@@ -719,8 +719,24 @@ Catalog state, cancellation and cleanup
   13503eb5905  2023-10-30  Diagnose !indisvalid in more SQL functions.
       pgstatindex and friends on an invalid index left behind by a
       cancelled build.
-      expect: nothing -- the suite does not call pgstattuple.
-      status: untested, MISSED by construction
+      expect: hash_and_constraints, through pgstat_rejects_invalid_index.
+      revert: clean.
+      status: CATCHES, 3 failures in 3 runs at the default duration, as
+
+                not ok - pgstatindex refuses an invalid index
+
+              and 4 runs with the fix restored are clean.
+
+              It was listed as MISSED because the suite does not call
+              pgstattuple, which was true and easy to change.  The check
+              does not wait for a cancelled build to leave an invalid
+              index either -- it makes one deterministically, by running
+              a unique build over duplicate values, which fails and
+              leaves exactly one behind.  Then it requires pgstatindex
+              to refuse it.  Without the fix that call does not raise
+              "is not valid": the commit records it failing instead with
+              ERRCODE_DATA_CORRUPTED, a can't-happen class error for an
+              index that is merely incomplete.
 
   c426f7c2b36  2023-12-07  Fix assertion failure with REINDEX and event
                            triggers
