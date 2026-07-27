@@ -549,7 +549,28 @@ test.
       A tuple modified concurrently may not be indexed yet under a
       deferrable PK, so REPACK cannot locate it.
       expect: nothing -- no schema uses a deferrable primary key.
-      status: untested, MISSED by construction
+      revert: clean, in repack.c (restore the regress expectations and
+              keep only the backend hunk).
+      status: CATCHES, 3 failures in 3 runs at the default duration, as
+
+                not ok - REPACK refuses a table whose only identity is
+                deferrable
+
+              once the suite had a table with a deferrable primary key.
+              4 runs with the fix restored are clean.
+
+              This one is an assertion about behaviour rather than a
+              race, and it took two attempts to set up.  The table must
+              have no replica identity: with one designated, both the
+              fixed and the broken code use it and the deferrable key is
+              never reached -- the broken code only falls back to the
+              primary key.  And with the fix in place REPACK refuses
+              such a table by design, so pointing the rotation at it
+              would produce a refusal in the DDL client that the harness
+              could not tell from a failure.  So pgb_defer stays out of
+              the rotation and a check runs the REPACK itself and
+              asserts the refusal.  A server that accepts the table is
+              the bug, and it does not announce itself.
 
   0160143ad9a  2026-05-19  Fix REPACK decoding worker not cleaned up on
                            FATAL exit

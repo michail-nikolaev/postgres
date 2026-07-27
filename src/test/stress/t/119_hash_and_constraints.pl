@@ -28,16 +28,19 @@ use Stress::Run;
 run_scenario(
 	'hash_and_constraints',
 	{
-		schema => [ 'pgbench', 'partitioned_hash', 'nulls_not_distinct' ],
+		schema => [ 'pgbench', 'partitioned_hash', 'nulls_not_distinct',
+			'deferrable_pk' ],
 		pgbench_scale => 1,
-		load => [ 'tpcb_like', 'hash_dml', 'nnd_upsert' ],
+		load => [ 'tpcb_like', 'hash_dml', 'nnd_upsert',
+			'deferred_key_swap' ],
 		ddl => [
 			'repack_concurrently', 'reindex_table_concurrently',
 			'reindex_pkey_concurrently', 'detach_hash_partition',
 			'add_validate_constraint', 'reindex_schema_concurrently'
 		],
 		ddl_concurrency => 1,
-		checks => [ 'balances', 'amcheck', 'no_substitute_constraints' ],
+		checks => [ 'balances', 'amcheck', 'no_substitute_constraints',
+			'deferred_keys_intact', 'repack_refuses_deferrable' ],
 		env => 'standalone',
 		clients => 20,
 		tags => ['ci'],
