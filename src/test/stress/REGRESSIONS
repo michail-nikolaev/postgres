@@ -871,6 +871,60 @@ a lead, not a result.
               than load, which is worth knowing before spending more on
               it.
 
+  could not open relation with OID, from the RI fast path
+
+      Seen once, in CI on 2026-07-27 (GitHub Actions run 30289192531,
+      Linux - Meson 64-bit, which builds with ASAN and cassert and runs
+      with io_method=io_uring).  Every other job was green, and the
+      stress suite passes locally on the same commit.
+
+        ERROR:  could not open relation with OID 16435
+        STATEMENT:  UPDATE pgb_child SET pid = 952
+        BACKTRACE:  index_open <- ri_triggers <- RI_FKey_check_upd
+                    <- AfterTriggerEndQuery <- standard_ExecutorFinish
+
+      That is the RI fast path opening a conindid that no longer exists,
+      which is what 02483bebd3c on this branch is supposed to prevent by
+      re-reading the constraint under the PK table's lock.  So this is a
+      hole in that fix, not a test problem.  There are only two
+      index_open(riinfo->conindid) call sites and both carry the
+      re-read.
+
+      Timeline from the server log: REINDEX TABLE CONCURRENTLY
+      pgb_parent ran at 13.299 and that backend was back to ordinary
+      load statements by 14.202, so it had finished; the failing UPDATE
+      started at 14.285.  The old index was already gone and no lock
+      protected it, so this is not a race the lock interlock could have
+      covered.
+
+      One explanation was proposed and then falsified.  It was that the
+      re-read is a no-op: ri_LoadConstraintInfo() returns the cached
+      RI_ConstraintInfo without consulting pg_constraint whenever the
+      entry is still marked valid, so a session holding a pre-swap
+      conindid would keep it.  A deterministic probe was built for it
+      with the injection points REINDEX CONCURRENTLY already has --
+      warm a session's RI cache, pin the rebuild at
+      reindex-relation-concurrently-before-swap or -before-set-dead,
+      let it finish, then have the session do another RI check.  Six
+      scenarios, including the same shapes with REPACK (CONCURRENTLY)
+      and with the writing session holding its transaction open across
+      the rebuild.  All clean: the invalidation is processed when the
+      next lock is taken, and the re-read does see the new conindid.
+
+      So the mechanism is still unknown.  What the probe did not cover,
+      and what to try next: the batched path.  ri_FastPathBatchAdd()
+      queues up to RI_FASTPATH_BATCH_SIZE rows and the entry built by
+      ri_FastPathGetEntry() is flushed at AfterTriggerEndQuery, which is
+      where the CI stack ends up -- so the interval between building
+      that entry and using it spans many rows, and is much longer than
+      anything the probe exercised.  Note also that REPACK preserves
+      index OIDs where REINDEX does not, so the OID that failed came
+      from a REINDEX.
+
+      Local reproduction: 8 runs of foreign_keys at stressval 4, clean,
+      on a freshly installed build.  CI runs this under ASAN, which is
+      far slower, and that is the likeliest reason it shows there.
+
   invalid arbiter index list, on a tree that has the fix for it
 
       Seen once, in the partitions scenario during a soak run:
