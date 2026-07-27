@@ -20,13 +20,19 @@
 # Without the fix in execReplication.c that looks the tuple up under an
 # MVCC snapshot rather than a dirty one, this fails twice in eight runs
 # at stress_concurrently=4 -- and not at all at the default duration --
-# with the apply and tablesync workers logging
+# with the apply worker logging
 #
 #   conflict detected on relation "public.pgbench_tellers":
 #   conflict=update_missing
 #
 # because a dirty index scan can miss a tuple updated concurrently when
 # the new version lands in a part of the scan already visited.
+#
+# When reading a failure here, check which origin logged the conflict.
+# This scenario also fails about one run in seven with every fix in
+# place, on pgbench_tellers and from a tablesync worker rather than the
+# apply worker, which is the resynchronisation this environment does
+# rather than anything the fixes above are about.  See REGRESSIONS.
 use strict;
 use warnings FATAL => 'all';
 

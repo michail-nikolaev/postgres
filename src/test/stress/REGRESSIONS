@@ -498,7 +498,12 @@ by concurrent DDL and the suite runs the shapes that reach them.
                            procArray->replication_slot_xmin.
       expect: overlapping_ddl, subscription (no_slot_leak, and the
               invariants if a needed row is removed too early)
-      status: untested
+      revert: clean.
+      status: CATCHES, 3 failures in 8 runs at stressval 4 -- twice as
+              "logical decoding was switched back off" and once as
+              "no update_missing conflict was logged", which is what a
+              slot xmin that moves too far looks like from the other
+              end: rows the decoder still needed were removed.
 
   a2b4102a21a  2025-09-11  Fill testing gap for possible referential
                            integrity violation
@@ -611,6 +616,35 @@ checkable by reading -- rather than on a demonstration.
 
 Open findings
 =============
+
+  update_missing from a tablesync worker, with every fix in place
+
+      113_subscription fails roughly one run in seven at stressval 4
+      with
+
+        conflict detected on relation "public.pgbench_tellers":
+        conflict=update_missing
+
+      logged by a tablesync worker -- origin pg_NNNNN_NNNNN, not the
+      main apply origin.  A tablesync worker only exists here because
+      the subscription environment resynchronises pgbench_tellers by
+      dropping it from the publication and adding it back, so the first
+      suspicion should be that machinery rather than the server: the
+      resync truncates the subscriber's copy so the fresh COPY has
+      somewhere to land, and waits for catchup first so that changes
+      decoded before the drop cannot arrive after the truncate.  Some
+      window is evidently still open.
+
+      This matters for reading the rest of this file.  The CF 5151 entry
+      was measured at two failures in eight with the fix reverted and
+      none in eleven with it restored; the second half of that is now
+      known to be luckier than it looked, since the scenario fails at
+      about this rate for a reason unrelated to that fix.  The reverted
+      rate stands -- it is a different and much higher rate, on a
+      different relation, from the apply worker rather than a tablesync
+      one -- but a future measurement here should separate the two by
+      which origin logs the conflict.
+
 
 Things this suite has produced that are not explained yet.  They are
 here rather than in a commit message because an unreproduced failure is
