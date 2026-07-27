@@ -216,6 +216,11 @@ our %SCHEMA = (
 			ALTER TABLE pgbench_accounts
 				ADD COLUMN payload text,
 				ADD COLUMN h text;
+			-- Left as EXTENDED, the default: the value should go out of
+			-- line AND be compressed there.  A rewrite that reassembles
+			-- such a datum has to preserve the compression flag in its
+			-- header, and EXTERNAL storage -- which never compresses --
+			-- would put that path out of reach.
 		),
 	},
 
@@ -893,12 +898,20 @@ our %LOAD = (
 		requires => { schema => ['toast'] },
 		script => q(
 			\set id random(1, :naccounts)
-			\set len random(2000, 8000)
+			\set len random(3000, 6000)
 			-- The payload is built once in the subquery and used for both
 			-- columns; computing it twice would give two different values
 			-- and a mismatch that is the test's fault, not the server's.
+			--
+			-- Large and compressible, which is a narrower target than it
+			-- looks.  It has to compress -- the interesting header is a
+			-- compressed one -- but still exceed the toast threshold
+			-- after compressing, or it stays in the tuple.  A repeated
+			-- hash compresses about fiftyfold, so the raw value has to be
+			-- a hundred kilobytes or so to leave a couple of kilobytes
+			-- behind.
 			UPDATE pgbench_accounts SET payload = s.p, h = md5(s.p)
-				FROM (SELECT repeat(md5(random()::text), :len / 32) AS p) s
+				FROM (SELECT repeat(md5(random()::text), :len) AS p) s
 				WHERE aid = :id;
 		),
 	},

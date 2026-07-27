@@ -282,7 +282,22 @@ test.
       toasted tuple were not reconstructed correctly.
       expect: rewrite_fidelity (toast decorator, toast_md5 check)
       revert: clean, one line in repack.c.
-      status: untested.  Second-best candidate to start with.
+      status: CATCHES, 8 failures in 8 runs at stressval 4, as
+
+                stress assertion failed: N rows whose payload does not
+                match its md5
+
+              which is silent corruption rather than an error.  Getting
+              there took tuning the payload, and the tuning is the
+              interesting part: the reassembly writes a plain four-byte
+              varlena header over what may be a compressed one, so the
+              value has to be compressed to reach it.  A short payload
+              compresses back into the tuple and never goes out of line;
+              SET STORAGE EXTERNAL goes out of line but never compresses.
+              Large and compressible -- a repeated hash, big enough that
+              even at fiftyfold compression it clears the toast
+              threshold -- is the shape that reaches it, and 0 in 8 with
+              the fix restored.
 
   3be823486f2  2026-07-03  Fix REPACK CONCURRENTLY for stored generated
                            columns
