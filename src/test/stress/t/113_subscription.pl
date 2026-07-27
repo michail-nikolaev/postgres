@@ -16,6 +16,17 @@
 # rebuild weighted up (stress_repl_identity_rebuild=1), and none in
 # twenty-nine afterwards.  Without assertions the same staleness aims
 # the lookup at an index that REINDEX CONCURRENTLY has dropped.
+#
+# Without the fix in execReplication.c that looks the tuple up under an
+# MVCC snapshot rather than a dirty one, this fails twice in eight runs
+# at stress_concurrently=4 -- and not at all at the default duration --
+# with the apply and tablesync workers logging
+#
+#   conflict detected on relation "public.pgbench_tellers":
+#   conflict=update_missing
+#
+# because a dirty index scan can miss a tuple updated concurrently when
+# the new version lands in a part of the scan already visited.
 use strict;
 use warnings FATAL => 'all';
 
