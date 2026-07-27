@@ -294,7 +294,38 @@ aborted client, so the suite fails loudly if it hits it.
       expect: partitions -- the partition_upsert load routes an upsert
               through the parent while the rotation rebuilds a
               partition's index.
-      status: untested
+      revert: by hand, and it is one line: the commit added the whole
+              "unparented indexes may be arbiters too" fallback to
+              ExecInitPartitionInfo, so disabling that block puts the
+              bug back.  additional_arbiters then stays 0 and the count
+              check still balances, which is what makes the failure a
+              wrong answer rather than an internal error.
+      status: CATCHES, but thinly: 1 failure in 6 runs at stressval 4
+              and 1 in 8 at stressval 8, as
+
+                ERROR:  duplicate key value violates unique constraint
+                "pgb_part_1_pkey_ccnew"
+
+              on the transient index a rebuild leaves behind.  The rate
+              does not improve with stressval because what gates it is
+              how often the rotation rebuilds a partition's index while
+              a contending insert lands on that partition.
+
+              As with bc32a12e0db, the scenario could not reach this at
+              all until it had an upsert that actually inserts:
+              partition_upsert only ever meets rows that already exist.
+              The new partition_upsert_contend load races several
+              clients to insert the same absent key through the parent.
+              It is confined to a sixteen-id contention band whose rows
+              carry no value, so deleting and re-inserting them does not
+              move the sum partition_sum watches -- and that check only
+              asserts when every row is present anyway.  partition_dml
+              and partition_upsert were moved off the band so nothing
+              else writes value into it.
+
+              Distinguish this from the residual below by signature: a
+              duplicate key error is this entry, "invalid arbiter index
+              list" is not.
 
   e6d6e32f424  2026-01-28  Fix duplicate arbiter detection during REINDEX
                            CONCURRENTLY on partitions
@@ -1014,6 +1045,24 @@ a lead, not a result.
       plan still naming the old one would find no leaf index descended
       from it -- matched = 0 against a root list of 1, which is exactly
       the failing arithmetic.
+
+      Reached again on 2026-07-27, and this time by a change to the
+      suite rather than by luck: one run in eight of partitions at
+      stressval 4, in a control run made after adding the
+      partition_upsert_contend load.  That load races several clients to
+      insert the same absent key through the parent, which is the first
+      time anything here drove speculative insertion on a partitioned
+      table.  A following batch of ten was clean, so call it rare and
+      bursty rather than one-in-eight; but a load that reaches it at all
+      is more than this file had before, and it is the thing to run when
+      picking this up again.
+
+      The improved message did its job and was then thrown away: the
+      failure named pgb_part_4, and the counts that follow it were lost
+      because the next run in the loop overwrote the server log.  When
+      looping for this, copy
+      testrun/stress/106_partitions/log/*_partitions.log aside on every
+      failure -- meson keeps only the last run's.
 
       Recreating the instrumentation takes two minutes: in
       execPartition.c, above the count check, build a StringInfo naming

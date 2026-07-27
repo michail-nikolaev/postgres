@@ -57,7 +57,8 @@ run_scenario(
 	'partitions',
 	{
 		schema => [ 'pgbench', 'partitioned_side' ],
-		load => [ 'tpcb_like', 'partition_dml', 'partition_upsert' ],
+		load => [ 'tpcb_like', 'partition_dml', 'partition_upsert',
+			'partition_upsert_contend' ],
 		ddl => [
 			'repack_concurrently', 'reindex_table_concurrently',
 			'detach_partition_concurrently', 'detach_drop_recreate_partition',

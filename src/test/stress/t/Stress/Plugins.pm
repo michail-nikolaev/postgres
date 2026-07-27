@@ -576,7 +576,12 @@ our %SCHEMA = (
 			CREATE TABLE pgb_part_4 PARTITION OF pgb_part
 				FOR VALUES FROM (7501) TO ($NROWS + 1);
 			ALTER TABLE pgb_part ADD PRIMARY KEY (id);
-			INSERT INTO pgb_part SELECT g, g FROM generate_series(1, $NROWS) g;
+			-- The first sixteen ids are the contention band: they carry
+			-- no value, so partition_upsert_contend can delete and
+			-- re-insert them without moving the sum the checks watch.
+			INSERT INTO pgb_part
+				SELECT g, CASE WHEN g <= 16 THEN 0 ELSE g END
+				FROM generate_series(1, $NROWS) g;
 
 			-- An upsert routed through the parent has nowhere to put the
 			-- row while the partition covering it is detached, which the
@@ -756,6 +761,33 @@ our %LOAD = (
 				INSERT INTO pgbench_accounts(aid, bid, abalance, ukey)
 					VALUES (:k, 1, 0, :v)
 					ON CONFLICT (aid) DO UPDATE SET ukey = EXCLUDED.ukey;
+			\endif
+		),
+	},
+
+	# The partitioned counterpart of upsert_contend: several clients
+	# racing to insert the same absent key through the parent, so the
+	# arbiter indexes have to be mapped onto a partition while one of
+	# them is being rebuilt.  partition_upsert never reaches that path,
+	# because the row it upserts always exists already.  Confined to the
+	# contention band, whose rows carry no value, so the sum the checks
+	# watch does not move -- and partition_sum only asserts when every
+	# row is present anyway.
+	partition_upsert_contend => {
+		weight => 3,
+		requires => { schema => ['partitioned_side'] },
+		script => q(
+			\set id random(1, 16)
+			\set mode random(0, 3)
+			\if :mode = 0
+				-- No routing needed: with the partition detached this
+				-- prunes to nothing rather than failing.
+				DELETE FROM pgb_part WHERE id = :id;
+			\else
+				-- Through the same wrapper partition_upsert uses, which
+				-- swallows the check violation an upsert gets while the
+				-- partition covering the row is detached.
+				SELECT pgb_part_upsert(:id);
 			\endif
 		),
 	},
@@ -1285,8 +1317,8 @@ our %LOAD = (
 		requires => { schema => ['partitioned_side'] },
 		script => q(
 			\set part random(0, 3)
-			\set a random(1, 2500)
-			\set b random(1, 2500)
+			\set a random(17, 2500)
+			\set b random(17, 2500)
 			\set lo least(:a, :b) + :part * 2500
 			\set hi greatest(:a, :b) + :part * 2500
 			\set diff random(1, 10000)
@@ -1350,7 +1382,7 @@ our %LOAD = (
 		weight => 3,
 		requires => { schema => ['partitioned_side'] },
 		script => q(
-			\set id random(1, :part_rows)
+			\set id random(17, :part_rows)
 			SELECT pgb_part_upsert(:id);
 		),
 	},
