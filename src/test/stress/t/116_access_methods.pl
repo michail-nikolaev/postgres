@@ -20,6 +20,16 @@
 # index from a transaction that has no XID of its own, and the old code
 # insisted on one.  Assertion build only -- without assertions the same
 # path writes a redirect carrying xid 0, which VACUUM later reads back.
+# Gates a904abe2e28, "Fix concurrent indexing operations with temporary
+# tables".  Without its four guards -- the ones that quietly force the
+# non-concurrent path for a temporary relation -- this fails six runs in
+# six at the default duration with
+#
+#   ERROR:  index "pgb_tmp_idx" already contains data
+#
+# from the temp_table_cic load: CREATE INDEX CONCURRENTLY uses several
+# transactions internally, and the table's ON COMMIT DELETE ROWS empties
+# it between them.
 use strict;
 use warnings FATAL => 'all';
 

@@ -692,7 +692,26 @@ Catalog state, cancellation and cleanup
               keeps a temporary table with ON COMMIT DELETE ROWS and
               builds an index on it concurrently, so the table empties
               underneath the multi-transaction build.
-      status: untested
+      revert: git revert conflicts.  Hand-applied instead, and it is
+              four guards: DefineIndex() forcing concurrent = false for
+              a temporary relation, and the three places in the REINDEX
+              entry points that route a temporary relation away from
+              ReindexRelationConcurrently().  Remove the persistence
+              tests and temporary relations take the concurrent path
+              again.
+      status: CATCHES, 6 failures in 6 runs at the default duration, as
+
+                ERROR:  index "pgb_tmp_idx" already contains data
+
+              which is the error the commit message leads with.  4 runs
+              with the fix restored are clean.
+
+              No tuning was needed: the temp_table_cic load already
+              creates the exact shape, a temporary table with ON COMMIT
+              DELETE ROWS that it then builds and rebuilds an index on
+              concurrently.  The ON COMMIT action is the whole point --
+              the concurrent path uses several transactions internally,
+              and the rows are deleted out from under it between them.
 
   da857275658  2012-10-19  Fix orphan on cancel of drop index
                            concurrently.
