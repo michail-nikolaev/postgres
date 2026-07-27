@@ -2350,8 +2350,40 @@ our %ENVS = (
 				my @stmts = grep { !/^\\/ } @{ $v->{stmts} };
 				next unless @stmts;
 
-				# Mostly cancel at some arbitrary point, sometimes let the
-				# command run to completion.
+				# Every so often, terminate the session running the
+				# command rather than cancelling the statement.  The two
+				# are not the same shape: a cancellation raises ERROR and
+				# unwinds through PG_FINALLY, while termination raises
+				# FATAL and does not, so cleanup hung off PG_FINALLY alone
+				# is skipped.  A REPACK's decoding worker and its
+				# transient slot are cleaned up there, and nothing else in
+				# the suite reaches that path.
+				if (int(rand(4)) == 0)
+				{
+					my ($to, $te) = ('', '');
+					my $th = IPC::Run::start(
+						[
+							$node->installed_command('psql'),
+							'-X', '-v', 'ON_ERROR_STOP=0',
+							'-d', $node->connstr('postgres'),
+							'-c', join(' ', @stmts)
+						],
+						'>', \$to, '2>', \$te);
+					select undef, undef, undef, 0.001 * (1 + int(rand(200)));
+					$node->safe_psql(
+						'postgres', q(
+						SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+							WHERE pid <> pg_backend_pid()
+								AND backend_type = 'client backend'
+								AND query ~* '^(REPACK|REINDEX|CREATE INDEX|DROP INDEX)'));
+					eval { IPC::Run::finish($th) };
+					$attempts++;
+					$interrupted++ if $te ne '';
+					next;
+				}
+
+				# Otherwise cancel at some arbitrary point, and sometimes
+				# let the command run to completion.
 				my $timeout = (int(rand(4)) == 0) ? 0 : 1 + int(rand(200));
 				my (undef, undef, $stderr) = $node->psql(
 					'postgres',
