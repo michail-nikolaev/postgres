@@ -880,7 +880,15 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 		 */
 		if (list_length(rootResultRelInfo->ri_onConflictArbiterIndexes) !=
 			list_length(arbiterIndexes) - additional_arbiters)
-			elog(ERROR, "invalid arbiter index list");
+			elog(ERROR, "invalid arbiter index list for partition \"%s\": "
+				 "the root has %d arbiter index(es), but %d matched here "
+				 "(plus %d being concurrently rebuilt), out of %d index(es) "
+				 "on the partition",
+				 RelationGetRelationName(partrel),
+				 list_length(rootResultRelInfo->ri_onConflictArbiterIndexes),
+				 list_length(arbiterIndexes) - additional_arbiters,
+				 additional_arbiters,
+				 leaf_part_rri->ri_NumIndices);
 		leaf_part_rri->ri_onConflictArbiterIndexes = arbiterIndexes;
 
 		/*

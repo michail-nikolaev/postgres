@@ -890,13 +890,57 @@ a lead, not a result.
       runs of a rotation narrowed to reindex plus the detach variants,
       or 10 runs at stressval 3.
 
-      It is not that rare after all: at stressval 4 the partitions
-      scenario reproduces it in 2 runs of 8, on a tree carrying
-      e6d6e32f424, bc32a12e0db and 2bc7e886fc1.  That measurement came
-      out of a control run -- eight runs with dbca3469ebf restored,
-      which were supposed to be clean and were not.  So what the earlier
-      loops were missing was the stressval, not soak time, and this is
-      now cheap to work on: 2026-07-27.
+      Seen twice more on 2026-07-27, in a control run at stressval 4 --
+      eight runs with dbca3469ebf restored, which were supposed to be
+      clean and were not.  That looked like a rate of 2 in 8 and it is
+      not one: everything since has been clean.  Do not quote 2 in 8.
+
+      What has been run since, all on a tree carrying e6d6e32f424,
+      bc32a12e0db and 2bc7e886fc1, and all clean:
+
+        - partitions, 10 runs at stressval 4 and 10 at stressval 8
+        - partitions, 6 runs each with two different sleeps compiled in
+          (see below), and 12 runs with the check downgraded to a
+          WARNING so a run would not stop at the first sighting
+        - a standalone driver outside the suite: 16 clients upserting
+          through a three-partition parent while one loop detached and
+          re-attached a partition (762 completed cycles), another
+          rebuilt the parent's primary key with REINDEX CONCURRENTLY,
+          and a third did the documented partitionwise index build
+        - one soak pass, 14 scenario combinations, at stressval 4
+
+      Two sleeps were compiled into the ancestor loop in
+      ExecInitPartitionInfo to widen the window, on the theory that the
+      leaf's catalog reads see a state the planner's arbiter list does
+      not.  The first went next to the injection point inside the loop
+      and was useless: on a leaf with one index it fires after the only
+      ancestor lookup.  The second went before the loop, which does
+      widen the interval between the root's arbiter list and the leaf's
+      reads.  Neither produced a sighting, so that theory is neither
+      confirmed nor excluded -- only that 2ms of it is not enough.
+
+      The hypothesis still worth testing is that the fallback which
+      rescues an arbiter being rebuilt cannot run in the case that
+      matters.  It is guarded by "if (unparented_idxs &&
+      arbiterIndexes)" and compares unparented indexes only against
+      arbiters already matched on the same partition; if a leaf has no
+      index whose ancestor is in the root's list -- because a detach
+      removed the link -- then arbiterIndexes is empty, there is nothing
+      to compare against, and the count check fails.  Confirming that
+      needs the state at the point of failure, which is why the error
+      now carries it (see below).  An injection point already exists in
+      that loop, exec-init-partition-after-get-partition-ancestors,
+      which is the tool to reach for next: hold a backend inside the
+      loop and complete a detach around it, rather than hoping load
+      lands in the window.
+
+      Recreating the instrumentation takes two minutes: in
+      execPartition.c, above the count check, build a StringInfo naming
+      partrel, then every entry of leaf_part_rri->ri_IndexRelationDescs
+      with its indisvalid/indisready/indislive and the OIDs
+      get_partition_ancestors() returns for it, then the root's arbiter
+      OIDs, and elog it.  Downgrade the elog to WARNING so one run can
+      record more than one sighting.
 
       Since revert-testing e6d6e32f424 (3 failures in 8 without it,
       against this one sighting in 400-odd soak combinations with it),
