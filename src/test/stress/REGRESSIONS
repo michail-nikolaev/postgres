@@ -1035,8 +1035,38 @@ a lead, not a result.
       the rebuild.  All clean: the invalidation is processed when the
       next lock is taken, and the re-read does see the new conindid.
 
-      So the mechanism is still unknown.  What the probe did not cover,
-      and what to try next: the batched path.  ri_FastPathBatchAdd()
+      The batched path was then excluded too.  The CI statement was
+      "UPDATE pgb_child SET pid = 952" with no WHERE, so every row fires
+      a check and they go through ri_FastPathBatchAdd() with the flush
+      at AfterTriggerEndQuery, which is where the CI stack ends; and the
+      rebuild in flight was REINDEX TABLE CONCURRENTLY, not REINDEX
+      INDEX.  Both were added to the probe -- whole-table updates on
+      both sides of the rebuild, driven by REINDEX TABLE -- and all
+      scenarios stayed clean.
+
+      What is left, and what the reasoning keeps running into: for a
+      backend to hold a dropped conindid it has to have read it before
+      the swap, and having read it before the swap it holds RowShareLock
+      on the referenced table from before the swap, so phase 5's
+      WaitForLockers blocks the drop until it commits.  Every ordering
+      that produces the failure seems to require the read to have
+      happened without the lock -- which is what the fix addresses, and
+      what the probe says does not happen.  Something in that chain is
+      wrong and the local reproductions cannot say which link.
+
+      So the next occurrence is instrumented to say it itself.  Both
+      call sites now go through ri_OpenConstraintIndex(), which checks
+      that the index still exists before opening it and, if it does not,
+      reports the conindid it believed, the constraint, the referenced
+      relation, and what pg_constraint says now.  The last of those is
+      the interesting one: if it names a different index, the cached
+      constraint info was stale and the re-read did not take; if it
+      names the same missing index, the catalog itself points at a
+      dropped index and the problem is in the rebuild, not in the RI
+      code.  CI is the reproducer here -- it has produced this once and
+      local runs have not produced it at all.
+
+      Older notes on what the probe did not cover: the batched path.  ri_FastPathBatchAdd()
       queues up to RI_FASTPATH_BATCH_SIZE rows and the entry built by
       ri_FastPathGetEntry() is flushed at AfterTriggerEndQuery, which is
       where the CI stack ends up -- so the interval between building

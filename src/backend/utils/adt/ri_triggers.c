@@ -2799,6 +2799,43 @@ ri_PerformCheck(const RI_ConstraintInfo *riinfo,
  * Note: This is only used by the ALTER TABLE validation path. Other paths use
  * ri_FastPathBatchAdd().
  */
+/*
+ * Open the index a foreign key resolves through.
+ *
+ * The caller must already hold a lock on the referenced table, which is
+ * what makes conindid stable: a concurrent rebuild repoints the
+ * constraint and only then drops the old index, after waiting for the
+ * table's lockers.  If the index turns out to be gone anyway, that
+ * reasoning is wrong somewhere, and the bare "could not open relation
+ * with OID" that index_open would report says nothing about how.  Report
+ * what was believed instead.
+ */
+static Relation
+ri_OpenConstraintIndex(const RI_ConstraintInfo *riinfo)
+{
+	if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(riinfo->conindid)))
+	{
+		Oid			fresh = InvalidOid;
+		HeapTuple	tup;
+
+		tup = SearchSysCache1(CONSTROID,
+							  ObjectIdGetDatum(riinfo->constraint_id));
+		if (HeapTupleIsValid(tup))
+		{
+			fresh = ((Form_pg_constraint) GETSTRUCT(tup))->conindid;
+			ReleaseSysCache(tup);
+		}
+
+		elog(ERROR,
+			 "index %u for foreign key constraint %u on relation %u no longer exists"
+			 " (pg_constraint now says %u)",
+			 riinfo->conindid, riinfo->constraint_id, riinfo->pk_relid,
+			 fresh);
+	}
+
+	return index_open(riinfo->conindid, AccessShareLock);
+}
+
 static void
 ri_FastPathCheck(RI_ConstraintInfo *riinfo,
 				 Relation fk_rel, TupleTableSlot *newslot)
@@ -2828,7 +2865,7 @@ ri_FastPathCheck(RI_ConstraintInfo *riinfo,
 	/* Re-read the constraint under that lock; see ri_FastPathGetEntry(). */
 	riinfo = ri_LoadConstraintInfo(riinfo->constraint_id);
 
-	idx_rel = index_open(riinfo->conindid, AccessShareLock);
+	idx_rel = ri_OpenConstraintIndex(riinfo);
 
 	slot = table_slot_create(pk_rel, NULL);
 	scandesc = index_beginscan(pk_rel, idx_rel,
@@ -4405,7 +4442,7 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
 		 */
 		riinfo = ri_LoadConstraintInfo(riinfo->constraint_id);
 
-		entry->idx_rel = index_open(riinfo->conindid, AccessShareLock);
+		entry->idx_rel = ri_OpenConstraintIndex(riinfo);
 		entry->pk_slot = table_slot_create(entry->pk_rel, NULL);
 
 		/*
