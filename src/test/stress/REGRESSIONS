@@ -146,8 +146,15 @@ heapallindexed catches directly.
       expect: access_methods -- VACUUM is in that rotation now, which is
               what makes the bad redirect reachable.  Assertion build
               required.
-      revert: clean-ish; touches spgutils.c and spgvacuum.c.
-      status: untested
+      revert: conflicts in spgvacuum.c.  The assertion that fires is the
+              spgutils.c half, which applies cleanly on its own; revert
+              that and leave spgvacuum.c alone.
+      status: CATCHES, 4 failures in 8 runs at the default duration, as
+
+                TRAP: failed Assert("TransactionIdIsValid(state->myXid)")
+
+              and 0 in 8 with the fix restored.  One of the few entries
+              here that needs no elevated stressval.
 
   5bbdfa8a18d  2024-09-09  Fix waits of REINDEX CONCURRENTLY for indexes
                            with predicates or expressions

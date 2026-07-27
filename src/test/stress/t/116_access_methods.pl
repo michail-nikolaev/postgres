@@ -8,6 +8,18 @@
 # named for it: some of what a rebuild leaves behind is only wrong once
 # VACUUM reaches it, which is how an SP-GiST redirect written without a
 # transaction id used to show up.
+#
+# Gates 92c49d1062f, "Fix insertion of SP-GiST REDIRECT tuples during
+# REINDEX CONCURRENTLY".  Reverted, this fails four runs in eight at the
+# default duration with
+#
+#   TRAP: failed Assert("TransactionIdIsValid(state->myXid)"),
+#   File: spgutils.c
+#
+# taking the backend down: REINDEX CONCURRENTLY rebuilds an SP-GiST
+# index from a transaction that has no XID of its own, and the old code
+# insisted on one.  Assertion build only -- without assertions the same
+# path writes a redirect carrying xid 0, which VACUUM later reads back.
 use strict;
 use warnings FATAL => 'all';
 
