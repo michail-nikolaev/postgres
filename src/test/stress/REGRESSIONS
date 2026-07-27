@@ -227,11 +227,40 @@ heapallindexed catches directly.
       RIC set PROC_IN_SAFE_IC for an index with a predicate or
       expression, so other concurrent operations ignored it even though
       its expression may read another table.
-      expect: probably nothing.  Upstream needed injection points; the
-              window needs one CIC's expression to read a table another
-              CIC is rebuilding.  Listed so the gap is on the record
-              rather than assumed covered.
-      status: untested, expected MISSED
+      expect: nothing, and this was tried rather than assumed.
+      revert: by hand, one line: idx->safe reads rd_indexprs/rd_indpred
+              directly instead of going through
+              RelationGetIndexExpressions()/RelationGetIndexPredicate(),
+              so an index whose expressions have not been loaded yet
+              looks safe.
+      status: MISSED, and the attempt is the interesting part.
+
+              The only shape that makes a concurrent rebuild genuinely
+              unsafe to ignore is an index whose expression reads a
+              *different* relation -- that is the case the commit
+              message describes.  So one was built: a plpgsql function
+              declared IMMUTABLE that counts rows in another table
+              (schema-qualified, since index expressions are evaluated
+              with search_path = pg_catalog, pg_temp), and an index on
+              pgbench_accounts over it, added to overlapping_ddl where
+              four CONCURRENTLY commands run at once.
+
+              Reverted, that failed 4 runs in 6 with
+
+                heap tuple ... lacks matching index tuple within index
+                "pgb_peek_idx"
+
+              which looks like a catch until the control is run: with
+              the fix restored it fails 3 in 3 the same way.  The index
+              is legitimately inconsistent with the heap either way,
+              because a function that reads a table is not immutable
+              however it is declared, and amcheck re-evaluates the
+              expression when it checks.  The suite's own detector
+              cannot tell this bug from the setup needed to reach it.
+
+              That is why the fix shipped with an injection point test
+              instead.  The index was removed again; overlapping_ddl
+              passes without it.
 
 
 ON CONFLICT arbiter selection during concurrent index operations
