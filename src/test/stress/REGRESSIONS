@@ -137,7 +137,21 @@ heapallindexed catches directly.
               CIC+2PC with pgbench, including prepared xacts that span a
               restart.  So the gap below is about this suite being a
               second net, not about the bug being unguarded.
-      status: untested (blocked on the gap below)
+      status: MISSED, untestable by hand.  The fix is 362 lines across
+              eight files -- twophase.c, lock.c, lmgr.c, inval.c and
+              their headers -- introducing TwoPhaseGetXidByVirtualXID()
+              and the lock transfer that goes with it.  The one hunk
+              that looks like the crux was tried on its own: stop
+              MarkAsPreparingGuts() cloning the caller's VXID onto the
+              dummy PGPROC, so a just-prepared transaction cannot be
+              found by VXID.  That is not enough.  The test that shipped
+              with the commit, amcheck/003_cic_2pc, passes against it 2
+              runs in 2, so the rest of the machinery covers for it and
+              the bug is not reintroduced.  A faithful revert means
+              undoing the whole cross-file change, which is a bigger and
+              more error-prone job than the coverage question is worth
+              -- especially as 003_cic_2pc guards this deterministically
+              already.
 
   d9d076222f5  2021-02-23  VACUUM: ignore indexing operations with
                            CONCURRENTLY
@@ -409,7 +423,25 @@ its second phase, usually reached through a cached plan.
       between listing the children and reading relpartbound.
       expect: partitions
       revert: by hand (partdesc.c retry loop).
-      status: untested
+      status: MISSED.  0 in 6 runs of partitions at the default
+              duration, and 0 in 8 across partitions and
+              partitioned_pgbench at stressval 4.  (The revert is one
+              line: disable the "goto retry" in
+              RelationBuildPartitionDesc(), which is all the commit
+              added.)
+              Why it cannot be reached by load, measured rather than
+              argued: a statement that expands a partitioned table takes
+              AccessShareLock on every partition and holds it to the end
+              of its transaction.  With a session sitting in such a
+              transaction, DROP TABLE on one of the partitions waits out
+              a 5s lock_timeout on AccessExclusiveLock, and DETACH
+              CONCURRENTLY's finalize phase waits for lockers the same
+              way.  So the catalog change can never land inside a
+              statement that has expanded the table, nor inside a
+              transaction that has.  The window is confined to the few
+              instructions between plan revalidation and expansion at
+              the start of a statement, and no amount of load widens
+              that.  This wants an injection point.
 
   dbca3469ebf  2024-06-26  Fix partition pruning setup during DETACH
                            CONCURRENTLY
@@ -451,7 +483,23 @@ its second phase, usually reached through a cached plan.
               rather than re-attaching it; partitioned_pgbench reaches
               the same code through pgbench_accounts' own partitions.
       revert: clean.
-      status: untested
+      status: MISSED.  0 in 8 across partitions and partitioned_pgbench
+              at stressval 4; the one failing run in that batch was this
+              suite's known 117 lock timeout, not this bug.  Same result
+              in an earlier session, 0 in 16.
+              Why it cannot be reached by load, measured rather than
+              argued: a statement that expands a partitioned table takes
+              AccessShareLock on every partition and holds it to the end
+              of its transaction.  With a session sitting in such a
+              transaction, DROP TABLE on one of the partitions waits out
+              a 5s lock_timeout on AccessExclusiveLock, and DETACH
+              CONCURRENTLY's finalize phase waits for lockers the same
+              way.  So the catalog change can never land inside a
+              statement that has expanded the table, nor inside a
+              transaction that has.  The window is confined to the few
+              instructions between plan revalidation and expansion at
+              the start of a statement, and no amount of load widens
+              that.  This wants an injection point.
 
   52f3de874bb  2024-08-19  Avoid failure to open dropped detached
                            partition
@@ -461,7 +509,24 @@ its second phase, usually reached through a cached plan.
       expect: partitions and partitioned_pgbench, both of which run the
               prepared protocol this one needs.
       revert: clean.
-      status: untested
+      status: MISSED.  0 in 8 at stressval 4 and 0 in 6 at stressval 8,
+              across partitions and partitioned_pgbench, both of which
+              run the prepared protocol this one needs.  Same result in
+              an earlier session, 0 in 16, including with a sleep
+              inserted between the DROP and the re-ATTACH.
+              Why it cannot be reached by load, measured rather than
+              argued: a statement that expands a partitioned table takes
+              AccessShareLock on every partition and holds it to the end
+              of its transaction.  With a session sitting in such a
+              transaction, DROP TABLE on one of the partitions waits out
+              a 5s lock_timeout on AccessExclusiveLock, and DETACH
+              CONCURRENTLY's finalize phase waits for lockers the same
+              way.  So the catalog change can never land inside a
+              statement that has expanded the table, nor inside a
+              transaction that has.  The window is confined to the few
+              instructions between plan revalidation and expansion at
+              the start of a statement, and no amount of load widens
+              that.  This wants an injection point.
 
   da9f9f75e5c  2025-08-30  Fix possible use after free in
                            expand_partitioned_rtentry()
@@ -866,10 +931,27 @@ Catalog state, cancellation and cleanup
       A failed DIC on a replica identity index leaves indisreplident set
       on an invalid index; more than one index can end up marked, and
       the relcache then picks the wrong one.
-      expect: subscription, if the rotation targets the replica identity
-              index -- which is exactly the case PORTING records as
-              excluded because it trips an apply-worker assertion.
-      status: untested, blocked
+      expect: hash_and_constraints, through dic_clears_replident.
+      revert: by hand, one line: drop the "indexForm->indisreplident =
+              false" from INDEX_DROP_CLEAR_VALID in
+              index_set_state_flags().
+      status: CATCHES, 3 failures in 3 runs at the default duration, and
+              0 in 4 with the fix restored.  The check reports the state
+              it found, which is the whole story:
+
+                with the fix     pgb_ri_idx valid=f replident=f
+                without it       pgb_ri_idx valid=f replident=t
+
+              It was blocked, on the subscription rotation targeting the
+              replica identity index -- a case PORTING excludes because
+              it trips an apply-worker assertion, so enabling it would
+              fail for an unrelated reason.  The block turned out to be
+              unnecessary: nothing about this needs a subscription, only
+              a failed concurrent drop of an index that is the replica
+              identity.  The check forces exactly that, with a session
+              holding a lock so the drop has to wait and lock_timeout
+              ending it, then asserts no index is left both invalid and
+              marked as the replica identity.
 
 
 Serializable

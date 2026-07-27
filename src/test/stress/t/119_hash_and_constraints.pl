@@ -42,7 +42,7 @@ run_scenario(
 		ddl_concurrency => 1,
 		checks => [ 'balances', 'amcheck', 'no_substitute_constraints',
 			'deferred_keys_intact', 'repack_refuses_deferrable',
-			'pgstat_rejects_invalid_index' ],
+			'pgstat_rejects_invalid_index', 'dic_clears_replident' ],
 		env => 'standalone',
 		clients => 20,
 		tags => ['ci'],

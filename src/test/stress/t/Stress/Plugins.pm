@@ -2543,6 +2543,52 @@ our %CHECK = (
 		},
 	},
 
+	# A concurrent drop that fails must not leave an invalid index still
+	# marked as the replica identity: reindexing such an index makes it
+	# valid again, and if the table\'s replica identity moved on in the
+	# meantime, two indexes end up marked and the relcache picks one of
+	# them arbitrarily.  The failure is forced here rather than waited
+	# for -- a session holds a lock so the drop has to wait, and
+	# lock_timeout ends it.
+	dic_clears_replident => {
+		final => sub {
+			my ($node, $ctx) = @_;
+
+			$node->safe_psql(
+				'postgres', q(
+				DROP TABLE IF EXISTS pgb_ri;
+				CREATE TABLE pgb_ri(id int NOT NULL);
+				INSERT INTO pgb_ri SELECT g FROM generate_series(1, 100) g;
+				CREATE UNIQUE INDEX pgb_ri_idx ON pgb_ri(id);
+				ALTER TABLE pgb_ri REPLICA IDENTITY USING INDEX pgb_ri_idx));
+
+			my $holder = $node->background_psql('postgres');
+			$holder->query_safe('BEGIN; SELECT count(*) FROM pgb_ri;');
+
+			{
+				local $ENV{PGOPTIONS} = '-c lock_timeout=2s';
+				$node->psql('postgres', 'DROP INDEX CONCURRENTLY pgb_ri_idx;',
+					on_error_stop => 0);
+			}
+			$holder->quit;
+
+			my $state = $node->safe_psql(
+				'postgres', q(
+				SELECT COALESCE(string_agg(
+					format('%s valid=%s replident=%s', c.relname,
+						i.indisvalid, i.indisreplident), ' '), 'gone')
+				FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+				WHERE c.relname = 'pgb_ri_idx'));
+			Test::More::unlike(
+				$state,
+				qr/valid=f replident=t/,
+				'a failed concurrent drop left no invalid replica identity');
+			Test::More::note("pgb_ri_idx after the failed drop: $state");
+
+			$node->safe_psql('postgres', 'DROP TABLE IF EXISTS pgb_ri');
+		},
+	},
+
 	# REPACK cannot locate tuples by a deferrable key, so it has to
 	# refuse a table whose only identity is one.  Asserting the refusal
 	# is the only way to gate this: a server that accepts the table is
