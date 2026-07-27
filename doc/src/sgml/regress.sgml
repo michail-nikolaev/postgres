@@ -228,6 +228,12 @@ make check-world -j8 >/dev/null
    </listitem>
    <listitem>
     <para>
+     Stress tests for commands with a <literal>CONCURRENTLY</literal>
+     option, located in <filename>src/test/stress</filename>.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
      Tests for crash recovery and physical replication,
      located in <filename>src/test/recovery</filename>.
     </para>
@@ -382,6 +388,28 @@ make check-world PG_TEST_EXTRA='kerberos ldap ssl load_balance libpq_encryption'
      <listitem>
       <para>
        Runs the test suite under <filename>src/test/ssl</filename>.  This opens TCP/IP listen sockets.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>stress_concurrently</literal><optional>=VALUE</optional></term>
+     <listitem>
+      <para>
+       Controls the stress tests for commands with a
+       <literal>CONCURRENTLY</literal> option, located in
+       <filename>src/test/stress</filename>.  Optionally, an integer can be
+       given after an equal sign, which affects how long each such test
+       runs for.
+       Each test is calibrated so that, when given a value of 10,
+       it runs for approximately 60 seconds.
+       If no value is given, 1 is assumed.
+       Explicitly giving a value of 0 causes the tests to be skipped.
+       Unlike most of the strings described here, the tests run by default
+       (with a value of 1) even when <literal>stress_concurrently</literal>
+       does not appear in <envar>PG_TEST_EXTRA</envar>; however, in that
+       case they are skipped when the environment declares itself slow by
+       setting <envar>PG_TEST_TIMEOUT_DEFAULT</envar>.
       </para>
      </listitem>
     </varlistentry>

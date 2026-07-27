@@ -6,6 +6,7 @@ subdir('isolation')
 subdir('authentication')
 subdir('postmaster')
 subdir('recovery')
+subdir('stress')
 subdir('subscription')
 subdir('modules')
 

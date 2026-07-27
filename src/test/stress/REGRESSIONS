@@ -1,0 +1,851 @@
+src/test/stress/REGRESSIONS
+
+Historical bugs this suite is meant to catch
+============================================
+
+A stress suite that has never been shown to fail is a suite that proves
+nothing.  This file is the list of real, already-fixed bugs in the
+CONCURRENTLY commands, taken from the git history, together with the
+scenario that ought to catch each one and the result of actually
+checking that -- by putting the bug back and running the suite.
+
+Every entry starts at "untested".  An entry is only moved to "catches"
+once the reverted tree has been run and failed, with the failure rate
+recorded; an entry that survives a long run is marked "MISSED", which is
+a gap in the suite, not a footnote.
+
+The list was built by grepping the history for the commands this suite
+drives, so it is biased towards bugs someone wrote a commit message
+about.  It is not a coverage target: a suite that catches all of these
+and nothing else is still only as good as the last bug someone found.
+
+How to test one
+===============
+
+  git switch -c revert-<commit> <base>
+  git revert --no-commit <commit>        # or hand-reintroduce, see below
+  ninja -C build && meson test -C build --suite setup --suite stress
+
+Reverting the fix alone is usually not enough to see a failure at the
+default duration -- these are races.  Run the named scenario in a loop
+at a higher stressval, and record how often it fails:
+
+  for i in $(seq 20); do
+    meson test -C build --suite setup --suite stress <scenario> \
+      --test-args ... PG_TEST_EXTRA='stress_concurrently=4'
+  done
+
+Two practical notes.  Most fixes older than about 2024 no longer revert
+cleanly -- the surrounding code has moved -- and have to be
+reintroduced by hand; the entry says what the essential change is.  And
+several of these bugs are only observable in an assertion build, which
+is what the suite should be run under anyway.
+
+A note on what "caught" means
+=============================
+
+Three of the checks do the real work here, and it is worth knowing
+which one is expected to fire, because that determines what the
+scenario has to declare:
+
+  amcheck        bt_index_parent_check(heapallindexed => true) at the
+                 end of the run.  This is what finds heap rows missing
+                 from an index.  It only checks indexes the scenario
+                 declared -- it does not check the pgbench primary keys.
+  index_vs_seq   an indexed read and a seqscan of the same snapshot must
+                 agree.  Requires the btree_abalance index.
+  the invariant  balances, ledger_sum and friends: a wrong answer that
+                 the workload itself can observe.
+
+An entry whose scenario declares no btree index is not being checked by
+amcheck at all, whatever else it runs.  See "Where the suite falls
+short" at the end.
+
+The detector has a history of its own worth knowing about.  Until
+1f28982e409, "amcheck: Fix snapshot usage in bt_index_parent_check",
+that function fingerprinted the index under SnapshotAny while the index
+had been built under an MVCC snapshot, so an index built by CIC could
+be reported as missing heap tuples that it was correct to omit.  Since
+that is exactly the configuration this suite uses, against a base that
+predates it every amcheck failure here is suspect.  Check for that
+commit before believing one.
+
+
+Wrong results: heap rows missing from a concurrently built index
+================================================================
+
+This is the class the suite exists for, and the one amcheck's
+heapallindexed catches directly.
+
+  fdd965d074d  2021-10-23  Avoid race in RelationBuildDesc() affecting
+                           CREATE INDEX CONCURRENTLY.
+      A backend that absorbs a relevant invalidation in the middle of
+      RelationBuildDesc() on the new index does not see the catalog
+      change by its next transaction start, so it stops maintaining the
+      index; queries using it then silently miss rows.
+      expect: repack_dml_s1, repack_dml_s50 (amcheck, index_vs_seq)
+      revert: by hand -- relcache.c has moved.  The fix is the retry
+              loop in RelationBuildDesc() plus the in-progress
+              invalidation tracking in inval.c; removing the loop is
+              enough.
+      also:   already guarded upstream by contrib/amcheck/t/002_cic.pl,
+              which shipped with this commit and is the direct ancestor
+              of this suite's design: pgbench, an advisory lock so only
+              one CIC runs at a time, and bt_index_check(heapallindexed)
+              from inside the pgbench script.  Reverting is therefore a
+              calibration exercise -- does this suite catch it too, and
+              how much faster -- rather than a gap being closed.
+      status: untested
+
+  3cd9c3b9219  2021-10-23  Fix CREATE INDEX CONCURRENTLY for the newest
+                           prepared transactions.
+      CIC did not wait for transactions that were about to PREPARE, or
+      had just prepared, so the resulting index misses their rows.
+      expect: bulk_and_rewrite, the only scenario whose workload
+              prepares transactions.  It declares btree_abalance and
+              runs index_vs_seq now, so amcheck has something to check.
+      revert: by hand -- touches twophase.c, xact.c and lock.c.  The
+              essential part is the lock transfer to the dummy PGPROC
+              before ProcArrayClearTransaction().
+      also:   already guarded upstream by contrib/amcheck/t/003_cic_2pc.pl,
+              which does the deterministic cases and then stresses
+              CIC+2PC with pgbench, including prepared xacts that span a
+              restart.  So the gap below is about this suite being a
+              second net, not about the bug being unguarded.
+      status: untested (blocked on the gap below)
+
+  d9d076222f5  2021-02-23  VACUUM: ignore indexing operations with
+                           CONCURRENTLY
+  e28bb885196  2022-05-31  Revert changes to CONCURRENTLY that "sped up"
+                           Xmin advance
+      Letting the horizon advance past a CIC/RIC backend lets other
+      backends HOT-prune tuples the build still needs, so the index
+      misses them.  The revert is the fix; putting the bug back means
+      re-applying d9d0762.
+      expect: repack_dml_s1 and repack_dml_s50 (amcheck), given a load
+              that HOT-updates -- tpcb_like's update of abalance is a
+              HOT update whenever abalance is not indexed, so s1 with
+              only the PK declared is the interesting shape.
+      revert: none needed.  The branch make-PROC_IN_SAFE_IC-great-again
+              already carries a4821e227ce, Revert "Revert changes to
+              CONCURRENTLY that 'sped up' Xmin advance", on top of which
+              2337987590e separates PROC_IN_SAFE_IC from
+              PROC_AFFECTS_ONLY_CATALOG -- an attempt to restore the
+              optimization without the corruption.  Run this suite
+              against both commits rather than injecting the bug
+              synthetically: a4821e227ce alone should fail, and whether
+              2337987590e still fails is a live question about that
+              patch rather than a test-calibration exercise.
+      status: untested.  Best candidate to start with.
+
+  92c49d1062f  2024-06-17  Fix insertion of SP-GiST REDIRECT tuples
+                           during REINDEX CONCURRENTLY.
+      REINDEX CONCURRENTLY on an SP-GiST index inserts REDIRECT tuples
+      from a transaction with no XID: assertion failure in
+      spgFormDeadTuple, or a REDIRECT with xid 0 that later trips VACUUM.
+      expect: access_methods -- VACUUM is in that rotation now, which is
+              what makes the bad redirect reachable.  Assertion build
+              required.
+      revert: clean-ish; touches spgutils.c and spgvacuum.c.
+      status: untested
+
+  5bbdfa8a18d  2024-09-09  Fix waits of REINDEX CONCURRENTLY for indexes
+                           with predicates or expressions
+      RIC set PROC_IN_SAFE_IC for an index with a predicate or
+      expression, so other concurrent operations ignored it even though
+      its expression may read another table.
+      expect: probably nothing.  Upstream needed injection points; the
+              window needs one CIC's expression to read a table another
+              CIC is rebuilding.  Listed so the gap is on the record
+              rather than assumed covered.
+      status: untested, expected MISSED
+
+
+ON CONFLICT arbiter selection during concurrent index operations
+================================================================
+
+Four fixes, all recent, all in the same area: which indexes a
+speculative insertion is allowed to use while an index is being built
+or swapped.  The failure mode is a spurious "duplicate key value
+violates unique constraint" or a deadlock -- which pgbench turns into an
+aborted client, so the suite fails loudly if it hits it.
+
+  bc32a12e0db  2025-11-24  Fix infer_arbiter_index during concurrent
+                           index operations
+      Only indisvalid indexes were considered, so two transactions could
+      infer different arbiter sets during CIC/RIC.
+      expect: unique_and_gapless (upsert_merge uses ON CONFLICT (k),
+              which is attribute inference -- the shape this fixes)
+      revert: by hand (snapmgr.c hunk plus plancat.c changes since).
+      status: untested
+
+  2bc7e886fc1  2025-12-01  Fix ON CONFLICT ON CONSTRAINT during REINDEX
+                           CONCURRENTLY
+      During the swap, several indexes match the constraint's
+      definition; only the named one was considered.
+      expect: unique_and_gapless -- upsert_merge now names the
+              constraint in one of its three modes.
+      status: untested
+
+  90eae926abb  2025-12-02  Fix ON CONFLICT with REINDEX CONCURRENTLY and
+                           partitions
+      Arbiters for each partition are derived from the parent's, so a
+      partition's auxiliary index built by RIC was not considered.
+      expect: partitions -- the partition_upsert load routes an upsert
+              through the parent while the rotation rebuilds a
+              partition's index.
+      status: untested
+
+  e6d6e32f424  2026-01-28  Fix duplicate arbiter detection during REINDEX
+                           CONCURRENTLY on partitions
+      pg_inherits rows swapping between two get_partition_ancestors()
+      calls yields duplicate arbiters and "invalid arbiter index list".
+      expect: partitions, as above.
+      revert: clean.
+      status: untested -- but see the open finding below, which is this
+              error message appearing on a tree that has this fix.
+
+
+DETACH PARTITION CONCURRENTLY
+=============================
+
+The common shape: a partition descriptor rebuilt while the detach is in
+its second phase, usually reached through a cached plan.
+
+  c2fab70248d  2024-06-11  Fix creation of partition descriptor during
+                           concurrent detach
+      "missing relpartbound for relation %u" when the invalidation lands
+      between listing the children and reading relpartbound.
+      expect: partitions
+      revert: by hand (partdesc.c retry loop).
+      status: untested
+
+  dbca3469ebf  2024-06-26  Fix partition pruning setup during DETACH
+                           CONCURRENTLY
+      CreatePartitionPruneState() assumed partitions can only be added
+      between planning and execution.  Assertion failure, a plan that
+      cannot be built, or a hang when one partition is added and another
+      removed.
+      expect: partitions, which runs --protocol=prepared with
+              force_generic_plan so that plans are cached and
+              revalidated while the rotation detaches.
+      status: untested
+
+  c899c6839f5  2024-08-12  Fix creation of partition descriptor during
+                           concurrent detach+drop
+      Detach immediately followed by DROP: the catalog scan finds no
+      tuple and the pointer is dereferenced anyway.
+      expect: partitions, via the detach_drop_recreate_partition
+              rotation entry, which drops the partition it detached
+              rather than re-attaching it; partitioned_pgbench reaches
+              the same code through pgbench_accounts' own partitions.
+      revert: clean.
+      status: untested
+
+  52f3de874bb  2024-08-19  Avoid failure to open dropped detached
+                           partition
+      "ERROR: could not open relation with OID nnn" from a prepared
+      statement expanding a partition that was detached and dropped.
+      Same message family as the two server bugs this branch fixes.
+      expect: partitions and partitioned_pgbench, both of which run the
+              prepared protocol this one needs.
+      revert: clean.
+      status: untested
+
+  da9f9f75e5c  2025-08-30  Fix possible use after free in
+                           expand_partitioned_rtentry()
+      Follow-on to the above: bms_del_member() may pfree live_parts.
+      Crash, so any check would do.
+      expect: partitions, as above.
+      revert: clean.
+      status: untested
+
+  3231fd04552  2025-10-11  Stop creating constraints during DETACH
+                           CONCURRENTLY
+      Not a race -- the substitute constraint left behind referenced the
+      parent's OID and broke dump/restore of the detached table.
+      expect: 901_pg_dump, if it is pointed at a detached partition.
+      revert: clean.
+      status: untested
+
+
+REPACK CONCURRENTLY
+===================
+
+The newest of the commands, and the one whose fixes are still arriving.
+All of these revert cleanly, which makes them the cheapest entries to
+test.
+
+  6ca631b9901  2026-04-28  REPACK CONCURRENTLY: fix processing of
+                           toasted tuples
+      Concurrent changes are spilled to disk and replayed; some forms of
+      toasted tuple were not reconstructed correctly.
+      expect: rewrite_fidelity (toast decorator, toast_md5 check)
+      revert: clean, one line in repack.c.
+      status: untested.  Second-best candidate to start with.
+
+  3be823486f2  2026-07-03  Fix REPACK CONCURRENTLY for stored generated
+                           columns
+      The transient table had no pg_attrdef rows, so replaying a
+      concurrent insert or update of a generated column failed.
+      expect: rewrite_fidelity.  The commit says the entries are needed
+              for tuples "concurrently updated or inserted", so the
+              generated columns hang off abalance -- which every TPC-B
+              transaction updates -- and the load inserts and deletes
+              rows above the account range as well.  One of the three is
+              wide enough to go out of line, so the replay has to
+              compute a value and then toast it; one is virtual, which
+              it must leave alone; and generated_defs_intact holds the
+              expressions themselves to what they were, which no
+              invariant over the data could notice.
+      revert: clean.
+      status: CATCHES.  6 failures in 8 runs at the default six seconds,
+              no higher stressval needed, failing with
+
+                ERROR: no generation expression found for column
+                number 7 of table "pg_temp_16391"
+
+              which is the transient table missing the pg_attrdef
+              entries this commit copies -- the bug itself rather than
+              some downstream symptom.  Restoring the fix: 3 runs clean.
+
+              A note for whoever does the next one.  git revert
+              --no-commit stages the revert, so "git checkout <path>"
+              afterwards restores the reverted file from the index and
+              silently leaves the bug in place.  Use git checkout HEAD
+              -- <path>, and check the tree is clean before believing a
+              green run.
+
+  832e220d99a  2026-04-27  REPACK CONCURRENTLY: Don't use deferrable
+                           primary keys
+      A tuple modified concurrently may not be indexed yet under a
+      deferrable PK, so REPACK cannot locate it.
+      expect: nothing -- no schema uses a deferrable primary key.
+      status: untested, MISSED by construction
+
+  0160143ad9a  2026-05-19  Fix REPACK decoding worker not cleaned up on
+                           FATAL exit
+      pg_terminate_backend() of the launching backend leaves the
+      decoding worker running and its temporary slot held.
+      expect: cancellation, via the no_slot_leak check -- if the
+              environment terminates rather than only cancels.
+      revert: clean.
+      status: untested
+
+  2af1dc89282  2026-05-27  Disable logical decoding after REPACK
+                           (CONCURRENTLY)
+      effective_wal_level stayed at 'logical' after the command.
+      expect: overlapping_ddl, whose checks include decoding_disabled:
+              it waits for effective_wal_level to fall back to
+              'replica' once the workload is over.
+      status: untested
+
+  93a3e6839bf  2026-06-09  Fix race when logical decoding activation is
+                           concurrently interrupted.
+      Two backends activating logical decoding at once: the one that is
+      interrupted asserts.  This is the CF 7002 family the old 008/026
+      tests reached.
+      expect: overlapping_ddl at ddl_concurrency 4, wal_level replica --
+              several REPACKs switching decoding on at once, one
+              cancelled.  Assertion build.
+      revert: by hand (logicalctl.c).
+      status: untested
+
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY
+======================================
+
+  b96115acb8a  2024-02-05  Fix assertion if index is dropped during
+                           REFRESH CONCURRENTLY
+      Assertion failure, or a syntax error in the generated statement,
+      when the unique index goes away mid-refresh.
+      expect: plancache_and_matview, if the rotation drops the matview's
+              own unique index -- it currently rotates over the base
+              tables' indexes.
+      status: untested
+
+
+Catalog state, cancellation and cleanup
+=======================================
+
+  b52adbad467  2024-09-26  Ensure we have a snapshot when updating
+                           pg_index entries.
+      CIC/RIC/DIC update pg_index from their own transactions without an
+      active snapshot; with a toasted pg_index row this errors with
+      "cannot fetch toast data without an active snapshot".
+      expect: repack_dml_s1, which declares the toasted_predicate index:
+              a predicate long enough to push the pg_index row out of
+              line, built and rebuilt by the rotation.
+      status: untested
+
+  13503eb5905  2023-10-30  Diagnose !indisvalid in more SQL functions.
+      pgstatindex and friends on an invalid index left behind by a
+      cancelled build.
+      expect: nothing -- the suite does not call pgstattuple.
+      status: untested, MISSED by construction
+
+  c426f7c2b36  2023-12-07  Fix assertion failure with REINDEX and event
+                           triggers
+      REINDEX CONCURRENTLY on a table with no indexes pops a snapshot it
+      does not own.
+      expect: nothing -- every scenario's tables have indexes, and there
+              are no event triggers.
+      status: untested, MISSED by construction
+
+  a904abe2e28  2020-01-22  Fix concurrent indexing operations with
+                           temporary tables
+      "index foo already contains data" for CONCURRENTLY on a temp table
+      with ON COMMIT actions.
+      expect: access_methods, via the temp_table_cic load: each client
+              keeps a temporary table with ON COMMIT DELETE ROWS and
+              builds an index on it concurrently, so the table empties
+              underneath the multi-transaction build.
+      status: untested
+
+  da857275658  2012-10-19  Fix orphan on cancel of drop index
+                           concurrently.
+      Cancelling DROP INDEX CONCURRENTLY during its wait leaves an index
+      behind that cannot be dropped.
+      expect: cancellation, whose checks include
+              invalid_indexes_droppable: every invalid index left in
+              public that no constraint owns must still drop cleanly.
+              That check matters more than it looks, because the
+              environment tolerates the error messages a cancelled
+              build produces, and would otherwise notice nothing.
+      revert: hand only; the code is from 2012.
+      status: untested
+
+  9511fb37ac7  2020-08-30  Reset indisreplident for an invalid index in
+                           DROP INDEX CONCURRENTLY
+      A failed DIC on a replica identity index leaves indisreplident set
+      on an invalid index; more than one index can end up marked, and
+      the relcache then picks the wrong one.
+      expect: subscription, if the rotation targets the replica identity
+              index -- which is exactly the case PORTING records as
+              excluded because it trips an apply-worker assertion.
+      status: untested, blocked
+
+
+Serializable
+============
+
+  4c9d0901f13  2012-10-21  Correct predicate locking for DROP INDEX
+                           CONCURRENTLY.
+      Predicate locks must move from the index to the heap in the window
+      where no index scan can start and inserts still maintain the
+      index; getting it wrong loses serialization failures.
+      expect: nothing.  The test that covered this was
+              900_serializable.pl, which has been removed along with the
+              bespoke infrastructure (see PORTING).  Nothing in the
+              suite takes predicate locks today.
+      revert: hand only.
+      status: MISSED by construction
+
+  ce3f19e2621  2026-07-25  Fix another empty nbtree index SSI race.
+      Not on master at the time of writing; the same family.
+      expect: nothing, same reason.
+      status: MISSED by construction
+
+
+Adjacent machinery the commands lean on
+=======================================
+
+These are not bugs in the CONCURRENTLY commands, but they were reached
+by concurrent DDL and the suite runs the shapes that reach them.
+
+  2a5225b99d7  2025-12-30  Fix a race condition in updating
+                           procArray->replication_slot_xmin.
+      expect: overlapping_ddl, subscription (no_slot_leak, and the
+              invariants if a needed row is removed too early)
+      status: untested
+
+  a2b4102a21a  2025-09-11  Fill testing gap for possible referential
+                           integrity violation
+  e1c971945d6  2026-01-07  Replace flaky CIC/RI isolation tests with a
+                           TAP test
+      The RI-versus-CIC area this branch's own ri_triggers.c fix lives
+      in.  Reverting that fix is the first thing to try, since it is
+      known to fail here.
+      expect: foreign_keys
+      status: this branch's fix is verified by construction (~1 in 3
+              runs failed before it, 0 in 14 after, at stressval 4).
+              Recorded here so it stays covered.
+
+  the apply worker's cached replica identity index
+      Found by this suite, and fixed in this branch.
+
+      REINDEX INDEX CONCURRENTLY on the index behind a subscriber's
+      replica identity gives it a new OID.  apply_handle_update() reads
+      localindexoid out of the relation map entry before
+      apply_handle_update_internal() calls ExecOpenIndices(), and it is
+      that call which processes the swap's invalidation -- so the OID
+      handed to the lookup is the index the swap replaced.  On an
+      assertion build the subscriber went down on
+
+        Assert(GetRelationIdentityOrPK(localrel) == localidxoid || ...)
+
+      and without assertions it was heading for an index that gets
+      dropped once the swap is no longer visible to anyone.
+
+      The fix, in FindReplTupleInLocalRel(), is in two parts.  Take the
+      identity from the relation cache rather than trusting the OID
+      passed in, under a lock, rechecking after the lock is held because
+      acquiring it is itself where invalidations get processed.  And
+      stop the assertion re-deriving the identity for the non-FULL case:
+      index_open() just above it accepts another round of invalidation
+      messages, so a REINDEX committing in that window made it fail over
+      an index that was still perfectly able to find the tuple.  A
+      diagnostic run confirmed that shape -- the index in use was still
+      live, and equal to what the relation map had cached, while the
+      identity had moved during index_open().
+
+      Rates, at stressval 6 with the rebuild weighted up:
+        before                         2 failures in 16
+        re-read only                   1 in 12
+        re-read under a lock           1 in 14
+        with the assertion corrected   0 in 29
+      The scenario now rebuilds the replica identity index as an
+      ordinary member of its rotation, so this stays covered.
+      expect: subscription
+      status: fixed here; the fix wants review before it is proposed --
+              in particular whether the non-FULL half of that assertion
+              is worth keeping in some form rather than dropped.
+
+
+Fixes in this branch that nothing here guards
+=============================================
+
+One of the four server fixes committed alongside this suite is not
+demonstrated by it.  The RI one was not either, until the scenario was
+rebuilt around what the race actually needs; that is written up here
+because the same reasoning applies to the one still outstanding.
+
+  ri_triggers.c, the RI fast path -- now guarded
+      The window is between reading conindid out of the cached
+      RI_ConstraintInfo and opening that index, with
+      table_open(pk_relid, RowShareLock) in between -- and it is that
+      table_open which processes the invalidation a concurrent REINDEX
+      CONCURRENTLY swap produced.  A few instructions wide, opening once
+      per constraint per trigger-firing batch.
+
+      Reaching it took two changes, both measured rather than reasoned:
+
+        The parent has to be small AND quiet.  The race is against its
+        primary key being swapped, so the rebuild must finish quickly.
+        pgbench_accounts is quiet but has a hundred thousand rows and
+        reproduced nothing in fifty-odd runs.  pgbench_tellers has ten
+        rows but is what every TPC-B transaction updates, so a rebuild
+        of its key waits for lockers instead of finishing: nothing in
+        eight runs.  A thousand-row table nothing else writes works.
+
+        The primary key has to be rebuilt on its own.  Until
+        reindex_pkey_concurrently was added, the only command that
+        touched one was reindex_table_concurrently, which rebuilds every
+        index of the table and so swaps the key at a fraction of the
+        rate.
+
+      With both: three failures in twenty runs at stressval 4, none at
+      the default duration, and none in ten with the fix restored.
+
+      One dead end worth not repeating: batching many checks into one
+      statement makes it worse, not better.  The index is opened once
+      per batch, so batching lowers the rate of the thing being raced.
+
+  plancat.c, get_relation_info()
+      The window is between RelationGetIndexList() handing back an
+      index list and index_open() on one of its members, on a standby,
+      with replay of the drop landing in between.  Also a few
+      instructions.
+
+The planner one is still unguarded, and the RI experience says what to
+try: raise the rate of the thing being raced rather than the rate of
+the workload.  Here that means a standby replaying drops of an index on
+a small, quiet relation, planned against repeatedly -- not
+drop_create_index over a busy hundred-thousand-row table.  Failing
+that, it is what injection points are for: stop the backend between
+RelationGetIndexList() and index_open(), let replay commit, release.
+That is how upstream tested 5bbdfa8a18d.  Until one or the other, it is
+committed on the argument -- which is about lock coverage and is
+checkable by reading -- rather than on a demonstration.
+
+Open findings
+=============
+
+Things this suite has produced that are not explained yet.  They are
+here rather than in a commit message because an unreproduced failure is
+a lead, not a result.
+
+  REPACK (CONCURRENTLY) not getting its final lock under write load
+
+      REPACK (CONCURRENTLY) pgbench_tellers waited for
+      AccessExclusiveLock on that table for 185 seconds and then died on
+      the lock timeout, with 23 backends queued behind it for
+      RowExclusiveLock the whole time.  The workload was thirty clients
+      of tpcb_like, whose transactions are a handful of statements and
+      commit in milliseconds -- there was no long-running transaction
+      for it to be waiting on.
+
+      Reproduce with:
+
+        PG_TEST_EXTRA='stress_mode=soak stress_seed=27072026
+                       stress_soak_skip=19 stress_soak_count=1
+                       stress_concurrently=2'
+
+      which failed once in six here; at the default duration it took a
+      whole slice to appear once.  The scenario is pgbench plus the
+      generated decorator, standalone, repack_concurrently as the only
+      command.  Nothing about it is exotic: the notable part is how
+      ordinary it is.
+
+      What is not established is whether this is starvation or simply a
+      long wait that would have ended.  A request that has queued should
+      be reached once the transactions ahead of it drain, and these
+      drain in milliseconds, so 185 seconds wants explaining -- the
+      shapes worth ruling out are a lock upgrade that does not queue
+      fairly (REPACK holds ShareUpdateExclusiveLock on the table
+      already and is asking to upgrade), and a wait that is retried
+      rather than queued.  Both would be characteristics of the feature
+      rather than bugs in it, but a command that can block every writer
+      for three minutes and then give up is worth the REPACK thread
+      knowing about either way.
+
+      Related to the entry under "where the suite falls short" about
+      commands starved by workloads that never leave a gap, but not the
+      same: the others involved a workload that genuinely held locks
+      across pauses, and this one does not.
+
+  a backend that went away with nothing in its log
+
+      pgbench: error: client 6 aborted in command 8 (SQL) of script 1;
+      perhaps the backend died while processing
+
+      Seen once, at stress_seed=555 stress_soak_skip=89, in a wal_replica
+      scenario at scale 10 running reindex_table_concurrently and
+      alter_table_rewrite.  The server log for that node has no ERROR,
+      no FATAL, no TRAP and no signal: the only entry near the abort is
+      the harness shutting the node down afterwards.  Three re-runs of
+      the same index were clean.
+
+      Treat with suspicion before treating as a finding.  The machine
+      this ran on had taken the whole WSL environment down earlier the
+      same day, and a backend killed from outside leaves exactly this
+      trace -- pgbench sees the connection go, the server logs nothing
+      because it was never asked to.  Worth watching for a second
+      occurrence on a machine that has not just crashed.
+
+  a COMMIT decoded before CLOG records it
+
+      Not found here -- reported on the lists, and open at the time of
+      writing as CF 6840:
+
+        https://www.postgresql.org/message-id/flat/85833.1768840165@localhost
+
+      RecordTransactionCommit() writes WAL before updating CLOG, so
+      DecodeCommit() can call SnapBuildAddCommittedTxn() for a
+      transaction that is still in progress as far as CLOG and the
+      procarray are concerned.  A snapshot built from that has the xact
+      as committed while TransactionIdDidCommit() does not, which gives
+      wrong data on the subscriber and wrongly-set commit hint bits on
+      the publisher.  The proposed fix waits in
+      SnapBuildBuildSnapshot() until CLOG agrees.
+
+      This is worth a line here because it is the shape this suite is
+      built for and it is not obvious the suite would catch it: the
+      window is at commit rather than around any one command, and the
+      damage on the publisher is hint bits rather than an invariant.
+      expect: any scenario running REPACK (CONCURRENTLY), which decodes
+              its own table's changes and so builds these snapshots
+              without a subscription being involved at all --
+              repack_dml_s1 and overlapping_ddl first.  A subscription
+              is a way to reach it, not the way: the thread reached it
+              by running REPACK.
+      status: tried, not reproduced.  20 scenario runs of repack_dml_s1
+              and overlapping_ddl at stressval 4, plus 8 of the
+              subscription scenario, all clean.  That is not evidence
+              the bug is absent: the window is between XLogFlush()
+              returning and TransactionIdCommitTree() completing, a few
+              instructions wide, and nothing in these scenarios widens
+              it.  Reaching it plausibly needs an injection point rather
+              than load, which is worth knowing before spending more on
+              it.
+
+  invalid arbiter index list, on a tree that has the fix for it
+
+      Seen once, in the partitions scenario during a soak run:
+
+        ERROR:  invalid arbiter index list
+        CONTEXT:  SQL statement "INSERT INTO pgb_part VALUES (p_id, 0)
+                  ON CONFLICT (id) DO UPDATE SET val = pgb_part.val"
+
+      That elog is execPartition.c:883, reached when the number of
+      arbiter indexes found for a partition does not match the root's
+      plus the ones being concurrently rebuilt.  e6d6e32f424 fixed one
+      way of getting there; this tree contains it.
+
+      Seed 43565523, soak run of 2026-07-26, scenario partitions at
+      stressval 1 with 20 clients.  Replaying that seed did not
+      reproduce it, and neither did 30 runs of the same scenario, 12
+      runs of a rotation narrowed to reindex plus the detach variants,
+      or 10 runs at stressval 3.  So it is rarer than about 1 in 50 at
+      those settings, and needs soak time rather than a tighter loop.
+
+      One hypothesis worth testing before assuming a server bug: the
+      detach_drop_recreate_partition variant attaches a partition whose
+      index was created by CREATE TABLE ... INCLUDING ALL, so there is a
+      window where a child index exists without a parent for a reason
+      other than REINDEX CONCURRENTLY -- which is the shape the arbiter
+      matching reasons about.  If that is what it is, it is still
+      reachable by an ordinary ATTACH PARTITION and still an internal
+      error, so it is worth reporting either way.
+
+
+Where the suite falls short
+===========================
+
+Most of what the first draft of this list found has been closed; what
+follows is what is left.
+
+ 1. Nothing takes predicate locks, so the SSI entries above are
+    uncovered.  This is a regression against the old suite -- see
+    PORTING -- and the replacement wants an isolation test rather than
+    another scenario.
+
+ 2. Nothing compares a dump against its source, so the pg_dump entry is
+    uncovered.  This one fits the check registry and should come back
+    as a plugin.
+
+ 3. No deferrable primary keys.  REPACK refuses those rather than
+    mishandling them now, so covering 832e220d99a means asserting a
+    clean refusal, which is a regression test rather than a stress
+    shape.
+
+ 4. Nothing builds an index whose expression reads a second table, so
+    5bbdfa8a18d stays out of reach.  Upstream needed injection points
+    for it, and probably so would this.
+
+ 5. Three dimensions cannot be combined with the partitioned decorator:
+    an exclusion constraint, because one on a partitioned table has to
+    contain the partition key; a foreign key, because the recipe that
+    partitions an existing table would leave it pointing at the
+    partition rather than the parent; and the subscription environment,
+    which builds an index of its own on the subscriber and drops it
+    concurrently, which a partitioned index refuses.  All three are
+    declared conflicts, so soak skips those combinations rather than
+    failing them -- but partitioning plus referential integrity, and
+    partitioning plus logical replication, are real shapes that are not
+    covered.
+
+ 6. A CONCURRENTLY command that waits for other transactions can be
+    starved by a workload that never stops producing them, and then dies
+    on the lock timeout three minutes later having tested nothing.  Seen
+    twice, in different shapes:
+
+      DETACH ... CONCURRENTLY waits for every transaction holding the
+      parent, and generic plans lock every partition, so nothing is ever
+      free of lockers.  Prepared transactions, held cursors and row
+      locks do the same.
+
+      CREATE INDEX CONCURRENTLY at ddl_concurrency=4 waits for the
+      REPACK transactions the other DDL clients are running.  Reproduce
+      the combination with stress_seed=555 stress_soak_skip=21
+      stress_soak_count=1 -- the combination comes back exactly, the
+      failure only sometimes, which is what a race looks like.
+
+      row_lock against the lock_exhaustion environment.  It holds row
+      locks across a pause, a rebuild queues for its exclusive lock
+      behind them, and every later statement queues behind the rebuild:
+      fair queuing working exactly as designed, and two soak runs that
+      spent three minutes each proving nothing.  Now a declared
+      conflict.
+
+    All of them are the commands behaving as documented rather than
+    anything to report, so the answer has been to give them room rather
+    than to tolerate the error -- tolerating it would mean a genuine
+    hang that surfaced as a lock timeout went unnoticed, which is too
+    much to give up for a quieter log.  So
+    partitioned_pgbench runs the prepared protocol without
+    force_generic_plan, a weaker version of the cached-plan coverage 106
+    gets, and the two detach variants are marked catalogue_only: soak
+    invents load mixes around them that leave no gap at all, and a run
+    that dies on a lock timeout after three minutes says nothing about
+    the server.  Whether that wait is a fact of the feature or something
+    worth reporting has not been looked into.
+
+ 7. Several entries above are only observable under assertions.  The
+    suite should be run against an assertion build as a matter of
+    course; nothing enforces that today.
+
+ 8. The catalogue runs at six seconds a scenario by default.  Every
+    entry above that says "untested" needs a revert run to become
+    "catches", and the two findings this suite has made on its own both
+    came out of soak mode rather than the default run.  Soak needs to
+    run somewhere on a schedule for any of this to hold.
+
+
+Duplicated upstream tests
+=========================
+
+Several tests in the tree cover the same ground as a scenario here, and
+cost buildfarm time doing it.  Once a scenario is shown to catch the bug
+an upstream test guards -- shown, by reverting the fix and watching this
+suite fail -- that test is a candidate for removal, and the case for
+removing it should be made on the same thread as this suite.
+
+Two rules for that, both learned from the entries above:
+
+  Only stress-shaped tests are candidates.  contrib/amcheck/t/002_cic.pl
+  and 003_cic_2pc.pl are pgbench workloads racing a concurrent build,
+  which is exactly what a scenario is, and one scenario can replace
+  both.  The injection-point specs under src/test/modules are not:
+  they are deterministic, they run in a second, and they fail the same
+  way every time.  A probabilistic test never replaces a deterministic
+  one, however much ground it covers.
+
+  Only after the revert run.  Removing a test because a scenario "should"
+  catch the bug is how coverage disappears quietly.  The entries in this
+  file are the record of which ones have earned it.
+
+  candidate                                     covered by
+  --------------------------------------------- --------------------
+  contrib/amcheck/t/002_cic.pl                  repack_dml_s1,
+                                                repack_dml_s50
+  contrib/amcheck/t/003_cic_2pc.pl              bulk_and_rewrite
+
+Nothing has earned it yet: every entry above is still "untested".
+
+Proposed on the REPACK thread, and worth matching rather than removing:
+contrib/amcheck/t/007_repack_concurrently.pl and 008.  Both are pgbench
+with an advisory-locked DDL client, which is this suite's own shape, so
+the comparison is close:
+
+  007: a two-column table with a secondary index, balanced-pair updates
+       keeping SUM(j) constant, and the three REPACK forms.  Covered:
+       +ledger with balanced_pair holds the same invariant,
+       repack_concurrently and repack_using_index are the same commands.
+       007 randomises whether the secondary index covers the updated
+       column, which decides whether the updates can be HOT; here that
+       is fixed per scenario rather than per run -- repack_dml_s1
+       without btree_abalance is the HOT shape, with it the non-HOT one.
+
+  008: inserts under an advisory lock taking values from a sequence, and
+       COUNT(*) WHERE j <= last must equal last.  Covered: +gapless with
+       serial_insert and gapless_count, the same invariant on
+       pgbench_history.
+
+  What neither was covered by until now: both run
+  bt_index_parent_check(heapallindexed) inside the pgbench script,
+  immediately after each REPACK, rather than once at the end.  That is
+  the difference between "an index was corrupted somewhere in this run"
+  and "this command corrupted it", and a later rewrite can repair the
+  damage before a final check ever sees it.  repack_dml_s1 now sets
+  verify_after_repack, which appends those checks to the repack
+  variants.  One delta remains: 007 and 008 also verify the table's
+  primary key, which this suite does not declare as an index and so
+  cannot name.
+
+Not a candidate: src/test/modules/test_misc/t/
+010_index_concurrently_upsert.pl stays.  The unique_and_gapless and
+partitions scenarios overlap it, but it is aimed at one thing, it names
+what it is testing, and it is where the arbiter fixes above were
+developed.  Overlap is not duplication when the narrower test is the one
+that will say what broke.
