@@ -25,6 +25,7 @@ tests += {
       't/116_access_methods.pl',
       't/117_partitioned_pgbench.pl',
       't/118_hot_prune.pl',
+      't/119_hash_and_constraints.pl',
       't/999_soak.pl',
     ],
   },

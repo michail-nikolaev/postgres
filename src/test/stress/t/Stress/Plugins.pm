@@ -209,6 +209,42 @@ our %SCHEMA = (
 		),
 	},
 
+	# Hash partitioning, which detaches differently from range.  The
+	# substitute constraint DETACH CONCURRENTLY used to leave behind
+	# names the parent's OID inside satisfies_hash_partition(), so it is
+	# only observable on a hash partition -- the equivalent constraint on
+	# a range partition is harmless and indistinguishable from the
+	# partition bound.
+	partitioned_hash => {
+		setup => q(
+			CREATE TABLE pgb_hash(id int PRIMARY KEY, val int)
+				PARTITION BY HASH (id);
+			CREATE TABLE pgb_hash_0 PARTITION OF pgb_hash
+				FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+			CREATE TABLE pgb_hash_1 PARTITION OF pgb_hash
+				FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+			CREATE TABLE pgb_hash_2 PARTITION OF pgb_hash
+				FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+			CREATE TABLE pgb_hash_3 PARTITION OF pgb_hash
+				FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+			INSERT INTO pgb_hash SELECT g, 0 FROM generate_series(1, 4000) g;
+		),
+		tables => [qw(pgb_hash_0 pgb_hash_1 pgb_hash_2 pgb_hash_3)],
+	},
+
+	# A unique index that treats nulls as equal.  The executor compares
+	# ii_NullsNotDistinct when it decides whether one index can stand in
+	# for another as an arbiter, and nothing here ever set it.
+	nulls_not_distinct => {
+		setup => q(
+			CREATE TABLE pgb_nnd(id serial PRIMARY KEY, k int, v int);
+			INSERT INTO pgb_nnd(k, v) SELECT g, 0 FROM generate_series(1, 500) g;
+			INSERT INTO pgb_nnd(k, v) VALUES (NULL, 0);
+			CREATE UNIQUE INDEX pgb_nnd_k ON pgb_nnd(k) NULLS NOT DISTINCT;
+		),
+		tables => ['pgb_nnd'],
+	},
+
 	# Rows that are only ever upserted, never deleted, so every upsert
 	# and every MERGE takes its "matched" path.  The arbiter is
 	# pgbench_accounts' own primary key, which the rotation rebuilds
@@ -803,6 +839,38 @@ our %LOAD = (
 				-- swallows the check violation an upsert gets while the
 				-- partition covering the row is detached.
 				SELECT pgb_part_upsert(:id);
+			\endif
+		),
+	},
+
+	# Writes routed through the hash-partitioned parent, so a detach of
+	# one of its partitions has something to race.
+	hash_dml => {
+		weight => 2,
+		requires => { schema => ['partitioned_hash'] },
+		script => q(
+			\set id random(1, 4000)
+			\set d random(1, 100)
+			-- Pruning sends this to one partition; while that partition
+			-- is detached it matches nothing, which is not an error.
+			UPDATE pgb_hash SET val = val + :d WHERE id = :id;
+		),
+	},
+
+	# Upserts whose arbiter is the nulls-not-distinct index, including
+	# the null key, which conflicts with itself under that index.
+	nnd_upsert => {
+		weight => 2,
+		requires => { schema => ['nulls_not_distinct'] },
+		script => q(
+			\set k random(1, 600)
+			\set usenull random(0, 9)
+			\if :usenull = 0
+				INSERT INTO pgb_nnd(k, v) VALUES (NULL, 1)
+					ON CONFLICT (k) DO UPDATE SET v = pgb_nnd.v + 1;
+			\else
+				INSERT INTO pgb_nnd(k, v) VALUES (:k, 1)
+					ON CONFLICT (k) DO UPDATE SET v = pgb_nnd.v + 1;
 			\endif
 		),
 	},
@@ -1625,6 +1693,67 @@ our %DDL = (
 		},
 	},
 
+	# Detach and re-attach a hash partition.  Same command as the range
+	# case, different bound syntax, and a different substitute
+	# constraint to leave behind if the server gets it wrong.
+	detach_hash_partition => {
+		requires => { schema => ['partitioned_hash'] },
+		# Names the parent while removing one of its partitions, so a
+		# command gated on that partition could find it gone.
+		solo => 1,
+		variants => sub {
+			return map {
+				{
+					table => 'pgb_hash',
+					stmts => [
+						"ALTER TABLE pgb_hash DETACH PARTITION pgb_hash_$_ CONCURRENTLY;",
+						"ALTER TABLE pgb_hash ATTACH PARTITION pgb_hash_$_ "
+						  . "FOR VALUES WITH (MODULUS 4, REMAINDER $_);"
+					]
+				}
+			} (0 .. 3);
+		},
+	},
+
+	# A constraint added unvalidated and then validated.  Neither takes
+	# an exclusive lock, so both run against a live workload, and
+	# VALIDATE scans the whole table while the rotation rewrites it.
+	add_validate_constraint => {
+		variants => sub {
+			my ($ctx) = @_;
+			return map {
+				my $t = $_;
+				{
+					table => $t,
+					stmts => [
+						# The drop is normally a no-op and would say so on
+						# stderr, where the run insists on silence.
+						'SET client_min_messages = warning;',
+						"ALTER TABLE $t DROP CONSTRAINT IF EXISTS ${t}_stress_chk;",
+						'RESET client_min_messages;',
+						"ALTER TABLE $t ADD CONSTRAINT ${t}_stress_chk "
+						  . 'CHECK (true) NOT VALID;',
+						"ALTER TABLE $t VALIDATE CONSTRAINT ${t}_stress_chk;",
+						"ALTER TABLE $t DROP CONSTRAINT ${t}_stress_chk;"
+					]
+				}
+			} @{ $ctx->{tables} };
+		},
+	},
+
+	# One command rebuilding every index in the schema, which sequences
+	# its locks differently from the per-index and per-table forms.
+	reindex_schema_concurrently => {
+		solo => 1,
+		variants => sub {
+			return (
+				{
+					table => 'public',
+					stmts => ['REINDEX SCHEMA CONCURRENTLY public;']
+				});
+		},
+	},
+
 	# VACUUM's index cleanup and freezing have to coexist with the
 	# concurrent rebuilds and the tuple movement.
 	vacuum => {
@@ -2254,6 +2383,23 @@ our %CHECK = (
 				}
 			}
 			Test::More::pass('indexes pass amcheck');
+		},
+	},
+
+	# DETACH CONCURRENTLY must not leave a substitute constraint behind.
+	# The one it used to create on a hash partition carries the OID of
+	# the parent the table is no longer related to, which breaks a dump
+	# and outlives the parent.
+	no_substitute_constraints => {
+		final => sub {
+			my ($node, $ctx) = @_;
+			my $bad = $node->safe_psql(
+				'postgres', q(
+				SELECT count(*) FROM pg_constraint c
+				WHERE c.contype = 'c'
+				  AND pg_get_constraintdef(c.oid) LIKE '%satisfies_hash_partition%'));
+			Test::More::is($bad, '0',
+				'no partition constraint left behind by DETACH');
 		},
 	},
 

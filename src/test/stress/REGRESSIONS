@@ -445,14 +445,29 @@ its second phase, usually reached through a cached plan.
       revert: clean, in tablecmds.c (the commit also changes regress
               expectations; restore those and keep only the backend
               hunk).
-      status: MISSED, and by construction rather than by tuning.  6 runs
-              of partitions at the default duration are clean, and no
-              amount of stress would change that: the leftover
-              constraint is harmless for the range partitioning this
-              suite uses.  Demonstrated by hand -- detaching a range
-              partition twice, with re-attach in between, leaves one
-              constraint each time and no error, while detaching a hash
-              partition leaves
+      status: CATCHES, 6 failures in 6 runs at the default duration, as
+
+                not ok - no partition constraint left behind by DETACH
+
+              once the suite had a hash-partitioned relation to detach.
+              It was MISSED before that, and by construction rather than
+              by tuning: the substitute constraint is harmless under
+              range partitioning, which was all this suite had.
+              Detaching a range partition twice, with a re-attach in
+              between, leaves one constraint and no error; detaching a
+              hash partition leaves
+
+                CHECK (satisfies_hash_partition('16390'::oid, 2, 0, id))
+
+              on the detached table -- a literal reference to the OID of
+              a parent it is no longer related to, which is the harm the
+              commit describes.  hash_and_constraints now detaches and
+              re-attaches hash partitions, and the
+              no_substitute_constraints check looks for exactly that
+              constraint definition anywhere in the database.
+              Nothing has to be raced for this one: a single completed
+              detach is enough, which is why it fails every run at the
+              default duration.
 
                 CHECK (satisfies_hash_partition('16390'::oid, 2, 0, id))
 
