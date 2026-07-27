@@ -9,6 +9,18 @@
 # descriptor and the pruning setup: those are rebuilt when a cached plan
 # is revalidated, which is where the detach races have always been
 # found.
+#
+# Without the fix in RelationBuildPublicationDesc() that copes with an
+# empty ancestor list, this fails five runs in eight at
+# stress_concurrently=4 with
+#
+#   TRAP: failed Assert("list != NIL"), File: pg_list.h
+#
+# taking the backend down: ALTER TABLE ... DETACH PARTITION CONCURRENTLY
+# removes the inheritance link while other backends still see
+# relispartition set, so get_partition_ancestors() returns NIL and
+# llast_oid() asserts.  An UPDATE routed through the parent reaches it
+# via CheckCmdReplicaIdentity().
 use strict;
 use warnings FATAL => 'all';
 
