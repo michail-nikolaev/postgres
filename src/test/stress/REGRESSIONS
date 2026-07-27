@@ -415,7 +415,26 @@ its second phase, usually reached through a cached plan.
       Crash, so any check would do.
       expect: partitions, as above.
       revert: clean.
-      status: untested
+      revert: clean, three lines in expand_partitioned_rtentry().
+      status: not caught locally -- 8 runs of partitions at stressval 4,
+              clean -- and the reason is that this one is invisible
+              without a sanitizer.  bms_del_member() pfrees the set only
+              when it becomes empty, so the dangling read needs pruning
+              to have left exactly one live partition and that partition
+              to be dropped between pruning and try_table_open().  Even
+              when that happens, the read lands on a chunk aset.c has
+              put back on a freelist and is very likely still intact, so
+              nothing fails.
+              partitions does drive the shape: partition_dml's
+              "WHERE id IN (:lo, :hi)" takes both ids from one
+              partition, so it prunes to a single one, and
+              detach_drop_recreate_partition drops partitions out from
+              under it.
+              This is therefore an entry to test in CI rather than
+              locally: the Linux - Meson 64-bit job builds with
+              -fsanitize=address and runs this suite, which is where a
+              use-after-free would be reported rather than ignored.
+              Push a branch with the revert and read that job.
 
   3231fd04552  2025-10-11  Stop creating constraints during DETACH
                            CONCURRENTLY
@@ -423,7 +442,29 @@ its second phase, usually reached through a cached plan.
       parent's OID and broke dump/restore of the detached table.
       expect: 901_pg_dump, if it is pointed at a detached partition.
       revert: clean.
-      status: untested
+      revert: clean, in tablecmds.c (the commit also changes regress
+              expectations; restore those and keep only the backend
+              hunk).
+      status: MISSED, and by construction rather than by tuning.  6 runs
+              of partitions at the default duration are clean, and no
+              amount of stress would change that: the leftover
+              constraint is harmless for the range partitioning this
+              suite uses.  Demonstrated by hand -- detaching a range
+              partition twice, with re-attach in between, leaves one
+              constraint each time and no error, while detaching a hash
+              partition leaves
+
+                CHECK (satisfies_hash_partition('16390'::oid, 2, 0, id))
+
+              on the detached table: a literal reference to the OID of a
+              parent it is no longer related to, which is the harm the
+              commit describes.  To catch this the suite would need a
+              hash-partitioned relation in the detach rotation, and a
+              check that a detached table carries no constraint
+              referencing its former parent.  Neither is a big change,
+              but both are additions rather than tuning, and the
+              dump/restore route that would also show it went away with
+              the pg_dump scenario.
 
 
 REPACK CONCURRENTLY
