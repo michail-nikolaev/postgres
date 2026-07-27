@@ -122,21 +122,62 @@ heapallindexed catches directly.
       backends HOT-prune tuples the build still needs, so the index
       misses them.  The revert is the fix; putting the bug back means
       re-applying d9d0762.
-      expect: repack_dml_s1 and repack_dml_s50 (amcheck), given a load
-              that HOT-updates -- tpcb_like's update of abalance is a
-              HOT update whenever abalance is not indexed, so s1 with
-              only the PK declared is the interesting shape.
-      revert: none needed.  The branch make-PROC_IN_SAFE_IC-great-again
-              already carries a4821e227ce, Revert "Revert changes to
-              CONCURRENTLY that 'sped up' Xmin advance", on top of which
-              2337987590e separates PROC_IN_SAFE_IC from
-              PROC_AFFECTS_ONLY_CATALOG -- an attempt to restore the
-              optimization without the corruption.  Run this suite
-              against both commits rather than injecting the bug
-              synthetically: a4821e227ce alone should fail, and whether
-              2337987590e still fails is a live question about that
-              patch rather than a test-calibration exercise.
-      status: untested.  Best candidate to start with.
+      expect: hot_prune (amcheck, and the check that follows each
+              rebuild in the run).
+      revert: git revert e28bb885196 conflicts.  Hand-applied instead,
+              which is four hunks in ComputeXidHorizons(): skip
+              PROC_IN_SAFE_IC backends when accumulating
+              data_oldest_nonremovable, and give
+              catalog_oldest_nonremovable its own accumulation -- its
+              own initialization, its own KnownAssignedXids fold, and no
+              longer deriving it from the data horizon further down.
+              The other half of d9d0762 never was reverted:
+              set_indexsafe_procflags() still runs in the build and
+              validate phases, so only procarray.c needs touching.
+      status: CATCHES, 8 failures in 8 runs at the default duration, as
+
+                ERROR:  heap tuple (30350,29) from table
+                "pgbench_accounts" lacks matching index tuple within
+                index "pgb_bid_idx"
+
+              on pgb_bid_idx (six runs) and on pgbench_accounts_pkey
+              (two), so both the CREATE INDEX CONCURRENTLY and the
+              REINDEX CONCURRENTLY path.  It arrives fast: a failing run
+              takes 17 seconds, well inside the first rebuild.  Eight
+              runs with the fix restored are clean.
+
+              Nothing caught this before hot_prune existed.  Two things
+              were missing, both worth having on their own:
+
+              - No scenario could produce a HOT update on a large
+                table.  An update is HOT only when no index covers a
+                column it changes, and every scenario declared an index
+                on abalance, which is the one column the load moves.  So
+                no HOT chain was ever built and none was ever pruned.
+                hot_prune indexes bid, which nothing writes.
+              - amcheck only ever checked the indexes a scenario
+                declared, and a primary key is never one of those, so
+                the primary keys reindex_pkey_concurrently rebuilds went
+                unverified.  It now resolves them through the catalog.
+
+              Size matters here as much as the load does: a prune only
+              costs a build anything if it lands on a page the build has
+              not reached yet, so the window is the length of the scan.
+              Measured by hand outside the suite, scale 30 with
+              fillfactor 50 gave a bad index in two rebuilds out of six;
+              the same table at the default fillfactor gave 590k HOT
+              updates out of 680k and no bad index in five.
+
+              The branch make-PROC_IN_SAFE_IC-great-again carries
+              a4821e227ce, Revert "Revert changes to CONCURRENTLY that
+              'sped up' Xmin advance", and on top of it 2337987590e,
+              which separates PROC_IN_SAFE_IC from
+              PROC_AFFECTS_ONLY_CATALOG in an attempt to restore the
+              optimization without the corruption.  a4821e227ce is
+              equivalent to what was hand-applied here and is now known
+              to fail this scenario 8 in 8; whether 2337987590e survives
+              it is an open question about that patch, and this is the
+              test to ask it with.
 
   92c49d1062f  2024-06-17  Fix insertion of SP-GiST REDIRECT tuples
                            during REINDEX CONCURRENTLY.
@@ -862,6 +903,16 @@ follows is what is left.
     came out of soak mode rather than the default run.  Soak needs to
     run somewhere on a schedule for any of this to hold.
 
+ 9. Indexing the column the load moves is what makes a scenario
+    interesting, and it is also what switched off an entire mechanism.
+    An update is HOT only when no index covers a column it changes, so
+    for as long as every scenario declared an index on abalance, no
+    update anywhere in the suite was a HOT update and no HOT chain was
+    ever pruned -- which is the whole of what d9d0762 broke.  The blind
+    spot was not one scenario forgetting something; it was the same
+    reasonable choice made everywhere.  Worth asking of any mechanism
+    the server has: does something in the standard shape of these
+    scenarios turn it off?
 
 Duplicated upstream tests
 =========================

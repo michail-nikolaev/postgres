@@ -197,6 +197,18 @@ our %SCHEMA = (
 		),
 	},
 
+	# Room left on every page for the next version of the rows already
+	# there.  pgbench fills its pages to the brim, which pushes updates
+	# onto other pages and cuts the HOT chains short; leaving half the
+	# page free keeps the chains on the page, where they can be pruned.
+	# The setting applies to pages written from here on, so the effect
+	# arrives as the load rewrites the table rather than at once.
+	low_fillfactor => {
+		setup => q(
+			ALTER TABLE pgbench_accounts SET (fillfactor = 50);
+		),
+	},
+
 	# Rows that are only ever upserted, never deleted, so every upsert
 	# and every MERGE takes its "matched" path.  The arbiter is
 	# pgbench_accounts' own primary key, which the rotation rebuilds
@@ -615,6 +627,17 @@ our %INDEXES = (
 		am => 'btree',
 		defn => 'ON pgbench_accounts(abalance)',
 	},
+	# An index on a column nothing updates.  That is what makes the
+	# updates around it HOT updates: an update is HOT only when no index
+	# covers any column it changes, and every other index here is on
+	# abalance, which is exactly what the load moves.  A scenario that
+	# wants HOT chains declares this one and no abalance index.
+	btree_bid => {
+		table => 'pgbench_accounts',
+		name => 'pgb_bid_idx',
+		am => 'btree',
+		defn => 'ON pgbench_accounts(bid)',
+	},
 	btree_history_delta => {
 		table => 'pgbench_history',
 		name => 'pgb_history_delta_idx',
@@ -699,6 +722,23 @@ our %LOAD = (
 			INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
 				VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
 			COMMIT;
+		),
+	},
+
+	# Nothing but updates to one column, spread evenly over the table.
+	# Where no index covers that column the new version stays on the
+	# page and the old one becomes prunable, so this produces HOT chains
+	# and, through them, opportunistic pruning on pages all over the
+	# relation -- which is what a concurrent build has to survive.  It
+	# does not move money between tables, so a scenario using this one
+	# has no balance invariant to check.
+	hot_churn => {
+		weight => 1,
+		script => q(
+			\set aid random(1, :naccounts)
+			\set delta random(-5000, 5000)
+			UPDATE pgbench_accounts SET abalance = abalance + :delta
+				WHERE aid = :aid;
 		),
 	},
 
@@ -1472,7 +1512,16 @@ our %DDL = (
 			return map {
 				{
 					table => $_,
-					stmts => ["REINDEX INDEX CONCURRENTLY ${_}_pkey;"]
+					stmts => [
+						"REINDEX INDEX CONCURRENTLY ${_}_pkey;",
+						# Checked in the run rather than only at the end,
+						# so that a rebuild which loses rows is reported
+						# next to the rebuild that lost them.
+						"SELECT bt_index_check(i.indexrelid, "
+						  . "heapallindexed => true) FROM pg_index i "
+						  . "WHERE i.indrelid = to_regclass('$_') "
+						  . 'AND i.indisprimary AND i.indisvalid;'
+					]
 				}
 			} @{ $ctx->{tables} };
 		},
@@ -2085,6 +2134,24 @@ our %CHECK = (
 	amcheck => {
 		final => sub {
 			my ($node, $ctx) = @_;
+
+			# Primary keys are not among the declared indexes -- they
+			# arrive with the table -- but reindex_pkey_concurrently and
+			# reindex_table_concurrently both rebuild them, so they need
+			# checking too.  Resolved through the catalog rather than by
+			# name, so that a table without one, or one whose constraint a
+			# decorator renamed, is simply skipped.
+			foreach my $table (@{ $ctx->{tables} })
+			{
+				$node->safe_psql(
+					'postgres', qq(
+					SELECT bt_index_parent_check(i.indexrelid,
+												 heapallindexed => true)
+					FROM pg_index i
+					WHERE i.indrelid = to_regclass('$table')
+					  AND i.indisprimary AND i.indisvalid));
+			}
+
 			# amcheck wants a real index, not a partitioned one, and an
 			# index on a table a decorator has partitioned is the latter.
 			foreach my $idx (_unpartitioned_indexes($ctx))

@@ -22,7 +22,7 @@ run_scenario(
 		indexes => [ 'btree_abalance', 'btree_history_delta',
 			'toasted_predicate', 'expr_xid' ],
 		load => [ 'tpcb_like', 'row_lock' ],
-		ddl => [@STANDARD_DDL],
+		ddl => [ @STANDARD_DDL, 'reindex_pkey_concurrently' ],
 		ddl_concurrency => 1,
 		checks => [ 'balances', 'index_vs_seq', 'amcheck', 'no_slot_leak' ],
 		env => 'standalone',
