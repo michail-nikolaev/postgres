@@ -17,7 +17,11 @@ run_scenario(
 		indexes => ['btree_abalance'],
 		load => [ 'tpcb_like', 'balanced_pair' ],
 		ddl => [@STANDARD_DDL],
-		ddl_concurrency => 1,
+		# Several in flight at once, so that the transient slots the
+		# repacks take can be asked to switch logical decoding on at the
+		# same moment -- and one of those activations then gets
+		# cancelled, which is the race this scenario is here for.
+		ddl_concurrency => 4,
 		checks => [ 'balances', 'ledger_sum', 'amcheck', 'no_slot_leak',
 			'invalid_indexes_droppable' ],
 		env => 'cancellation',

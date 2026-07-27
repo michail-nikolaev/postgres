@@ -590,7 +590,35 @@ test.
               several REPACKs switching decoding on at once, one
               cancelled.  Assertion build.
       revert: by hand (logicalctl.c).
-      status: untested
+      revert: git revert conflicts.  Hand-applied instead: put the old
+              abort_logical_decoding_activation() body back -- the two
+              Asserts, clearing xlog_logical_info under the lock, and
+              the procsignal barrier -- in place of the
+              RequestDisableLogicalDecoding() call the commit replaced
+              it with.
+      status: MISSED, 0 in 8 at the default duration and 0 in 6 at
+              stressval 4, after raising cancellation's ddl_concurrency
+              to 4 so the transient slots the repacks take can ask for
+              activation at the same moment.
+
+              The reintroduction is not in doubt: the upstream test that
+              shipped with the commit, recovery/051_effective_wal_level,
+              fails against it with
+
+                TRAP: failed Assert(
+                  "!LogicalDecodingCtl->logical_decoding_enabled")
+
+              and passes again once it is restored.  So this is the
+              scenario falling short, not the revert.
+
+              The window is between EmitProcSignalBarrier() and the WAL
+              record inside EnableLogicalDecoding(), and hitting it
+              needs a cancellation to land in that gap while a second
+              backend is activating.  The cancellation env fires at
+              random statements, which is many orders of magnitude too
+              coarse.  This one wants an injection point rather than
+              load, and it already has a deterministic gate upstream, so
+              it is a poor use of stress time either way.
 
 
 REFRESH MATERIALIZED VIEW CONCURRENTLY
@@ -603,7 +631,16 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY
       expect: plancache_and_matview, if the rotation drops the matview's
               own unique index -- it currently rotates over the base
               tables' indexes.
-      status: untested
+      status: MISSED by construction, and not revert-tested -- this one
+              is settled by the lock levels rather than by a run.
+              REFRESH MATERIALIZED VIEW CONCURRENTLY holds ExclusiveLock
+              on the matview, and DROP INDEX CONCURRENTLY needs
+              ShareUpdateExclusiveLock on it, which conflicts.  No
+              outside session can drop the index mid-refresh.  The
+              commit says as much: the one known way in is a function
+              called as part of refreshing the matview dropping the
+              index, "a pretty silly thing to do", and nothing here
+              calls user functions from a matview definition.
 
 
 Catalog state, cancellation and cleanup
