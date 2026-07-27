@@ -726,9 +726,27 @@ Catalog state, cancellation and cleanup
                            triggers
       REINDEX CONCURRENTLY on a table with no indexes pops a snapshot it
       does not own.
-      expect: nothing -- every scenario's tables have indexes, and there
-              are no event triggers.
-      status: untested, MISSED by construction
+      expect: hash_and_constraints, through reindex_bare_table.
+      revert: by hand: put the unconditional PopActiveSnapshot() back on
+              the "no indexes to rebuild" early return in
+              ReindexRelationConcurrently(), and drop the guarded pop
+              the commit added to ReindexMultipleInternal().
+      status: CATCHES, 5 failures in 6 runs at the default duration, as
+
+                TRAP: failed Assert("portal->portalSnapshot == NULL")
+
+              taking the backend down.  6 runs with the fix restored are
+              clean.
+
+              It was listed as MISSED by construction, and the
+              construction was the problem rather than the bug: every
+              table here carried at least a primary key and there were
+              no event triggers.  bare_table_event_trigger adds a table
+              with no indexes and an event trigger whose function reads
+              a catalog, and reindex_bare_table points REINDEX TABLE
+              CONCURRENTLY at it.  That form is needed because the table
+              cannot join the ordinary rotation -- with no primary key,
+              reindex_pkey_concurrently has nothing to name.
 
   a904abe2e28  2020-01-22  Fix concurrent indexing operations with
                            temporary tables
