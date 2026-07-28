@@ -1605,12 +1605,39 @@ more and then came back clean.
   writer, and the run failed on a writer that died, which is not what
   that environment is testing.  Declared as a conflict.
 
-What is left is one invented combination in the fourth slice that ends
-in a lock timeout, "waiting for AccessExclusiveLock", and the cascade
-of aborted clients behind it.  That is contention, not
-incompatibility: at stress_seconds=1 the lock timeout is 30 seconds and
-some rotations cannot get their exclusive lock inside it.  Slices 0, 40
-and 80 are clean; 120 has that one.
+A third pass, on the final tree, ran all four slices again: 0, 40 and 80
+are clean, and 120 fails on one combination, invented_126, which it
+does every time.
+
+That one is contention rather than incompatibility, and it is worth
+describing because the obvious fix made things worse.  The combination
+is scale 1 with twenty clients, tpcb_like among its loads, and a
+rotation of add_validate_constraint and reindex_schema_concurrently.
+At scale 1 there is one pgbench_branches row and ten teller rows and
+every tpcb transaction updates both, so a client that blocks behind DDL
+while holding one of those row locks takes the whole client set with
+it: the log shows ten waiters on RowExclusiveLock and the victim
+waiting on "ShareLock on transaction", which is a row lock, until the
+30-second lock timeout fires.
+
+Bounding the constraint statements helped and was kept:
+add_validate_constraint's ADD and DROP both need AccessExclusiveLock,
+and they now go through pgb_ddl_bounded() -- the helper written for
+ATTACH PARTITION, renamed since it is not attach-specific -- so a
+failed attempt releases the queue instead of parking at the head of it.
+It did not fix this combination.
+
+Raising the invented scale when the client count is high was tried and
+reverted.  It removes the hot row, but two-thirds of combinations then
+build and check five times the data: a slice that took four minutes was
+still on its fifteenth combination after twenty, and one of them hung
+past the budget.  Soak buys breadth, and that trade sells it.  The
+change also shifts which combination each index names, which costs the
+one property that makes a soak failure reportable.
+
+So invented_126 stands as a known failure of survey mode rather than of
+the server or the plugins.  Anyone reproducing it should know it is a
+lock timeout behind a hot row, not a combination that cannot run.
 
 
 Where the suite falls short

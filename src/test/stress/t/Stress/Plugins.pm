@@ -162,14 +162,16 @@ our %SCHEMA = (
 			$$;
 
 
-			-- Attaching a partition needs AccessExclusiveLock on it, and
-			-- the load writes to this one continuously.  A single
-			-- unbounded ATTACH parks that request at the head of the
-			-- lock queue and every writer stacks up behind it until the
-			-- lock timeout fires -- three minutes of nothing, then a
-			-- failed run.  Retrying in short slices lets the queue drain
-			-- between attempts, so the worst stall is half a second.
-			CREATE FUNCTION pgb_attach_bounded(cmd text) RETURNS boolean
+			-- Run a command that needs a lock the workload conflicts
+			-- with, without parking the request at the head of the lock
+			-- queue.  An unbounded ALTER TABLE that wants
+			-- AccessExclusiveLock -- attaching a partition, adding or
+			-- dropping a constraint -- has every writer stack up behind
+			-- it until the lock timeout fires, which is minutes of
+			-- nothing and then a failed run.  Retrying in short slices
+			-- lets the queue drain between attempts, so the worst stall
+			-- is half a second.
+			CREATE FUNCTION pgb_ddl_bounded(cmd text) RETURNS boolean
 			LANGUAGE plpgsql AS $fn$
 			DECLARE i int;
 			BEGIN
@@ -1879,7 +1881,7 @@ our %DDL = (
 					table => 'pgb_hash',
 					stmts => [
 						"ALTER TABLE pgb_hash DETACH PARTITION pgb_hash_$_ CONCURRENTLY;",
-						"SELECT pgb_attach_bounded('ALTER TABLE pgb_hash "
+						"SELECT pgb_ddl_bounded('ALTER TABLE pgb_hash "
 						  . "ATTACH PARTITION pgb_hash_$_ FOR VALUES WITH "
 						  . "(MODULUS 4, REMAINDER $_)');"
 					]
@@ -1904,10 +1906,15 @@ our %DDL = (
 						'SET client_min_messages = warning;',
 						"ALTER TABLE $t DROP CONSTRAINT IF EXISTS ${t}_stress_chk;",
 						'RESET client_min_messages;',
-						"ALTER TABLE $t ADD CONSTRAINT ${t}_stress_chk "
-						  . 'CHECK (true) NOT VALID;',
+						# ADD and DROP CONSTRAINT need
+						# AccessExclusiveLock; VALIDATE does not, and is
+						# the part worth running against a live workload
+						# anyway.
+						"SELECT pgb_ddl_bounded('ALTER TABLE $t ADD "
+						  . "CONSTRAINT ${t}_stress_chk CHECK (true) NOT VALID');",
 						"ALTER TABLE $t VALIDATE CONSTRAINT ${t}_stress_chk;",
-						"ALTER TABLE $t DROP CONSTRAINT ${t}_stress_chk;"
+						"SELECT pgb_ddl_bounded('ALTER TABLE $t DROP "
+						  . "CONSTRAINT ${t}_stress_chk');"
 					]
 				}
 			} @{ $ctx->{tables} };
@@ -2005,7 +2012,7 @@ our %DDL = (
 					stmts => [
 						"ALTER TABLE pgb_part DETACH PARTITION $p CONCURRENTLY;",
 						'\sleep 10 ms',
-						"SELECT pgb_attach_bounded('ALTER TABLE pgb_part "
+						"SELECT pgb_ddl_bounded('ALTER TABLE pgb_part "
 						  . "ATTACH PARTITION $p FOR VALUES FROM "
 						  . "($bounds[$i][0]) TO ($bounds[$i][1])');"
 					]
@@ -2052,7 +2059,7 @@ our %DDL = (
 						"INSERT INTO ${p}_next SELECT * FROM $p;",
 						"DROP TABLE $p;",
 						"ALTER TABLE ${p}_next RENAME TO $p;",
-						"SELECT pgb_attach_bounded('ALTER TABLE pgb_part "
+						"SELECT pgb_ddl_bounded('ALTER TABLE pgb_part "
 						  . "ATTACH PARTITION $p FOR VALUES FROM "
 						  . "($bounds[$i][0]) TO ($bounds[$i][1])');"
 					]
@@ -2091,7 +2098,7 @@ our %DDL = (
 					  . 'pgbench_accounts_over CONCURRENTLY;',
 					'\endif',
 					'\sleep 10 ms',
-					"SELECT pgb_attach_bounded('ALTER TABLE pgbench_accounts "
+					"SELECT pgb_ddl_bounded('ALTER TABLE pgbench_accounts "
 					  . 'ATTACH PARTITION pgbench_accounts_over '
 					  . "FOR VALUES FROM ($from) TO (MAXVALUE)');"
 				]
@@ -2121,7 +2128,7 @@ our %DDL = (
 						  . "pgbench_accounts_over_$i CONCURRENTLY;",
 						'\endif',
 						'\sleep 10 ms',
-						"SELECT pgb_attach_bounded('ALTER TABLE "
+						"SELECT pgb_ddl_bounded('ALTER TABLE "
 						  . 'pgbench_accounts_over ATTACH PARTITION '
 						  . "pgbench_accounts_over_$i "
 						  . "FOR VALUES WITH (MODULUS 2, REMAINDER $i)');"
