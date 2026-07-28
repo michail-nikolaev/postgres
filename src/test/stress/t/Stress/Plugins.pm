@@ -955,7 +955,7 @@ our %LOAD = (
 		# It writes deltas into pgbench_history without the account,
 		# teller and branch rows that would balance them, and the
 		# invariant sums all four.
-		conflicts => { check => ['balances'] },
+		conflicts => { checks => ['balances'] },
 		script => q(
 			\set aid random(1, :naccounts)
 			\set delta random(-5000, 5000)
@@ -1007,7 +1007,7 @@ our %LOAD = (
 		weight => 1,
 		# Moves abalance without the matching teller, branch and history
 		# rows, so the four-way total no longer holds.
-		conflicts => { check => ['balances'] },
+		conflicts => { checks => ['balances'] },
 		script => q(
 			\set aid random(1, :naccounts)
 			\set delta random(-5000, 5000)
@@ -1603,6 +1603,12 @@ our %LOAD = (
 	# not collide with each other and this load fits any scenario.
 	temp_table_cic => {
 		weight => 1,
+		# This is a workload client that runs index DDL, and the
+		# cancellation environment picks its victims by matching the
+		# query text -- so it would terminate this one and the run would
+		# fail on a writer that died, which is not what that environment
+		# is testing.
+		conflicts => { env => ['cancellation'] },
 		script => q(
 			-- The table survives the whole session, so every transaction
 			-- after the first would report it already exists, and the run
@@ -3048,7 +3054,7 @@ our %ENVS = (
 				# would ever match.
 				Test::More::like(
 					$stderr,
-					qr/canceling statement due to statement timeout|(?:relation|index) "[^"]+" (?:already exists|does not exist)|skipping reindex of invalid index|cannot cluster on (?:invalid|partial) index|deadlock detected/,
+					qr/canceling statement due to statement timeout|(?:relation|index) "[^"]+" (?:already exists|does not exist)|skipping reindex of invalid index|cannot reindex exclusion constraint index [^ ]+ concurrently, skipping|cannot cluster on (?:invalid|partial) index|deadlock detected/,
 					'interrupted command failed only in expected ways')
 				  or Test::More::diag("unexpected error: $stderr");
 			}
@@ -3111,6 +3117,8 @@ our %ENVS = (
 
 	# A hot standby replaying the DDL while serving the checks.
 	standby => {
+		# Replication has to catch up before the checks mean anything.
+		min_seconds => 5,
 		init => { allows_streaming => 1 },
 		conf => ['max_connections = 50'],
 		setup => sub {
@@ -3221,6 +3229,8 @@ our %ENVS = (
 	# A subscriber applying what the workload produces while the
 	# publisher's tables are rebuilt underneath the decoding.
 	subscription => {
+		# Replication has to catch up before the checks mean anything.
+		min_seconds => 5,
 		init => { allows_streaming => 'logical' },
 		conf => ['max_connections = 50'],
 		setup => sub {

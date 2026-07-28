@@ -1573,11 +1573,44 @@ pins its own plugin lists.
   goes away with its parent, and the next drop failed with "index
   ... does not exist".  Fixed with IF EXISTS.
 
-Two failures remain and are pacing rather than incompatibility: the
-subscription and standby environments cannot finish synchronising
-inside a one-second workload, so their final checks see a subscriber
-that is still behind ("14104 14104 1273" against "14104 14104 14104").
-Survey mode is the wrong tool for those two; they need a real duration.
+A second pass over the same four slices, after those fixes, found four
+more and then came back clean.
+
+  A conflict declared under the wrong name, which is worse than no
+  conflict at all.  The registry key for checks is "checks"; the two
+  conflicts added above said "check", so the lookup went to a spec key
+  that does not exist and the conflict never fired -- soak went on
+  building the combination the plugin had just declared it could not be
+  part of, and the balances failure came back unchanged.  Corrected,
+  and _validate() now rejects a requires or conflicts naming a kind
+  that is not in the registry, so the next typo of this shape fails
+  loudly instead of silently permitting everything.
+
+  Environments that cannot answer anything in a second.  subscription
+  and standby have to get a second server caught up before their checks
+  mean anything; at stress_seconds=1 they reported a subscriber that
+  was simply still behind.  Both now declare min_seconds and survey
+  mode respects it.
+
+  Two benign server warnings the stderr matchers did not allow.
+  REINDEX CONCURRENTLY says so and skips when it meets an exclusion
+  constraint index, in the run's own matcher and again in the
+  cancellation environment's.  Both now tolerate it, as they already
+  did for the invalid-index skip.
+
+  temp_table_cic against the cancellation environment.  That
+  environment picks its victims by matching query text against
+  REPACK|REINDEX|CREATE INDEX|DROP INDEX, and this load runs CREATE
+  INDEX CONCURRENTLY from a workload client -- so it terminated a
+  writer, and the run failed on a writer that died, which is not what
+  that environment is testing.  Declared as a conflict.
+
+What is left is one invented combination in the fourth slice that ends
+in a lock timeout, "waiting for AccessExclusiveLock", and the cascade
+of aborted clients behind it.  That is contention, not
+incompatibility: at stress_seconds=1 the lock timeout is 30 seconds and
+some rotations cannot get their exclusive lock inside it.  Slices 0, 40
+and 80 are clean; 120 has that one.
 
 
 Where the suite falls short

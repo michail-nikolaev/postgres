@@ -255,6 +255,15 @@ sub _validate
 
 			foreach my $rkind (sort keys %{ $defn->{requires} // {} })
 			{
+				# A requirement naming a kind that does not exist is a
+				# typo that would otherwise be silently true: the lookup
+				# below would find nothing to compare against.  The same
+				# goes for conflicts, which is worse -- a conflict that
+				# never fires lets soak build a combination the plugin
+				# said it could not be part of.
+				die "$kind '$name' requires unknown kind '$rkind'"
+				  unless $rkind eq 'env' || exists $registry{$rkind};
+
 				# 'env' is a single value rather than a list, and a
 				# requirement on it means "any one of these".
 				if ($rkind eq 'env')
@@ -289,6 +298,9 @@ sub _validate
 
 			foreach my $ckind (sort keys %{ $defn->{conflicts} // {} })
 			{
+				die "$kind '$name' conflicts with unknown kind '$ckind'"
+				  unless $ckind eq 'env' || exists $registry{$ckind};
+
 				foreach my $cname (@{ $defn->{conflicts}->{$ckind} })
 				{
 					# 'env' is a single value rather than a list.
@@ -443,6 +455,14 @@ sub run_one
 	$duration = $1
 	  if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_seconds=(\d+)\b/;
 	my $env = $ENVS{ $spec->{env} };
+
+	# An environment that has to get a second server caught up cannot
+	# answer anything in a second: the checks would be reading a
+	# subscriber that is still behind, which looks like a broken
+	# combination and is not one.  Such an environment names its floor
+	# and survey mode respects it.
+	$duration = $env->{min_seconds}
+	  if $env->{min_seconds} && $duration < $env->{min_seconds};
 	my @schema = map { $SCHEMA{$_} } _order_schema($spec->{schema});
 	my $loader = $schema[0];
 	my $pgbench_scale = $spec->{pgbench_scale} // 1;
@@ -687,13 +707,18 @@ sub run_one
 	# the seed, and a rotation that can interrupt a concurrent reindex --
 	# a rewriting ALTER TABLE taking the table away mid-build, say --
 	# leaves invalid indexes behind, which the next REINDEX reports and
-	# skips.  Both are expected; anything else, an aborted client or a
-	# failed assertion, still fails the test.
+	# skips, and the one it emits for an exclusion constraint index,
+	# which REINDEX CONCURRENTLY does not support and says so.  All are
+	# expected; anything else, an aborted client or a failed assertion,
+	# still fails the test.
 	my $stderr_re = qr{
 		\A
 		(?:pgbench:\ setting\ random\ seed\ to\ \d+\n)?
 		(?:
 			WARNING:\ \ skipping\ reindex\ of\ invalid\ index\ "[^"]+"\n
+			|
+			WARNING:\ \ cannot\ reindex\ exclusion\ constraint\ index
+				\ "[^"]+"\ concurrently,\ skipping\n
 			(?:HINT:\ \ [^\n]*\n)?
 		)*
 		\z
