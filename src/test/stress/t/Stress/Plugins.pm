@@ -952,6 +952,10 @@ our %LOAD = (
 	# and the chance of that scales with how often an index is built.
 	history_insert => {
 		weight => 1,
+		# It writes deltas into pgbench_history without the account,
+		# teller and branch rows that would balance them, and the
+		# invariant sums all four.
+		conflicts => { check => ['balances'] },
 		script => q(
 			\set aid random(1, :naccounts)
 			\set delta random(-5000, 5000)
@@ -1001,6 +1005,9 @@ our %LOAD = (
 	# has no balance invariant to check.
 	hot_churn => {
 		weight => 1,
+		# Moves abalance without the matching teller, branch and history
+		# rows, so the four-way total no longer holds.
+		conflicts => { check => ['balances'] },
 		script => q(
 			\set aid random(1, :naccounts)
 			\set delta random(-5000, 5000)
@@ -2571,6 +2578,8 @@ our %CHECK = (
 	# than waited for: a unique build over duplicate values fails and
 	# leaves exactly one.
 	pgstat_rejects_invalid_index => {
+		# Makes its invalid index on pgb_bare, which that schema supplies.
+		requires => { schema => ['bare_table_event_trigger'] },
 		final => sub {
 			my ($node, $ctx) = @_;
 
@@ -2696,6 +2705,7 @@ our %CHECK = (
 	# is the only way to gate this: a server that accepts the table is
 	# the bug, and it does not announce itself.
 	repack_refuses_deferrable => {
+		requires => { schema => ['deferrable_pk'] },
 		final => sub {
 			my ($node, $ctx) = @_;
 			my ($rc, $out, $err) =
@@ -2711,6 +2721,7 @@ our %CHECK = (
 	# The key swaps permute the keys and put every one of them back, so
 	# once the load stops the set must be exactly what it started as.
 	deferred_keys_intact => {
+		requires => { schema => ['deferrable_pk'] },
 		final => sub {
 			my ($node, $ctx) = @_;
 			Test::More::is(
@@ -2820,7 +2831,12 @@ our %CHECK = (
 				# ends, so this drop can still lose a deadlock.  Losing
 				# one says nothing about whether the index is droppable,
 				# which is the whole question here.
-				my $ok = eval { _retry_on_deadlock($node, "DROP INDEX $idx"); 1 };
+				# IF EXISTS because dropping one of these can take
+				# another with it: a transient index built for a
+				# partitioned index goes away with its parent, and the
+				# list was taken before any of them were dropped.
+				my $ok =
+				  eval { _retry_on_deadlock($node, "DROP INDEX IF EXISTS $idx"); 1 };
 				Test::More::ok($ok, "invalid index $idx could be dropped")
 				  or Test::More::diag($@);
 			}

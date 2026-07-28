@@ -27,6 +27,13 @@ run_scenario(
 	'partitioned_pgbench',
 	{
 		schema => [ 'pgbench', 'partitioned', 'partitioned_2_levels' ],
+		# Scale 1 gives one branch row and ten teller rows, and every
+		# transaction updates both, so the clients serialise on them.
+		# Any DDL that briefly parks a lock request then has a queue
+		# behind it, and CI -- slower, and running other suites at the
+		# same time -- turns that into everyone waiting out the lock
+		# timeout together.  More rows, less of a queue.
+		pgbench_scale => 5,
 		load => [ 'tpcb_like', 'overflow_churn' ],
 		ddl => [
 			'repack_concurrently', 'reindex_table_concurrently',

@@ -1541,6 +1541,45 @@ a lead, not a result.
       error, so it is worth reporting either way.
 
 
+What a survey run found
+=======================
+
+Soak at stress_seconds=1 -- a combination costs what its cluster costs
+to build and nothing more -- over four slices of forty combinations,
+seed 4242, on 2026-07-28.  It is the run to do after adding plugins,
+and it earned that reputation: three combinations could not run at all,
+and none of the three would ever have appeared in the catalogue, which
+pins its own plugin lists.
+
+  Checks that name a table without declaring the schema that
+  creates it.  repack_refuses_deferrable and deferred_keys_intact use
+  pgb_defer, and pgstat_rejects_invalid_index uses pgb_bare; invented
+  combinations paired all three with schemas that have neither, and the
+  run died on "relation pgb_defer does not exist".  Every check written
+  before this session declared its schema; the ones added during it did
+  not.  Fixed by declaring it.
+
+  Loads that break an invariant they do not declare a conflict with.
+  balances sums accounts, tellers, branches and history and requires
+  all four to agree.  history_insert writes deltas into history with no
+  balancing rows, and hot_churn moves abalance alone; both are correct
+  in the scenarios that use them, because those scenarios do not run
+  balances -- and soak does not know that.  Fixed by declaring the
+  conflict.
+
+  A check that assumed dropping one index cannot remove another.
+  invalid_indexes_droppable lists the invalid indexes and then drops
+  them one at a time; a transient index belonging to a partitioned one
+  goes away with its parent, and the next drop failed with "index
+  ... does not exist".  Fixed with IF EXISTS.
+
+Two failures remain and are pacing rather than incompatibility: the
+subscription and standby environments cannot finish synchronising
+inside a one-second workload, so their final checks see a subscriber
+that is still behind ("14104 14104 1273" against "14104 14104 14104").
+Survey mode is the wrong tool for those two; they need a real duration.
+
+
 Where the suite falls short
 ===========================
 
