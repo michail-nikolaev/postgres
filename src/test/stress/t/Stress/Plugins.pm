@@ -1835,6 +1835,23 @@ our %DDL = (
 		},
 	},
 
+	# REINDEX of the partitioned index itself, as opposed to a leaf's.
+	# It rebuilds one child per partition, and each new child is
+	# unparented until the swap, so this is what drives the code that
+	# treats an unparented index as an additional arbiter.  The
+	# rotation's other reindex entries only ever name a leaf.
+	reindex_partitioned_index => {
+		requires => { schema => ['partitioned_side'] },
+		variants => sub {
+			return map {
+				{
+					table => 'pgb_part',
+					stmts => ["REINDEX INDEX CONCURRENTLY $_;"]
+				}
+			} (qw(pgb_part_pkey pgb_part_id_uniq));
+		},
+	},
+
 	# Detach and re-attach a hash partition.  Same command as the range
 	# case, different bound syntax, and a different substitute
 	# constraint to leave behind if the server gets it wrong.

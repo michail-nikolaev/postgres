@@ -1338,7 +1338,61 @@ a lead, not a result.
       on a freshly installed build.  CI runs this under ASAN, which is
       far slower, and that is the likeliest reason it shows there.
 
-  invalid arbiter index list, on a tree that has the fix for it
+  invalid arbiter index list -- diagnosed and fixed, 2026-07-28
+
+      Seen three times over months, never reproducible on demand, and
+      chased through several wrong theories before the answer came from
+      instrumenting rather than guessing.
+
+      What settled it was logging the arithmetic on every mapping rather
+      than only on failure.  Over one run of partitions the check runs
+      more than thirty thousand times, and the states it sees are:
+
+        nidx=2 root=2 matched=2 additional=0    30537
+        nidx=3 root=2 matched=2 additional=0      664
+        nidx=4 root=2 matched=2 additional=2      646
+        nidx=3 root=2 matched=2 additional=1      559
+
+      So the fallback for indexes being concurrently rebuilt is
+      exercised constantly and matched always equals the root's count.
+      The only way to a mismatch is matched=0, which means no index on
+      the partition has an arbiter among its ancestors -- and that is
+      what a partition looks like once it has been detached: it keeps
+      its indexes, and they keep enforcing their constraints, but
+      pg_inherits no longer ties them to the parent's.  Routing a tuple
+      to such a partition is legal, because DETACH ... CONCURRENTLY
+      waits for the transactions that can still see it.
+
+      In that state ExecInitPartitionInfo could not do anything sensible.
+      Its fallback matches unparented indexes against arbiters already
+      found *on the same partition*, and is guarded on there being some;
+      with none, it did not run at all, and the count check then failed.
+
+      The fix adds map_unparented_to_root_arbiters(), which matches the
+      partition's parentless indexes against the root's arbiters
+      directly, comparing definitions through an attribute map the way
+      ATTACH PARTITION does.  Two details cost a round trip each:
+      IsIndexCompatibleAsArbiter() cannot be used, because it asserts
+      both indexes belong to the same relation; and an index matched
+      this way must count towards the expected total rather than as an
+      "additional" arbiter, since it stands in for the root arbiter
+      rather than supplementing it.
+
+      Verified by fault injection -- forcing get_partition_ancestors()
+      to return NIL for one partition reproduces the error exactly:
+
+        ERROR:  invalid arbiter index list for partition "p1": the root
+        has 2 arbiter index(es), but 0 matched here (plus 2 being
+        concurrently rebuilt), out of 2 index(es) on the partition
+
+      With the fix and the same injection, the upsert takes its UPDATE
+      path on an existing key, inserts a new one, and a plain INSERT of
+      a duplicate still raises "duplicate key value violates unique
+      constraint" -- so the arbiter is doing its job rather than being
+      skipped.  regress, test_misc/010_index_concurrently_upsert,
+      injection_points/isolation and amcheck/002_cic all pass, as does
+      the stress suite, including partitions at stressval 4 and
+      partitioned_pgbench at stressval 8.
 
       Seen once, in the partitions scenario during a soak run:
 
