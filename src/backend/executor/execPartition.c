@@ -883,6 +883,24 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 				ancestors = get_partition_ancestors(indexoid);
 				INJECTION_POINT("exec-init-partition-after-get-partition-ancestors", NULL);
 
+#ifdef USE_INJECTION_POINTS
+
+				/*
+				 * A partition that has been detached keeps its indexes but
+				 * loses their parents, and a tuple can still be routed to it
+				 * by a transaction that was already able to see it.  That
+				 * window cannot be held open from a test -- DETACH ...
+				 * CONCURRENTLY waits for exactly those transactions before
+				 * it removes the links -- so offer the resulting state
+				 * directly.
+				 */
+				if (IS_INJECTION_POINT_ATTACHED("exec-init-partition-detached-leaf"))
+				{
+					list_free(ancestors);
+					ancestors = NIL;
+				}
+#endif
+
 				if (ancestors != NIL &&
 					!list_member_oid(ancestors_seen, linitial_oid(ancestors)))
 				{
