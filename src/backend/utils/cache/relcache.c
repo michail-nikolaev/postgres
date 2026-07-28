@@ -5849,14 +5849,15 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 	schemaid = RelationGetNamespace(relation);
 	puboids = list_concat_unique_oid(puboids, GetSchemaPublications(schemaid));
 
-	if (relation->rd_rel->relispartition)
+	/*
+	 * The ancestor list can be empty even though relispartition is true, if
+	 * the partition is being detached concurrently; treat the relation as a
+	 * regular table then.
+	 */
+	if (relation->rd_rel->relispartition &&
+		(ancestors = get_partition_ancestors(relid)) != NIL)
 	{
-		Oid			last_ancestor_relid;
-
 		/* Add publications that the ancestors are in too. */
-		ancestors = get_partition_ancestors(relid);
-		last_ancestor_relid = llast_oid(ancestors);
-
 		foreach(lc, ancestors)
 		{
 			Oid			ancestor = lfirst_oid(lc);
@@ -5873,7 +5874,7 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 		 * Therefore, for a partition, exclusion must be evaluated at the
 		 * top-most ancestor.
 		 */
-		exceptpuboids = GetRelationExcludedPublications(last_ancestor_relid);
+		exceptpuboids = GetRelationExcludedPublications(llast_oid(ancestors));
 	}
 	else
 	{
