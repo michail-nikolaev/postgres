@@ -49,6 +49,7 @@ tests += {
       't/037_except.pl',
       't/038_walsnd_shutdown_timeout.pl',
       't/039_pubdesc_detach_pending.pl',
+      't/040_apply_identity_index_swapped.pl',
       't/100_bugs.pl',
     ],
   },
