@@ -220,6 +220,9 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 		 * concurrency, because no schema changes could be happening on the
 		 * index while we hold lock on the parent rel, and no lock type used
 		 * for queries blocks any other kind of index operation.
+		 *
+		 * That holds only outside of recovery, though; see the comment on
+		 * try_index_open() below.
 		 */
 		lmode = root->simple_rte_array[varno]->rellockmode;
 
@@ -236,8 +239,23 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 
 			/*
 			 * Extract info from the relation descriptor for the index.
+			 *
+			 * The index may be gone by now.  What keeps that from happening
+			 * on a primary is index_drop(), which waits for every locker of
+			 * the table before it removes the catalog entry, so holding a
+			 * lock on the table is enough to keep its index list from being
+			 * pulled out from under us.  Recovery has no such interlock:
+			 * replaying a DROP INDEX CONCURRENTLY, or the drop of the old
+			 * index at the end of a REINDEX CONCURRENTLY, takes
+			 * AccessExclusiveLock on the index alone and releases it at the
+			 * replayed commit, and nothing makes replay wait for a backend
+			 * that holds only the table's lock and has already read the
+			 * index list.  Simply ignore an index that is no longer there:
+			 * it is one we must not plan with in any case.
 			 */
-			indexRelation = index_open(indexoid, lmode);
+			indexRelation = try_index_open(indexoid, lmode);
+			if (indexRelation == NULL)
+				continue;
 			index = indexRelation->rd_index;
 
 			/*
