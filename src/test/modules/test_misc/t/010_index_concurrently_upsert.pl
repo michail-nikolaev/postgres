@@ -42,8 +42,7 @@ CREATE TABLE test.tbl_partition PARTITION OF test.tblparted
     FOR VALUES FROM (0) TO (10000)
     WITH (parallel_workers = 0);
 
--- Two inferable arbiters, so the mapping onto a partition has more to
--- do than match a single index.
+-- Two inferable arbiters, and a partition that a later test detaches.
 CREATE TABLE test.tbldetached(i int NOT NULL, updated_at timestamp)
     PARTITION BY RANGE (i);
 CREATE TABLE test.tbldetached_part PARTITION OF test.tbldetached
@@ -843,50 +842,76 @@ clean_safe_quit_ok($s1, $s2, $s3);
 $node->safe_psql('postgres', 'TRUNCATE TABLE test.tblexpr');
 
 ############################################################################
-note('Test: UPSERT routed to a partition whose indexes have lost their parent');
+note('Test: UPSERT routed to a partition detached while it waited');
 
-# A detached partition keeps its indexes, and they keep enforcing their
-# constraints, but pg_inherits no longer ties them to the parent's.  A
-# tuple can still be routed there by a transaction that was already able
-# to see the partition, and the arbiter indexes then have to be matched
-# by definition rather than by ancestry.  That window cannot be held open
-# from a test, because DETACH ... CONCURRENTLY waits for precisely those
-# transactions before removing the links, so the injection point supplies
-# the state instead.
-$node->safe_psql('postgres',
-	q[SELECT injection_points_attach('exec-init-partition-detached-leaf', 'notice')]
-);
+# A detached partition keeps its indexes, but pg_inherits no longer ties
+# them to the parent's, so none of them can be matched to the root's
+# arbiters by ancestry.  A tuple still reaches it when the routing
+# transaction took its snapshot before the detach began: DETACH ...
+# CONCURRENTLY waits only for sessions holding a lock on the parent, and
+# this one holds none until it starts inserting.
+$s1 = $node->background_psql('postgres', on_error_stop => 0);
+$s2 = $node->background_psql('postgres', on_error_stop => 0);
 
-my ($rc, $out, $err) = $node->psql(
-	'postgres', q[
-	INSERT INTO test.tbldetached VALUES (5, now())
-		ON CONFLICT (i) DO UPDATE SET updated_at = now();
-], on_error_stop => 0);
-is($err, '', 'upsert onto an existing key in a parentless partition');
+# s1 takes its snapshot first, without touching the table.
+$s1->query_safe('BEGIN ISOLATION LEVEL REPEATABLE READ');
+$s1->query_safe('SELECT 1');
+
+$s2->query_safe(
+	q[
+SELECT injection_points_set_local();
+SELECT injection_points_attach('detach-partition-before-finalize', 'wait');
+]);
+
+$s2->query_until(
+	qr/starting_detach/, q[
+\echo starting_detach
+ALTER TABLE test.tbldetached DETACH PARTITION test.tbldetached_part CONCURRENTLY;
+]);
+
+# The detach has marked the partition and finished waiting for lockers.
+ok_injection_point($node, 'detach-partition-before-finalize');
+
+$s1->query_safe(
+	q[
+SELECT injection_points_set_local();
+SELECT injection_points_attach('exec-init-partition-before-open', 'wait');
+]);
+
+# s1 still sees the partition, so the tuple routes to it; it stops after
+# choosing the partition and before locking it.
+$s1->query_until(
+	qr/starting_upsert_s1/, q[
+\echo starting_upsert_s1
+INSERT INTO test.tbldetached VALUES (5, now())
+	ON CONFLICT (i) DO UPDATE SET updated_at = now();
+]);
+
+ok_injection_point($node, 'exec-init-partition-before-open');
+
+# Nothing holds the partition now, so the detach can finish removing the
+# links between its indexes and the parent's.
+wakeup_injection_point($node, 'detach-partition-before-finalize');
+
+# s1 now maps the root's arbiters onto a partition whose indexes have no
+# parents at all.
+wakeup_injection_point($node, 'exec-init-partition-before-open');
+
+clean_safe_quit_ok($s1, $s2);
 
 is( $node->safe_psql(
-		'postgres', 'SELECT count(*) FROM test.tbldetached WHERE i = 5'),
+		'postgres', 'SELECT count(*) FROM test.tbldetached_part WHERE i = 5'),
 	'1',
-	'the upsert updated rather than inserted');
+	'the upsert updated the existing row rather than duplicating it');
 
-($rc, $out, $err) = $node->psql(
-	'postgres', q[
-	INSERT INTO test.tbldetached VALUES (900, now())
-		ON CONFLICT (i) DO UPDATE SET updated_at = now();
-], on_error_stop => 0);
-is($err, '', 'upsert onto a new key in a parentless partition');
-
-# The arbiter must still be doing its job, not merely being skipped.
-($rc, $out, $err) = $node->psql('postgres',
-	'INSERT INTO test.tbldetached VALUES (5, now());',
+# The arbiter must have been used, not skipped.
+my (undef, undef, $dup_err) = $node->psql('postgres',
+	'INSERT INTO test.tbldetached_part VALUES (5, now());',
 	on_error_stop => 0);
 like(
-	$err,
+	$dup_err,
 	qr/duplicate key value violates unique constraint/,
-	'the partition still enforces uniqueness');
-
-$node->safe_psql('postgres',
-	q[SELECT injection_points_detach('exec-init-partition-detached-leaf')]);
+	'the detached partition still enforces uniqueness');
 
 done_testing();
 
