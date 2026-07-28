@@ -3210,20 +3210,74 @@ FindReplTupleInLocalRel(ApplyExecutionData *edata, Relation localrel,
 
 	*localslot = table_slot_create(localrel, &estate->es_tupleTable);
 
+	/*
+	 * REINDEX CONCURRENTLY can replace the index behind a replica identity or
+	 * primary key while we hold the relation open.  It needs only
+	 * ShareUpdateExclusiveLock on the table, which does not conflict with the
+	 * RowExclusiveLock apply holds, so the swap can commit between the point
+	 * the relation map entry was built and now; opening the relation's
+	 * indexes just above is one of the places the resulting invalidation gets
+	 * processed.  The OID we were handed is then the index the swap replaced,
+	 * which is dropped once the swap's transaction is no longer visible to
+	 * anyone, so using it would eventually fail to open a relation that is no
+	 * longer there.
+	 *
+	 * Take the identity as the relation cache has it now.  Nothing that could
+	 * change the tuple descriptor can commit underneath us -- that needs a
+	 * lock which does conflict with ours -- so the index is the only thing
+	 * here that can have moved.
+	 */
+	if (OidIsValid(localidxoid) &&
+		remoterel->replident != REPLICA_IDENTITY_FULL)
+	{
+		for (;;)
+		{
+			Oid			current_idxoid = GetRelationIdentityOrPK(localrel);
+
+			if (!OidIsValid(current_idxoid))
+				break;
+
+			/*
+			 * Taking the lock is itself where pending invalidations get
+			 * processed, so the identity can move while we are acquiring it.
+			 * Recheck once we hold the lock, and only trust the answer when
+			 * it has stopped moving: from that point the lock conflicts with
+			 * the one index_concurrently_swap() needs, so it cannot move
+			 * again while we use it.
+			 */
+			LockRelationOid(current_idxoid, RowExclusiveLock);
+			if (current_idxoid == GetRelationIdentityOrPK(localrel))
+			{
+				localidxoid = current_idxoid;
+				break;
+			}
+			UnlockRelationOid(current_idxoid, RowExclusiveLock);
+		}
+	}
+
 	Assert(OidIsValid(localidxoid) ||
 		   (remoterel->replident == REPLICA_IDENTITY_FULL));
 
 	if (OidIsValid(localidxoid))
 	{
 #ifdef USE_ASSERT_CHECKING
-		Relation	idxrel = index_open(localidxoid, AccessShareLock);
 
-		/* Index must be PK, RI, or usable for REPLICA IDENTITY FULL tables */
-		Assert(GetRelationIdentityOrPK(localrel) == localidxoid ||
-			   (remoterel->replident == REPLICA_IDENTITY_FULL &&
-				IsIndexUsableForReplicaIdentityFull(idxrel,
-													edata->targetRel->attrmap)));
-		index_close(idxrel, AccessShareLock);
+		/*
+		 * For anything but REPLICA IDENTITY FULL the index was taken from the
+		 * relation cache just above, so there is nothing left to check here:
+		 * re-deriving the identity would only re-read it after index_open()
+		 * has accepted another round of invalidation messages, and a
+		 * concurrent REINDEX that commits in that window would make this fail
+		 * over an index that is still perfectly able to find the tuple.
+		 */
+		if (remoterel->replident == REPLICA_IDENTITY_FULL)
+		{
+			Relation	idxrel = index_open(localidxoid, AccessShareLock);
+
+			Assert(IsIndexUsableForReplicaIdentityFull(idxrel,
+													   edata->targetRel->attrmap));
+			index_close(idxrel, AccessShareLock);
+		}
 #endif
 
 		found = RelationFindReplTupleByIndex(localrel, localidxoid,
