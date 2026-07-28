@@ -771,7 +771,30 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY
       expect: plancache_and_matview, if the rotation drops the matview's
               own unique index -- it currently rotates over the base
               tables' indexes.
-      status: MISSED by construction, and not revert-tested -- this one
+      expect: hash_and_constraints, through
+              refresh_survives_dropped_index.
+      revert: git revert conflicts; by hand it is one statement --
+              replace the ereport() at the end of
+              refresh_by_match_merge() with the Assert() it replaced.
+      status: CATCHES, 3 failures in 3 runs at the default duration, and
+              0 in 4 with the fix restored.
+
+              It was MISSED by construction and the construction was
+              right as far as it went: no outside session can drop the
+              index mid-refresh, because REFRESH ... CONCURRENTLY holds
+              ExclusiveLock on the matview and a concurrent drop wants
+              ShareUpdateExclusiveLock.  The way in is the one the
+              commit names -- the view's own definition calling a
+              function that drops the index -- so the check builds
+              exactly that and requires the refresh to report it rather
+              than assert.
+
+              One wrinkle worth recording: the drop inside that function
+              must name the index schema-qualified.  A refresh runs the
+              view's query with a secure search_path, so a bare name
+              resolves to nothing, the drop quietly does nothing, and
+              the refresh succeeds -- which looks like the fix working
+              and is really the test not testing anything.
               is settled by the lock levels rather than by a run.
               REFRESH MATERIALIZED VIEW CONCURRENTLY holds ExclusiveLock
               on the matview, and DROP INDEX CONCURRENTLY needs

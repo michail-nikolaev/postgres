@@ -2589,6 +2589,49 @@ our %CHECK = (
 		},
 	},
 
+	# REFRESH MATERIALIZED VIEW CONCURRENTLY needs a unique index on the
+	# view, and it looks that index up while refreshing.  No other
+	# session can take it away in that window -- the refresh holds
+	# ExclusiveLock and a concurrent drop would need
+	# ShareUpdateExclusiveLock -- so the only way in is the view\'s own
+	# definition calling a function that drops it, which is what this
+	# does.  Silly, and the commit says so, but it is the difference
+	# between a clean error and an assertion failure.
+	refresh_survives_dropped_index => {
+		final => sub {
+			my ($node, $ctx) = @_;
+
+			$node->safe_psql(
+				'postgres', q(
+				DROP MATERIALIZED VIEW IF EXISTS pgb_mv_drop;
+				CREATE OR REPLACE FUNCTION pgb_drop_mv_idx() RETURNS bool
+				LANGUAGE plpgsql AS $$
+				BEGIN
+					-- Qualified: a refresh runs the view's query with a
+					-- secure search_path, so a bare name resolves to
+					-- nothing and the drop quietly does nothing.
+					EXECUTE 'DROP INDEX IF EXISTS public.pgb_mv_drop_idx';
+					RETURN true;
+				END $$;
+				CREATE MATERIALIZED VIEW pgb_mv_drop AS
+					SELECT 1 AS i WHERE pgb_drop_mv_idx();
+				CREATE UNIQUE INDEX pgb_mv_drop_idx ON pgb_mv_drop(i)));
+
+			my (undef, undef, $err) = $node->psql('postgres',
+				'REFRESH MATERIALIZED VIEW CONCURRENTLY pgb_mv_drop;',
+				on_error_stop => 0);
+			$err =~ s/\s+/ /g;
+			Test::More::like(
+				$err,
+				qr/could not find suitable unique index/,
+				'a refresh whose index vanished reports it');
+			Test::More::note("refresh said: $err");
+
+			$node->safe_psql('postgres',
+				'DROP MATERIALIZED VIEW IF EXISTS pgb_mv_drop');
+		},
+	},
+
 	# REPACK cannot locate tuples by a deferrable key, so it has to
 	# refuse a table whose only identity is one.  Asserting the refusal
 	# is the only way to gate this: a server that accepts the table is
