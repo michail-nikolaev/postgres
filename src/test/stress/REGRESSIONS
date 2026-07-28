@@ -1523,41 +1523,33 @@ follows is what is left.
     partitioning plus logical replication, are real shapes that are not
     covered.
 
- 6. A CONCURRENTLY command that waits for other transactions can be
-    starved by a workload that never stops producing them, and then dies
-    on the lock timeout three minutes later having tested nothing.  Seen
-    twice, in different shapes:
+ 6. Two things make a partitioned scenario die on a lock timeout three
+    minutes in, having tested nothing, and both are now fixed rather
+    than tolerated.
 
-      DETACH ... CONCURRENTLY waits for every transaction holding the
-      parent, and generic plans lock every partition, so nothing is ever
-      free of lockers.  Prepared transactions, held cursors and row
-      locks do the same.
+    The first is an unbounded ATTACH PARTITION.  It needs
+    AccessExclusiveLock on the partition, the load writes to that
+    partition continuously, and so the request parks at the head of the
+    lock queue while every writer stacks up behind it -- until the lock
+    timeout fires for all of them at once.  Every ATTACH in the suite
+    now goes through pgb_attach_bounded(), which retries the command in
+    500ms slices: a failed attempt releases the queue and lets it drain,
+    so the worst case is half a second of stall instead of the whole
+    timeout.  The detaches that pair with those attaches are guarded by
+    a check that the partition is still attached, so a turn that could
+    not get it back on heals on the next one rather than failing on "is
+    not a partition".  Measured on partitioned_pgbench: 1 failure in 6
+    before, 0 in 12 after, at the same twenty clients, with the slowest
+    passing run going from 197s to 11s.
 
-      CREATE INDEX CONCURRENTLY at ddl_concurrency=4 waits for the
-      REPACK transactions the other DDL clients are running.  Reproduce
-      the combination with stress_seed=555 stress_soak_skip=21
-      stress_soak_count=1 -- the combination comes back exactly, the
-      failure only sometimes, which is what a race looks like.
-
-      row_lock against the lock_exhaustion environment.  It holds row
-      locks across a pause, a rebuild queues for its exclusive lock
-      behind them, and every later statement queues behind the rebuild:
-      fair queuing working exactly as designed, and two soak runs that
-      spent three minutes each proving nothing.  Now a declared
-      conflict.
-
-    All of them are the commands behaving as documented rather than
-    anything to report, so the answer has been to give them room rather
-    than to tolerate the error -- tolerating it would mean a genuine
-    hang that surfaced as a lock timeout went unnoticed, which is too
-    much to give up for a quieter log.  So
-    partitioned_pgbench runs the prepared protocol without
-    force_generic_plan, a weaker version of the cached-plan coverage 106
-    gets, and the two detach variants are marked catalogue_only: soak
-    invents load mixes around them that leave no gap at all, and a run
-    that dies on a lock timeout after three minutes says nothing about
-    the server.  Whether that wait is a fact of the feature or something
-    worth reporting has not been looked into.
+    The second is row-lock contention, and it only shows up when the
+    whole suite runs at once.  At scale 1 there is a single
+    pgbench_branches row and every transaction updates it, so the
+    clients queue on that row; the longer the queue, the more certain it
+    is that a DDL command parking a lock request turns into a
+    three-minute cascade.  partitioned_pgbench runs ten clients rather
+    than twenty for that reason.  Three consecutive full-suite runs are
+    clean with both changes.
 
  7. Several entries above are only observable under assertions.  The
     suite should be run against an assertion build as a matter of

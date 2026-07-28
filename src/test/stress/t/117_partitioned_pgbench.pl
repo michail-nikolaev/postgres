@@ -37,6 +37,14 @@ run_scenario(
 		checks => [ 'balances', 'amcheck' ],
 		env => 'standalone',
 		pgbench_args => '--protocol=prepared',
-		clients => 20,
+		# Ten, not twenty.  At this scale there is one pgbench_branches
+		# row and every transaction updates it, so the clients queue on
+		# that row; when a DDL command parks an AccessExclusiveLock
+		# request the queue behind it grows until everyone hits the lock
+		# timeout together and the run dies three minutes later having
+		# tested nothing.  Halving the queue is what keeps that cascade
+		# from forming -- see also the bounded ATTACH in
+		# pgb_attach_bounded(), which fixes the other half.
+		clients => 10,
 		tags => ['ci'],
 	});

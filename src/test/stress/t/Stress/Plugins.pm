@@ -160,6 +160,30 @@ our %SCHEMA = (
 				RETURN false;
 			END;
 			$$;
+
+
+			-- Attaching a partition needs AccessExclusiveLock on it, and
+			-- the load writes to this one continuously.  A single
+			-- unbounded ATTACH parks that request at the head of the
+			-- lock queue and every writer stacks up behind it until the
+			-- lock timeout fires -- three minutes of nothing, then a
+			-- failed run.  Retrying in short slices lets the queue drain
+			-- between attempts, so the worst stall is half a second.
+			CREATE FUNCTION pgb_attach_bounded(cmd text) RETURNS boolean
+			LANGUAGE plpgsql AS $fn$
+			DECLARE i int;
+			BEGIN
+				FOR i IN 1..60 LOOP
+					BEGIN
+						SET LOCAL lock_timeout = '500ms';
+						EXECUTE cmd;
+						RETURN true;
+					EXCEPTION WHEN lock_not_available THEN
+						PERFORM pg_sleep(0.01);
+					END;
+				END LOOP;
+				RETURN false;
+			END $fn$;
 		),
 		tables => [
 			qw(pgbench_accounts pgbench_tellers pgbench_branches pgbench_history)
@@ -1825,8 +1849,9 @@ our %DDL = (
 					table => 'pgb_hash',
 					stmts => [
 						"ALTER TABLE pgb_hash DETACH PARTITION pgb_hash_$_ CONCURRENTLY;",
-						"ALTER TABLE pgb_hash ATTACH PARTITION pgb_hash_$_ "
-						  . "FOR VALUES WITH (MODULUS 4, REMAINDER $_);"
+						"SELECT pgb_attach_bounded('ALTER TABLE pgb_hash "
+						  . "ATTACH PARTITION pgb_hash_$_ FOR VALUES WITH "
+						  . "(MODULUS 4, REMAINDER $_)');"
 					]
 				}
 			} (0 .. 3);
@@ -1950,8 +1975,9 @@ our %DDL = (
 					stmts => [
 						"ALTER TABLE pgb_part DETACH PARTITION $p CONCURRENTLY;",
 						'\sleep 10 ms',
-						"ALTER TABLE pgb_part ATTACH PARTITION $p "
-						  . "FOR VALUES FROM ($bounds[$i][0]) TO ($bounds[$i][1]);"
+						"SELECT pgb_attach_bounded('ALTER TABLE pgb_part "
+						  . "ATTACH PARTITION $p FOR VALUES FROM "
+						  . "($bounds[$i][0]) TO ($bounds[$i][1])');"
 					]
 				  };
 			}
@@ -1996,8 +2022,9 @@ our %DDL = (
 						"INSERT INTO ${p}_next SELECT * FROM $p;",
 						"DROP TABLE $p;",
 						"ALTER TABLE ${p}_next RENAME TO $p;",
-						"ALTER TABLE pgb_part ATTACH PARTITION $p "
-						  . "FOR VALUES FROM ($bounds[$i][0]) TO ($bounds[$i][1]);"
+						"SELECT pgb_attach_bounded('ALTER TABLE pgb_part "
+						  . "ATTACH PARTITION $p FOR VALUES FROM "
+						  . "($bounds[$i][0]) TO ($bounds[$i][1])');"
 					]
 				  };
 			}
@@ -2023,11 +2050,20 @@ our %DDL = (
 			return ({
 				table => 'pgbench_accounts_over',
 				stmts => [
+					# Skipped when a previous turn could not get the
+					# partition back on, so the cycle heals itself
+					# instead of failing on "is not a partition".
+					"SELECT COUNT(*) > 0 AS attached FROM pg_inherits "
+					  . "WHERE inhrelid = 'pgbench_accounts_over'::regclass "
+					  . '\\gset',
+					'\if :attached',
 					'ALTER TABLE pgbench_accounts DETACH PARTITION '
 					  . 'pgbench_accounts_over CONCURRENTLY;',
+					'\endif',
 					'\sleep 10 ms',
-					'ALTER TABLE pgbench_accounts ATTACH PARTITION '
-					  . "pgbench_accounts_over FOR VALUES FROM ($from) TO (MAXVALUE);"
+					"SELECT pgb_attach_bounded('ALTER TABLE pgbench_accounts "
+					  . 'ATTACH PARTITION pgbench_accounts_over '
+					  . "FOR VALUES FROM ($from) TO (MAXVALUE)');"
 				]
 			});
 		},
@@ -2047,12 +2083,18 @@ our %DDL = (
 				  {
 					table => "pgbench_accounts_over_$i",
 					stmts => [
+						"SELECT COUNT(*) > 0 AS attached FROM pg_inherits "
+						  . "WHERE inhrelid = "
+						  . "'pgbench_accounts_over_$i'::regclass \\gset",
+						'\if :attached',
 						'ALTER TABLE pgbench_accounts_over DETACH PARTITION '
 						  . "pgbench_accounts_over_$i CONCURRENTLY;",
+						'\endif',
 						'\sleep 10 ms',
-						'ALTER TABLE pgbench_accounts_over ATTACH PARTITION '
+						"SELECT pgb_attach_bounded('ALTER TABLE "
+						  . 'pgbench_accounts_over ATTACH PARTITION '
 						  . "pgbench_accounts_over_$i "
-						  . "FOR VALUES WITH (MODULUS 2, REMAINDER $i);"
+						  . "FOR VALUES WITH (MODULUS 2, REMAINDER $i)');"
 					]
 				  };
 			}
