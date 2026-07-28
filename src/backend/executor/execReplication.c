@@ -31,6 +31,7 @@
 #include "replication/logicalrelation.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -187,8 +188,6 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 	ScanKeyData skey[INDEX_MAX_KEYS];
 	int			skey_attoff;
 	IndexScanDesc scan;
-	SnapshotData snap;
-	TransactionId xwait;
 	Relation	idxrel;
 	bool		found;
 	TypeCacheEntry **eq = NULL;
@@ -199,23 +198,38 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 
 	isIdxSafeToSkipDuplicates = (GetRelationIdentityOrPK(rel) == idxoid);
 
-	InitDirtySnapshot(snap);
-
 	/* Build scan key. */
 	skey_attoff = build_replindex_scan_key(skey, rel, idxrel, searchslot);
 
-	/* Start an index scan. */
+	/* Start an index scan.  The snapshot is set below, on each attempt. */
 	scan = index_beginscan(rel, idxrel,
-						   &snap, NULL, skey_attoff, 0, SO_NONE);
+						   SnapshotAny, NULL, skey_attoff, 0, SO_NONE);
 
 retry:
 	found = false;
+
+	/*
+	 * Use an up-to-date MVCC snapshot rather than a dirty one: a dirty scan
+	 * can miss the tuple altogether if it is updated concurrently and the new
+	 * version lands in an already-visited part of the scan.  A concurrent
+	 * updater of a tuple we do find is handled by table_tuple_lock below,
+	 * which waits for that transaction and then retries the whole scan under
+	 * a fresh snapshot.
+	 */
+	PushActiveSnapshot(GetLatestSnapshot());
+	scan->xs_snapshot = GetActiveSnapshot();
 
 	index_rescan(scan, skey, skey_attoff, NULL, 0);
 
 	/* Try to find the tuple */
 	while (index_getnext_slot(scan, ForwardScanDirection, outslot))
 	{
+		/*
+		 * The scan has moved past this entry.  Anything placed lower in
+		 * the heap from here on is behind it.
+		 */
+		INJECTION_POINT("repl-tuple-scan-in-progress", NULL);
+
 		/*
 		 * Avoid expensive equality check if the index is primary key or
 		 * replica identity index.
@@ -231,20 +245,7 @@ retry:
 
 		ExecMaterializeSlot(outslot);
 
-		xwait = TransactionIdIsValid(snap.xmin) ?
-			snap.xmin : snap.xmax;
-
-		/*
-		 * If the tuple is locked, wait for locking transaction to finish and
-		 * retry.
-		 */
-		if (TransactionIdIsValid(xwait))
-		{
-			XactLockTableWait(xwait, NULL, NULL, XLTW_None);
-			goto retry;
-		}
-
-		/* Found our tuple and it's not locked */
+		/* Found our tuple */
 		found = true;
 		break;
 	}
@@ -255,8 +256,6 @@ retry:
 		TM_FailureData tmfd;
 		TM_Result	res;
 
-		PushActiveSnapshot(GetLatestSnapshot());
-
 		res = table_tuple_lock(rel, &(outslot->tts_tid), GetActiveSnapshot(),
 							   outslot,
 							   GetCurrentCommandId(false),
@@ -265,13 +264,15 @@ retry:
 							   0 /* don't follow updates */ ,
 							   &tmfd);
 
-		PopActiveSnapshot();
-
 		if (should_refetch_tuple(res, &tmfd))
+		{
+			PopActiveSnapshot();
 			goto retry;
+		}
 	}
 
 	index_endscan(scan);
+	PopActiveSnapshot();
 
 	/* Don't release lock until commit. */
 	index_close(idxrel, NoLock);
@@ -372,9 +373,7 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 {
 	TupleTableSlot *scanslot;
 	TableScanDesc scan;
-	SnapshotData snap;
 	TypeCacheEntry **eq;
-	TransactionId xwait;
 	bool		found;
 	TupleDesc	desc PG_USED_FOR_ASSERTS_ONLY = RelationGetDescr(rel);
 
@@ -382,14 +381,17 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 
 	eq = palloc0_array(TypeCacheEntry *, outslot->tts_tupleDescriptor->natts);
 
-	/* Start a heap scan. */
-	InitDirtySnapshot(snap);
-	scan = table_beginscan(rel, &snap, 0, NULL,
+	/* Start a heap scan.  The snapshot is set below, on each attempt. */
+	scan = table_beginscan(rel, SnapshotAny, 0, NULL,
 						   SO_NONE);
 	scanslot = table_slot_create(rel, NULL);
 
 retry:
 	found = false;
+
+	/* See RelationFindReplTupleByIndex for the choice of snapshot. */
+	PushActiveSnapshot(GetLatestSnapshot());
+	scan->rs_snapshot = GetActiveSnapshot();
 
 	table_rescan(scan, NULL);
 
@@ -402,20 +404,7 @@ retry:
 		found = true;
 		ExecCopySlot(outslot, scanslot);
 
-		xwait = TransactionIdIsValid(snap.xmin) ?
-			snap.xmin : snap.xmax;
-
-		/*
-		 * If the tuple is locked, wait for locking transaction to finish and
-		 * retry.
-		 */
-		if (TransactionIdIsValid(xwait))
-		{
-			XactLockTableWait(xwait, NULL, NULL, XLTW_None);
-			goto retry;
-		}
-
-		/* Found our tuple and it's not locked */
+		/* Found our tuple */
 		break;
 	}
 
@@ -425,8 +414,6 @@ retry:
 		TM_FailureData tmfd;
 		TM_Result	res;
 
-		PushActiveSnapshot(GetLatestSnapshot());
-
 		res = table_tuple_lock(rel, &(outslot->tts_tid), GetActiveSnapshot(),
 							   outslot,
 							   GetCurrentCommandId(false),
@@ -435,13 +422,15 @@ retry:
 							   0 /* don't follow updates */ ,
 							   &tmfd);
 
-		PopActiveSnapshot();
-
 		if (should_refetch_tuple(res, &tmfd))
+		{
+			PopActiveSnapshot();
 			goto retry;
+		}
 	}
 
 	table_endscan(scan);
+	PopActiveSnapshot();
 	ExecDropSingleTupleTableSlot(scanslot);
 
 	return found;
