@@ -101,6 +101,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -21816,6 +21817,14 @@ ATExecDetachPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		 */
 		SET_LOCKTAG_RELATION(tag, MyDatabaseId, parentrelid);
 		WaitForLockersMultiple(list_make1(&tag), AccessExclusiveLock, false);
+
+		/*
+		 * The wait above is over, but the partition's catalog entries -- its
+		 * inheritance link, and those of its indexes -- are still in place.
+		 * A transaction whose snapshot predates the first phase can still
+		 * route a tuple here.
+		 */
+		INJECTION_POINT("detach-partition-before-finalize", NULL);
 
 		/*
 		 * Now acquire locks in both relations again.  Note they may have been

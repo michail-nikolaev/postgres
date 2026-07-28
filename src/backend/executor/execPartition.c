@@ -13,6 +13,8 @@
  */
 #include "postgres.h"
 
+#include "access/attmap.h"
+#include "access/genam.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/tupconvert.h"
@@ -553,6 +555,91 @@ IsIndexCompatibleAsArbiter(Relation arbiterIndexRelation,
 }
 
 /*
+ * map_unparented_to_root_arbiters
+ *		Match a partition's parentless indexes against the root's arbiters.
+ *
+ * Used when no index on the partition has an arbiter among its ancestors,
+ * which is what a partition that has been detached looks like: the indexes
+ * are still there and still enforce their constraints, but pg_inherits no
+ * longer ties them to the parent's.  The root's arbiter indexes are opened
+ * here to compare definitions, which is more work than the sibling
+ * comparison below, but this path only runs for a partition that has lost
+ * its parent links.
+ *
+ * Returns the list of matching index OIDs on the partition, and adds their
+ * number to *additional_arbiters, since they are matched by definition
+ * rather than by ancestry.
+ */
+static List *
+map_unparented_to_root_arbiters(ResultRelInfo *leaf_part_rri,
+								ResultRelInfo *rootResultRelInfo,
+								List *unparented_idxs)
+{
+	List	   *matched = NIL;
+	Relation	partrel = leaf_part_rri->ri_RelationDesc;
+	Relation	rootrel = rootResultRelInfo->ri_RelationDesc;
+	AttrMap    *attmap;
+
+	/*
+	 * The partition's columns need not line up with the root's, so compare
+	 * the definitions the way ATTACH PARTITION does, through an attribute
+	 * map.  IsIndexCompatibleAsArbiter() cannot be used here: it compares
+	 * two indexes of the same relation and asserts as much.
+	 */
+	attmap = build_attrmap_by_name(RelationGetDescr(partrel),
+								   RelationGetDescr(rootrel),
+								   false);
+
+	foreach_oid(root_arbiter, rootResultRelInfo->ri_onConflictArbiterIndexes)
+	{
+		Relation	root_rel;
+		IndexInfo  *root_ii;
+
+		root_rel = index_open(root_arbiter, AccessShareLock);
+		root_ii = BuildIndexInfo(root_rel);
+
+		foreach_int(unparented_i, unparented_idxs)
+		{
+			Relation	cand_rel;
+			IndexInfo  *cand_ii;
+
+			cand_rel = leaf_part_rri->ri_IndexRelationDescs[unparented_i];
+			cand_ii = leaf_part_rri->ri_IndexRelationInfo[unparented_i];
+
+			if (!cand_ii->ii_ReadyForInserts)
+				continue;
+			if (list_member_oid(matched, cand_rel->rd_index->indexrelid))
+				continue;
+
+			if (CompareIndexInfo(cand_ii, root_ii,
+								 cand_rel->rd_indcollation,
+								 root_rel->rd_indcollation,
+								 cand_rel->rd_opfamily,
+								 root_rel->rd_opfamily,
+								 attmap))
+			{
+				/*
+				 * This one stands in for the root arbiter itself, so it
+				 * counts towards the expected total rather than as an
+				 * extra: it was matched by definition instead of by
+				 * ancestry, which is the only difference.
+				 */
+				matched = lappend_oid(matched,
+									  cand_rel->rd_index->indexrelid);
+				break;
+			}
+		}
+
+		index_close(root_rel, AccessShareLock);
+	}
+
+	free_attrmap(attmap);
+
+	return matched;
+}
+
+
+/*
  * ExecInitPartitionInfo
  *		Lock the partition and initialize ResultRelInfo.  Also setup other
  *		information for the partition and store it in the next empty slot in
@@ -578,6 +665,13 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 	bool		found_whole_row;
 
 	oldcxt = MemoryContextSwitchTo(proute->memcxt);
+
+	/*
+	 * The partition has been chosen but not yet locked.  Concurrent DDL
+	 * that needs to lock it can still get in here, which is what makes
+	 * this a useful place to pause a test.
+	 */
+	INJECTION_POINT("exec-init-partition-before-open", NULL);
 
 	partrel = table_open(partOid, RowExclusiveLock);
 
@@ -796,6 +890,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 				ancestors = get_partition_ancestors(indexoid);
 				INJECTION_POINT("exec-init-partition-after-get-partition-ancestors", NULL);
 
+
 				if (ancestors != NIL &&
 					!list_member_oid(ancestors_seen, linitial_oid(ancestors)))
 				{
@@ -826,7 +921,22 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 			 * same set as arbiters during REINDEX CONCURRENTLY, to avoid
 			 * spurious "duplicate key" errors.
 			 */
-			if (unparented_idxs && arbiterIndexes)
+			/*
+			 * A partition that is being detached, or has been, keeps its
+			 * indexes but loses their parents, so none of them matches an
+			 * ancestor and arbiterIndexes comes back empty.  Routing a
+			 * tuple to such a partition is legal -- DETACH ... CONCURRENTLY
+			 * waits for the transactions that can still see it -- so the
+			 * matching below has to work from the root's own arbiters in
+			 * that case, rather than from a sibling on this partition that
+			 * does not exist.
+			 */
+			if (unparented_idxs && !arbiterIndexes)
+				arbiterIndexes =
+					map_unparented_to_root_arbiters(leaf_part_rri,
+													rootResultRelInfo,
+													unparented_idxs);
+			else if (unparented_idxs && arbiterIndexes)
 			{
 				foreach_int(unparented_i, unparented_idxs)
 				{
@@ -880,7 +990,15 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 		 */
 		if (list_length(rootResultRelInfo->ri_onConflictArbiterIndexes) !=
 			list_length(arbiterIndexes) - additional_arbiters)
-			elog(ERROR, "invalid arbiter index list");
+			elog(ERROR, "invalid arbiter index list for partition \"%s\": "
+				 "the root has %d arbiter index(es), but %d matched here "
+				 "(plus %d being concurrently rebuilt), out of %d index(es) "
+				 "on the partition",
+				 RelationGetRelationName(partrel),
+				 list_length(rootResultRelInfo->ri_onConflictArbiterIndexes),
+				 list_length(arbiterIndexes) - additional_arbiters,
+				 additional_arbiters,
+				 leaf_part_rri->ri_NumIndices);
 		leaf_part_rri->ri_onConflictArbiterIndexes = arbiterIndexes;
 
 		/*
