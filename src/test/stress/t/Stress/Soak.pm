@@ -38,6 +38,12 @@ and takes these further settings:
   stress_soak_count=M     stop after M combinations
   stress_seconds=N        run each workload for N seconds, whatever the
                           scenario asks for
+  stress_chaos=X          how often a combination gets chaos: always,
+                          off, or a probability.  Default is 0.4 for
+                          invented combinations and none for catalogue
+                          ones; naming it at all extends chaos to the
+                          catalogue scenarios that do not choose their
+                          own.
 
 The last one turns a soak into a survey.  At stress_seconds=1 a
 combination costs what its cluster costs to build and nothing more, so
@@ -169,10 +175,24 @@ sub _pick_some
 # failure needs it.
 sub _invent_chaos
 {
+	my $extra = $ENV{PG_TEST_EXTRA} // '';
+	my $wanted = 0.4;
 	my %points;
 	my $profile = {};
 
-	return 'off' if rand() < 0.6;
+	# stress_chaos=always|off|<probability> overrides how often a
+	# combination gets any.  A soak aimed at what chaos can reach wants
+	# 'always'; the default leaves most combinations without it so that a
+	# failure under chaos can be told from one that does not need it.
+	if ($extra =~ /\bstress_chaos=(always|off|[0-9.]+)\b/)
+	{
+		$wanted =
+			$1 eq 'always' ? 1.0
+		  : $1 eq 'off' ? 0.0
+		  : $1;
+	}
+
+	return 'off' if rand() >= $wanted;
 
 	foreach my $point (_pick_some(1, 3, sort keys %CHAOS_POINTS))
 	{
@@ -454,6 +474,16 @@ sub soak_run
 		{
 			$name = $names[$index];
 			$spec = $catalogue{$name};
+
+			# A catalogue scenario runs as written, except that a soak
+			# asked for chaos gives one to those that do not choose for
+			# themselves.  The ones that do -- a scenario whose whole
+			# point is a particular window -- keep theirs.
+			if (!defined $spec->{chaos}
+				&& ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_chaos=/)
+			{
+				$spec = { %$spec, chaos => _invent_chaos() };
+			}
 		}
 		else
 		{
