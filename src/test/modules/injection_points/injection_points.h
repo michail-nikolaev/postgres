@@ -30,4 +30,27 @@ typedef struct InjectionPointCondition
 	int			pid;
 } InjectionPointCondition;
 
+/*
+ * Private data of the "jitter" callback, which sleeps for a random time with
+ * a given probability.  Unlike the other callbacks this one is meant to be
+ * left attached while an ordinary workload runs: it widens the window a race
+ * needs without changing what the server decides, so a test that fails with
+ * it attached fails for a reason that exists without it.
+ */
+typedef struct InjectionPointJitter
+{
+	/* Must come first, so that injection_point_allowed() can be reused */
+	InjectionPointCondition condition;
+
+	/* Chance of sleeping when the point is reached, in [0, 1] */
+	double		probability;
+
+	/* Bounds of the sleep, in microseconds */
+	int			min_us;
+	int			max_us;
+
+	/* Seed, so that a run can be replayed */
+	uint64		seed;
+} InjectionPointJitter;
+
 #endif							/* INJECTION_POINTS_H */
