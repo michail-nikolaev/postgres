@@ -20,6 +20,7 @@
 #include "utils/relcache.h"
 
 extern PGDLLIMPORT int debug_discard_caches;
+extern PGDLLIMPORT double debug_discard_caches_probability;
 
 #define MIN_DEBUG_DISCARD_CACHES 0
 
