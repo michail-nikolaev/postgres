@@ -108,3 +108,39 @@ CREATE FUNCTION removable_cutoff(rel regclass)
 RETURNS xid8
 AS 'MODULE_PATHNAME'
 LANGUAGE C CALLED ON NULL INPUT;
+
+--
+-- injection_points_attach_jitter()
+--
+-- Attach a callback that sleeps for a random time between min_us and max_us
+-- with the given probability, leaving what the server does alone.  Meant to
+-- stay attached while an ordinary workload runs, so that windows too narrow
+-- to hit by repetition become wide enough to lose.
+--
+CREATE FUNCTION injection_points_attach_jitter(IN point_name TEXT,
+    IN probability float8,
+    IN min_us int4,
+    IN max_us int4,
+    IN seed int8)
+RETURNS void
+AS 'MODULE_PATHNAME', 'injection_points_attach_jitter'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
+--
+-- injection_points_stats_jitter()
+--
+-- Report how many jitter sleeps have happened and how long they lasted.
+--
+CREATE FUNCTION injection_points_stats_jitter(OUT sleep_count int8,
+    OUT sleep_us int8)
+RETURNS record
+AS 'MODULE_PATHNAME', 'injection_points_stats_jitter'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
+--
+-- injection_points_stats_reset_jitter()
+--
+CREATE FUNCTION injection_points_stats_reset_jitter()
+RETURNS void
+AS 'MODULE_PATHNAME', 'injection_points_stats_reset_jitter'
+LANGUAGE C STRICT PARALLEL UNSAFE;
