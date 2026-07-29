@@ -666,6 +666,16 @@
   max => 'MAX_DEBUG_DISCARD_CACHES',
 },
 
+{ name => 'debug_discard_caches_probability', type => 'real', context => 'PGC_SUSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Chance of flushing system caches at each opportunity.',
+  long_desc => 'The same forced flush as debug_discard_caches = 1, taken at random rather than every time, so that it can be left on while a real workload runs.  0 disables it.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'debug_discard_caches_probability',
+  boot_val => '0.0',
+  min => '0.0',
+  max => '1.0',
+},
+
 { name => 'debug_exec_backend', type => 'bool', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
   short_desc => 'Shows whether the running server is built with EXEC_BACKEND enabled.',
   flags => 'GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',
