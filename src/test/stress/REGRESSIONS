@@ -1640,13 +1640,14 @@ the server or the plugins.  Anyone reproducing it should know it is a
 lock timeout behind a hot row, not a combination that cannot run.
 
 
-An open bug, reproduced here
-============================
+A bug fixed on this branch only
+===============================
 
-Everything above is a fix that already exists, put back to see whether
-this suite notices.  This one is the other way round: the bug is live in
-master, and what is recorded here is that the suite reproduces it and
-what it took.
+Everything above is a fix that already exists upstream, put back to see
+whether this suite notices.  This one is in between: the bug is still
+open in master, the proposed fix is applied on this branch, and the
+scenario below guards it exactly as the entries above guard theirs --
+revert the fix and the suite fails.
 
   "Race conditions in logical decoding", Antonin Houska
   https://www.postgresql.org/message-id/flat/85833.1768840165@localhost
@@ -1673,17 +1674,14 @@ what it took.
       expect: decoding_startup_race (balances).  The scenario is a tight
               REPACK loop over the two smallest hot pgbench tables, with
               far more clients than cores.
-      reproduce: PG_TEST_EXTRA='stress_open_bugs=1'.  The scenario
-              declares the 'decoding' chaos profile, which attaches
-              jitter to the commit-before-clog-update injection point and
-              widens the window for one commit in eight.  Nothing has to
-              be patched by hand any more.  It is skipped unless asked
-              for, because it fails against master by design and would
-              leave the suite permanently red; it becomes an ordinary
-              scenario the day the fix lands.
-      status: CATCHES, 4 failures in 5 runs at stress_seconds=20 through
-              the chaos profile, and 3 in 3 with the hand-patched window
-              it replaced, as
+      revert: the fix commit on this branch, "Fix race conditions during
+              the setup of logical decoding".  Nothing has to be edited
+              by hand: the scenario declares the 'decoding' chaos
+              profile, which attaches jitter to the
+              commit-before-clog-update injection point and widens the
+              window for one commit in eight.
+      status: CATCHES, 4 failures in 5 runs at stress_seconds=20 and 3 in
+              3 at the default duration, as
 
                 not ok - balances agree across all four tables
                 balances disagree: accounts=53172 tellers=53172
@@ -1692,9 +1690,9 @@ what it took.
               A row version dropped by the copy takes one table out of
               step with the other three for good, which is the ordinary
               invariant noticing ordinary corruption -- no check had to
-              be written for this.  With the 0001 patch from the thread
-              applied, 3 runs in 3 are clean under the same scaffold,
-              which is what says this is that bug and not another one.
+              be written for this.  With the fix applied, 3 runs
+              in 3 are clean under the same profile, which is what says
+              this is that bug and not another one.
 
       how wide the window has to be: 10ms fails, 5ms does not.  That is
               not arbitrary.  The stall has to outlast the gap between

@@ -145,13 +145,16 @@ A build without injection points ignores all of it, with a note.
 Reproducers for open bugs
 =========================
 
-A scenario tagged 'open-bug' reproduces a bug that has not been fixed
-yet, so it fails against master on purpose.  Those are skipped unless
+A scenario tagged 'open-bug' reproduces a bug that has no fix yet, so it
+fails on purpose.  Those are skipped unless
 
   PG_TEST_EXTRA='stress_open_bugs=1'
 
 which keeps the suite green for the failures nobody expects, and keeps
-soak from walking into one.  When the fix lands, the tag comes off.
+soak from walking into one.  The tag comes off when the fix lands -- or,
+as with the logical decoding race in REGRESSIONS, when the proposed fix
+is carried on this branch, at which point the scenario becomes an
+ordinary guard against reverting it.
 
 Running the tests
 =================

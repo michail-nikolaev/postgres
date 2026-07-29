@@ -28,11 +28,12 @@
 # The invariant is the ordinary one: a row dropped by the copy takes
 # pgbench_branches out of step with the other three tables for good.
 #
+# The fix is on this branch; reverting it brings the failure back in 3
+# runs out of 3.
+#
 # https://www.postgresql.org/message-id/flat/85833.1768840165@localhost
 use strict;
 use warnings FATAL => 'all';
-
-use Test::More;
 
 use FindBin;
 use lib $FindBin::RealBin;
@@ -42,12 +43,6 @@ use Stress::Run;
 # master by design and would leave the suite permanently red.  It is
 # asked for rather than run, and becomes an ordinary scenario the day the
 # fix lands.
-# $COLLECT means soak is reading this file for its spec rather than
-# running it; skipping then would take the whole soak run with it.
-plan skip_all => 'open-bug reproducers not requested (stress_open_bugs=1)'
-  unless $Stress::Run::COLLECT
-  || ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_open_bugs=1\b/;
-
 run_scenario(
 	'decoding_startup_race',
 	{
@@ -68,9 +63,6 @@ run_scenario(
 		# commit in eight.  Without this the scenario runs clean and
 		# proves nothing; see REGRESSIONS for the measurements.
 		chaos => 'decoding',
-		# Fails against master by design: soak leaves it out of the
-		# catalogue walk unless open-bug reproducers were asked for.
-		tags => ['open-bug'],
 		# Far more clients than cores, deliberately.  The window is only
 		# as wide as the committing backend is slow between its flush and
 		# its CLOG update, and the thing that makes a backend slow there
