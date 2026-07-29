@@ -17,10 +17,12 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "injection_points.h"
 #include "miscadmin.h"
+#include "common/pg_prng.h"
 #include "nodes/pg_list.h"
 #include "nodes/value.h"
 #include "storage/dsm_registry.h"
@@ -67,6 +69,10 @@ typedef struct InjectionPointSharedState
 
 	/* Names of injection points attached to wait counters */
 	char		name[INJ_MAX_WAIT][INJ_NAME_MAXLEN];
+
+	/* Number of jitter sleeps performed, and their total duration */
+	pg_atomic_uint64 jitter_count;
+	pg_atomic_uint64 jitter_sleep_us;
 } InjectionPointSharedState;
 
 /* Pointer to shared-memory state. */
@@ -81,6 +87,9 @@ extern PGDLLEXPORT void injection_notice(const char *name,
 extern PGDLLEXPORT void injection_wait(const char *name,
 									   const void *private_data,
 									   void *arg);
+extern PGDLLEXPORT void injection_jitter(const char *name,
+										 const void *private_data,
+										 void *arg);
 
 /* track if injection points attached in this process are linked to it */
 static bool injection_point_local = false;
@@ -106,6 +115,8 @@ injection_point_init_state(void *ptr, void *arg)
 	memset(state->name, 0, sizeof(state->name));
 	for (int i = 0; i < INJ_MAX_WAIT; i++)
 		pg_atomic_init_u32(&state->wait_counts[i], 0);
+	pg_atomic_init_u64(&state->jitter_count, 0);
+	pg_atomic_init_u64(&state->jitter_sleep_us, 0);
 }
 
 static void
@@ -221,6 +232,63 @@ injection_notice(const char *name, const void *private_data, void *arg)
 			 name, argstr);
 	else
 		elog(NOTICE, "notice triggered for injection point %s", name);
+}
+
+/*
+ * Sleep for a random time, with a given probability.
+ *
+ * This is the callback that makes a race reachable: most of the windows this
+ * suite hunts are microseconds wide, which no amount of running will hit, and
+ * widening one to milliseconds turns "once in a few hours" into "every run".
+ * It only ever sleeps -- what the server decides is left alone -- so a
+ * failure seen with this attached is a failure that exists without it.
+ */
+void
+injection_jitter(const char *name, const void *private_data, void *arg)
+{
+	const InjectionPointJitter *jitter = private_data;
+	static pg_prng_state prng;
+	static bool prng_seeded = false;
+	int			us;
+
+	if (!injection_point_allowed(&jitter->condition))
+		return;
+
+	/*
+	 * Seeded from the configured seed and this process, so that a run can be
+	 * replayed and two backends still make different choices.
+	 */
+	if (!prng_seeded)
+	{
+		pg_prng_seed(&prng, jitter->seed ^ (uint64) MyProcPid);
+		prng_seeded = true;
+	}
+
+	if (pg_prng_double(&prng) >= jitter->probability)
+		return;
+
+	us = jitter->min_us;
+	if (jitter->max_us > jitter->min_us)
+		us += (int) pg_prng_uint64_range(&prng, 0,
+										 jitter->max_us - jitter->min_us);
+
+	/*
+	 * Attaching the shared area takes a lock and allocates, so it cannot be
+	 * done from a critical section; a backend whose first jitter point is
+	 * inside one sleeps uncounted rather than not at all.  Preloading the
+	 * module avoids that, which is what a caller who cares about the counts
+	 * does.
+	 */
+	if (inj_state == NULL && CritSectionCount == 0)
+		injection_init_shmem();
+
+	if (inj_state != NULL)
+	{
+		pg_atomic_fetch_add_u64(&inj_state->jitter_count, 1);
+		pg_atomic_fetch_add_u64(&inj_state->jitter_sleep_us, (uint64) us);
+	}
+
+	pg_usleep(us);
 }
 
 /*
@@ -385,6 +453,90 @@ injection_points_attach_func(PG_FUNCTION_ARGS)
 	else
 		InjectionPointAttach(name, lib_name, function, NULL,
 							 0);
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function for attaching the jitter callback to an injection point.
+ */
+PG_FUNCTION_INFO_V1(injection_points_attach_jitter);
+Datum
+injection_points_attach_jitter(PG_FUNCTION_ARGS)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	InjectionPointJitter jitter = {0};
+
+	jitter.probability = PG_GETARG_FLOAT8(1);
+	jitter.min_us = PG_GETARG_INT32(2);
+	jitter.max_us = PG_GETARG_INT32(3);
+	jitter.seed = (uint64) PG_GETARG_INT64(4);
+
+	if (jitter.probability < 0.0 || jitter.probability > 1.0)
+		elog(ERROR, "probability must be between 0 and 1");
+	if (jitter.min_us < 0 || jitter.max_us < jitter.min_us)
+		elog(ERROR, "sleep bounds must be non-negative, and max not below min");
+
+	if (injection_point_local)
+	{
+		jitter.condition.type = INJ_CONDITION_PID;
+		jitter.condition.pid = MyProcPid;
+	}
+
+	InjectionPointAttach(name, "injection_points", "injection_jitter",
+						 &jitter, sizeof(InjectionPointJitter));
+
+	if (injection_point_local)
+	{
+		MemoryContext oldctx;
+
+		/* Local injection point, so track it for automated cleanup */
+		oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		inj_list_local = lappend(inj_list_local, makeString(pstrdup(name)));
+		MemoryContextSwitchTo(oldctx);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function reporting what the jitter callbacks have done so far.
+ *
+ * A run where nothing slept is a run that tested nothing extra, and it would
+ * otherwise be indistinguishable from one where the jitter did its work, so
+ * the numbers are meant to be reported rather than assumed.
+ */
+PG_FUNCTION_INFO_V1(injection_points_stats_jitter);
+Datum
+injection_points_stats_jitter(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	injection_init_shmem();
+
+	values[0] = Int64GetDatum((int64) pg_atomic_read_u64(&inj_state->jitter_count));
+	values[1] = Int64GetDatum((int64) pg_atomic_read_u64(&inj_state->jitter_sleep_us));
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * SQL function to reset the jitter counters.
+ */
+PG_FUNCTION_INFO_V1(injection_points_stats_reset_jitter);
+Datum
+injection_points_stats_reset_jitter(PG_FUNCTION_ARGS)
+{
+	injection_init_shmem();
+
+	pg_atomic_write_u64(&inj_state->jitter_count, 0);
+	pg_atomic_write_u64(&inj_state->jitter_sleep_us, 0);
+
 	PG_RETURN_VOID();
 }
 
