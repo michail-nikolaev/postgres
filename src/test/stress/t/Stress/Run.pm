@@ -60,7 +60,8 @@ use Test::More;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS);
+use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS
+  stress_rollback_prepared);
 
 our @EXPORT =
   qw(run_scenario run_one stress_seed stress_assert_defn @STANDARD_DDL);
@@ -809,6 +810,22 @@ sub run_one
 		note "$idx->{name} was left dropped by the rotation; rebuilding it";
 		$node->safe_psql('postgres', "CREATE INDEX $idx->{name} $idx->{defn}");
 	}
+
+	# A prepared transaction outlives the workload and keeps every lock it
+	# took.  The two-phase load leaves them behind whenever the run stops
+	# mid-transaction, and a crash environment brings them back with
+	# recovery -- after which the final checks queue behind them: an
+	# invalid index cannot be dropped while a prepared transaction holds
+	# AccessExclusiveLock on it, and the wait ends in the lock timeout
+	# rather than in an answer.
+	#
+	# The workload is over, so there is nothing left to commit.  Rolling
+	# them back is tidying up after it rather than part of what is being
+	# tested; a scenario that wanted to assert something about prepared
+	# transactions surviving would have to do it before this point.
+	my $prepared = stress_rollback_prepared($node);
+	note "rolled back $prepared prepared transactions left by the workload"
+	  if $prepared;
 
 	#
 	# Whatever the workload did, these must hold now.

@@ -50,7 +50,7 @@ use Test::More;
 
 our @EXPORT_OK =
   qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS
-  stress_repack_tolerated);
+  stress_repack_tolerated stress_rollback_prepared);
 
 =pod
 
@@ -275,6 +275,42 @@ some specialized dimension running alongside an ordinary workload.
   context   sub($node) returning values the scripts need to be told
 
 =cut
+
+=pod
+
+=head2 stress_rollback_prepared($node)
+
+Roll back every prepared transaction, and say how many there were.
+
+A prepared transaction outlives the session that made it and keeps every
+lock it took, which is the whole point of one -- and a nuisance
+afterwards.  The two-phase load leaves them behind whenever the run stops
+mid-transaction, and a crash brings them back with recovery, after which
+anything that needs a conflicting lock waits for a transaction that will
+never be resolved.  An invalid index cannot be dropped while one holds
+AccessExclusiveLock on it, and the wait ends in the lock timeout rather
+than in an answer.
+
+Called where the workload is over, or over for this cycle, so there is
+nothing left to commit.  A scenario wanting to assert something about
+prepared transactions surviving has to do it before this runs.
+
+=cut
+
+sub stress_rollback_prepared
+{
+	my ($node) = @_;
+
+	# Built as statements rather than as gids, so that quoting is the
+	# server's problem.
+	my @rollbacks = grep { $_ ne '' } split /\n/,
+	  $node->safe_psql('postgres',
+		q(SELECT format('ROLLBACK PREPARED %L', gid) FROM pg_prepared_xacts));
+
+	$node->safe_psql('postgres', $_) for @rollbacks;
+
+	return scalar @rollbacks;
+}
 
 our %SCHEMA = (
 	pgbench => {
@@ -3466,6 +3502,18 @@ our %ENVS = (
 				die 'the server did not come back after the crash'
 				  unless $started;
 				Test::More::pass("cycle $cycle: recovered after a crash");
+
+				# Recovery brings back any transaction that was prepared
+				# when the server went down, still holding its locks.  The
+				# drop below needs AccessExclusiveLock on an index one of
+				# them may well have been building, and would wait out the
+				# lock timeout for a transaction nothing is going to
+				# resolve.
+				my $prepared = stress_rollback_prepared($node);
+				Test::More::note(
+					"cycle $cycle: rolled back $prepared prepared "
+					  . 'transactions recovered after the crash')
+				  if $prepared;
 
 				# An interrupted concurrent build may leave an invalid
 				# index behind, which is documented; it must at least be
