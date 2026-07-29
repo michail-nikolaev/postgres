@@ -1640,6 +1640,89 @@ the server or the plugins.  Anyone reproducing it should know it is a
 lock timeout behind a hot row, not a combination that cannot run.
 
 
+An open bug, reproduced here
+============================
+
+Everything above is a fix that already exists, put back to see whether
+this suite notices.  This one is the other way round: the bug is live in
+master, and what is recorded here is that the suite reproduces it and
+what it took.
+
+  "Race conditions in logical decoding", Antonin Houska
+  https://www.postgresql.org/message-id/flat/85833.1768840165@localhost
+  commitfest 6840, needs review
+
+      RecordTransactionCommit() writes the commit record, flushes it,
+      and only then sets the transaction's status in CLOG.  The flush is
+      what lets a decoder see the commit, so between the two there is a
+      window where a transaction is committed as far as logical decoding
+      is concerned and not committed as far as CLOG is concerned.  A
+      snapshot built from decoded commits leaves such a transaction out
+      of its running list, so an ordinary visibility check reads it as
+      neither running nor committed -- which HeapTupleSatisfiesMVCC
+      treats as aborted, and writes into the hint bits, so the wrong
+      answer outlives the window.
+
+      REPACK (CONCURRENTLY) is the vector this suite already had:
+      repack_worker.c builds its snapshot with SnapBuildInitialSnapshot()
+      and the backend copies the old heap under it, so a row version
+      whose writer is caught in the window is dropped from the copy and
+      marked dead in the original.  Antonin found the bug the same way --
+      stress-testing REPACK.
+
+      expect: decoding_startup_race (balances).  The scenario is a tight
+              REPACK loop over the two smallest hot pgbench tables, with
+              far more clients than cores.
+      reproduce: the window has to be widened, which needs three lines in
+              RecordTransactionCommit(), after XLogFlush(XactLastRecEnd)
+              and before TransactionIdCommitTree():
+
+                const char *d = getenv("PG_CLOG_DELAY_US");
+                if (d != NULL && atoi(d) > 0 && (random() % 8) == 0)
+                    pg_usleep(atoi(d));
+
+              then PG_CLOG_DELAY_US=50000 PG_TEST_EXTRA='stress_seconds=30'.
+      status: CATCHES, 3 failures in 3 runs, as
+
+                not ok - balances agree across all four tables
+                balances disagree: accounts=53172 tellers=53172
+                                   branches=56806 history=53172
+
+              A row version dropped by the copy takes one table out of
+              step with the other three for good, which is the ordinary
+              invariant noticing ordinary corruption -- no check had to
+              be written for this.  With the 0001 patch from the thread
+              applied, 3 runs in 3 are clean under the same scaffold,
+              which is what says this is that bug and not another one.
+
+      how wide the window has to be: 10ms fails, 5ms does not.  That is
+              not arbitrary.  The stall has to outlast the gap between
+              the decoding worker building the snapshot and the backend
+              reaching the first tuple with it, and that gap is 6-15ms:
+              the snapshot goes out through a file and the backend has to
+              wake up and read it.
+
+      why it is not caught unaided: the natural window is far too small.
+              Measured over the same scenario at 300 clients on 16 cores,
+              instrumenting the CLOG update with instr_time: in 60
+              seconds only 7 commits took 50us or more between the flush
+              and the CLOG update, 3 took more than 500us, and the widest
+              seen was 10.3ms.  So nature does produce a window of the
+              needed size, roughly once a minute, and it then has to land
+              in the 15ms before one of the ~30 snapshots a minute --
+              about one run in two hours at this exposure rate, and no
+              hit in the 134 exposures tried.  Raising it means more
+              REPACKs in flight, which is why the scenario declares
+              ddl_concurrency 2 and the two smallest tables.
+
+              The other consumer of SnapBuildInitialSnapshot() is the
+              tablesync of logical replication, where the snapshot is
+              used in the same session one round trip later rather than
+              through a file.  That gap is a few hundred microseconds, so
+              it needs a stall two orders of magnitude smaller -- the
+              kind that does happen several times a minute.  That is
+              where an unaided reproduction should be attempted next.
+
 Where the suite falls short
 ===========================
 

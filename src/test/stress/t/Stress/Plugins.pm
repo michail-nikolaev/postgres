@@ -2328,6 +2328,34 @@ our %DDL = (
 		},
 	},
 
+	# REPACK aimed only at the tables small enough that the whole copy
+	# runs in the time it takes to set one CLOG bit.
+	#
+	# REPACK (CONCURRENTLY) builds its snapshot with
+	# SnapBuildInitialSnapshot(), from the decoding snapshot builder, and
+	# copies the old heap under it -- so it is one of the two places in
+	# the server where a snapshot derived from decoded COMMIT records is
+	# used for ordinary MVCC visibility checks.  A commit that has been
+	# decoded but not yet recorded in CLOG is absent from such a snapshot
+	# and absent from CLOG at once, which reads as aborted: the copy
+	# drops the row and, worse, hint-bits the old heap to say so
+	# permanently.  See the "Race conditions in logical decoding" thread.
+	#
+	# Every REPACK is one exposure, so what matters is how many of them
+	# fit in a run and how little the copy has to scan between building
+	# the snapshot and reaching the row a commit is racing.  pgbench's
+	# accounts and history are far too big for either.
+	repack_hot_small => {
+		variants => sub {
+			my ($ctx) = @_;
+			return map {
+				{ table => $_, stmts => ["REPACK (CONCURRENTLY) $_;"] }
+			}
+			  grep { $_ eq 'pgbench_branches' || $_ eq 'pgbench_tellers' }
+			  @{ $ctx->{tables} };
+		},
+	},
+
 	# A trigger created on the table the rotation is rebuilding, and
 	# dropped again.  Both ends invalidate the relation, so every backend
 	# that has it open rebuilds its descriptor -- which is what a
