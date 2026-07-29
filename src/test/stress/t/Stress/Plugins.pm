@@ -138,15 +138,61 @@ our %CHAOS_POINTS = (
 	'exec-init-partition-after-get-partition-ancestors' =>
 	  { max_p => 0.2, max_us => 10_000 },
 
-	# Index page splits left incomplete, which is what a scan or an
-	# amcheck run has to cope with meeting.
+	# Index page splits and deletions left incomplete, which is what a
+	# scan or an amcheck run has to cope with meeting.
 	'nbtree-leave-leaf-split-incomplete' => { max_p => 1.0, max_us => 20_000 },
 	'nbtree-leave-internal-split-incomplete' =>
 	  { max_p => 1.0, max_us => 20_000 },
 	'nbtree-finish-incomplete-split' => { max_p => 1.0, max_us => 20_000 },
 	'nbtree-leave-page-half-dead' => { max_p => 1.0, max_us => 20_000 },
+	'nbtree-finish-half-dead-page-vacuum' =>
+	  { max_p => 1.0, max_us => 20_000 },
 	'gin-leave-leaf-split-incomplete' => { max_p => 1.0, max_us => 20_000 },
+	'gin-leave-internal-split-incomplete' =>
+	  { max_p => 1.0, max_us => 20_000 },
 	'gin-finish-incomplete-split' => { max_p => 1.0, max_us => 20_000 },
+
+	# A backward scan meeting a page that split, moved or was deleted
+	# under it.  These are reached often, so they stay rare -- but this
+	# is the one place where an ordinary read is walking the same pages a
+	# concurrent build is rearranging, which is the class amcheck is the
+	# detector for.
+	'nbtree-walk-left' => { max_p => 0.05, max_us => 10_000 },
+	'nbtree-walk-left-step-right' => { max_p => 0.5, max_us => 10_000 },
+	'nbtree-walk-left-deleted' => { max_p => 0.5, max_us => 10_000 },
+	'nbtree-walk-left-restart' => { max_p => 0.5, max_us => 10_000 },
+	'nbtree-endpoint-empty' => { max_p => 1.0, max_us => 10_000 },
+	'nbtree-first-empty' => { max_p => 1.0, max_us => 10_000 },
+
+	# Multixact creation, which the row-locking loads reach whenever two
+	# sessions lock the same row.
+	'multixact-create-from-members' => { max_p => 0.2, max_us => 10_000 },
+
+	# Decoding, reached by the subscription environment and by every
+	# REPACK (CONCURRENTLY).
+	'logical-decoding-activation' => { max_p => 1.0, max_us => 20_000 },
+	'logical-replication-slot-advance-segment' =>
+	  { max_p => 0.5, max_us => 10_000 },
+
+	# Autovacuum starting up beside a build that is already running.
+	'autovacuum-worker-start' => { max_p => 1.0, max_us => 20_000 },
+	'autovacuum-start-parallel-vacuum' => { max_p => 1.0, max_us => 20_000 },
+
+	# The choices a vacuum makes about cleanup and truncation, each
+	# reached once per vacuum.
+	'vacuum-index-cleanup-auto' => { max_p => 1.0, max_us => 20_000 },
+	'vacuum-index-cleanup-enabled' => { max_p => 1.0, max_us => 20_000 },
+	'vacuum-index-cleanup-disabled' => { max_p => 1.0, max_us => 20_000 },
+	'vacuum-truncate-auto' => { max_p => 1.0, max_us => 20_000 },
+	'vacuum-truncate-enabled' => { max_p => 1.0, max_us => 20_000 },
+	'vacuum-truncate-disabled' => { max_p => 1.0, max_us => 20_000 },
+
+	# Checkpoint timing against a build that has to survive one, and the
+	# delay-checkpoint window a commit passes through.
+	'commit-after-delay-checkpoint' => { max_p => 0.05, max_us => 10_000 },
+	'checkpoint-before-old-wal-removal' => { max_p => 1.0, max_us => 20_000 },
+	'create-checkpoint-initial' => { max_p => 1.0, max_us => 20_000 },
+	'create-checkpoint-run' => { max_p => 1.0, max_us => 20_000 },
 
 	# The horizon a vacuum decided on, before anything is removed on the
 	# strength of it.
