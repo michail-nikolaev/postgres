@@ -76,7 +76,7 @@ use FindBin;
 use Test::More;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS);
+use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS);
 
 our @EXPORT = qw(soak_enabled soak_run);
 
@@ -156,6 +156,42 @@ sub _pick_some
 	my $n = $min + int(rand($max - $min + 1));
 	$n = scalar @shuffled if $n > @shuffled;
 	return @shuffled[ 0 .. $n - 1 ];
+}
+
+# Invent a chaos profile: a few points from the pool, each with a
+# probability and a sleep range drawn inside the bounds that point
+# declares.  Those bounds are what keeps an invented profile from
+# stalling a lock queue past lock_timeout, so they are respected rather
+# than sampled around.
+#
+# Most combinations get none.  Chaos changes what a run can find, and a
+# soak whose every combination ran with it would no longer say whether a
+# failure needs it.
+sub _invent_chaos
+{
+	my %points;
+	my $profile = {};
+
+	return 'off' if rand() < 0.6;
+
+	foreach my $point (_pick_some(1, 3, sort keys %CHAOS_POINTS))
+	{
+		my $caps = $CHAOS_POINTS{$point};
+		my $probability = $caps->{max_p} * (0.1 + 0.9 * rand());
+		my $min_us = int(100 + rand(1000));
+		my $max_us = $min_us + int(rand($caps->{max_us} - $min_us + 1));
+
+		# Rounded, so that a combination line stays readable and two runs
+		# of the same seed produce the same text.
+		$probability = sprintf('%.5f', $probability) + 0;
+		$points{$point} = [ $probability, $min_us, $max_us ];
+	}
+
+	$profile->{points} = \%points;
+	$profile->{discard_probability} = sprintf('%.5f', 0.01 * rand()) + 0
+	  if rand() < 0.3;
+
+	return $profile;
 }
 
 # Assemble a combination out of the registries.  It is only a candidate:
@@ -263,10 +299,12 @@ sub _invent
 
 	# How wide the windows are.  This is a dimension of its own because it
 	# decides which races are reachable at all rather than how often: a
-	# microsecond window is not hit by running longer, only by widening it.
-	# 'heavy' is left out -- it slows a combination down enough to change
-	# what else gets tested in the time it takes.
-	my @chaos = ('off', 'off', 'light');
+	# microsecond window is not hit by running longer, only by widening
+	# it.  Which windows, and how far, is invented here rather than taken
+	# from a fixed profile -- there are far more combinations of points
+	# than anyone would write down, and the interesting ones are pairs
+	# nobody thought to pair.
+	my $chaos = _invent_chaos();
 
 	return {
 		schema => \@schema,
@@ -281,7 +319,7 @@ sub _invent
 		# later having tested nothing.  overlapping_ddl covers N-at-once
 		# as a scenario built to survive it; soak covers breadth.
 		ddl_concurrency => 1,
-		chaos => _pick(@chaos),
+		chaos => $chaos,
 		checks => [ _pick_some(1, 4, @checks) ],
 		env => $env,
 		clients => _pick(10, 20, 30),
@@ -473,8 +511,22 @@ sub _describe
 	$out .= " ddl_concurrency=$spec->{ddl_concurrency}"
 	  if defined $spec->{ddl_concurrency};
 	$out .= " args=$spec->{pgbench_args}" if $spec->{pgbench_args};
-	$out .= " chaos=$spec->{chaos}"
-	  if defined $spec->{chaos} && $spec->{chaos} ne 'off';
+	if (ref $spec->{chaos} eq 'HASH')
+	{
+		my $points = $spec->{chaos}->{points};
+
+		$out .= ' chaos=['
+		  . join(',',
+			map { "$_:$points->{$_}->[0]/$points->{$_}->[1]-$points->{$_}->[2]" }
+			  sort keys %$points)
+		  . ']';
+		$out .= " discard=$spec->{chaos}->{discard_probability}"
+		  if $spec->{chaos}->{discard_probability};
+	}
+	elsif (defined $spec->{chaos} && $spec->{chaos} ne 'off')
+	{
+		$out .= " chaos=$spec->{chaos}";
+	}
 	$out .= ' conf=[' . join(',', @{ $spec->{conf} }) . ']' if $spec->{conf};
 	return $out;
 }

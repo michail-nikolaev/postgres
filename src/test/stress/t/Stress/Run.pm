@@ -60,7 +60,7 @@ use Test::More;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS);
+use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS);
 
 our @EXPORT =
   qw(run_scenario run_one stress_seed stress_assert_defn @STANDARD_DDL);
@@ -246,8 +246,29 @@ sub _validate
 	die "scenario names unknown env '$spec->{env}'"
 	  unless exists $ENVS{ $spec->{env} };
 
-	die "scenario names unknown chaos profile '$spec->{chaos}'"
-	  if defined $spec->{chaos} && !exists $CHAOS{ $spec->{chaos} };
+	if (defined $spec->{chaos} && !ref $spec->{chaos})
+	{
+		die "scenario names unknown chaos profile '$spec->{chaos}'"
+		  unless exists $CHAOS{ $spec->{chaos} };
+	}
+	elsif (ref $spec->{chaos} eq 'HASH')
+	{
+		# Invented rather than named -- soak does this.  The points still
+		# have to exist, and to stay inside the bounds declared for them:
+		# those are what keep a sleep from turning into a lock cascade.
+		foreach my $point (sort keys %{ $spec->{chaos}->{points} // {} })
+		{
+			my $caps = $CHAOS_POINTS{$point};
+			my ($probability, undef, $max_us) =
+			  @{ $spec->{chaos}->{points}->{$point} };
+
+			die "chaos names unknown injection point '$point'" unless $caps;
+			die "chaos probability for '$point' above its cap"
+			  if $probability > $caps->{max_p};
+			die "chaos sleep for '$point' above its cap"
+			  if $max_us > $caps->{max_us};
+		}
+	}
 
 	# requires/conflicts, declared as { kind => [ names ] }
 	foreach my $kind (sort keys %registry)
@@ -818,11 +839,20 @@ ignores the whole thing.
 
 =cut
 
+# A scenario names a profile; soak hands one over ready-made.
+sub _chaos_profile
+{
+	my ($spec) = @_;
+
+	return $spec->{chaos} if ref $spec->{chaos} eq 'HASH';
+	return $CHAOS{ $spec->{chaos} // 'off' };
+}
+
 # Settings that have to be in postgresql.conf before the server starts.
 sub _chaos_conf
 {
 	my ($spec) = @_;
-	my $profile = $CHAOS{ $spec->{chaos} // 'off' };
+	my $profile = _chaos_profile($spec);
 	my @conf;
 
 	return () unless %$profile;
@@ -845,8 +875,8 @@ sub _chaos_conf
 sub _chaos_setup
 {
 	my ($node, $spec, $ctx) = @_;
-	my $name = $spec->{chaos} // 'off';
-	my $profile = $CHAOS{$name};
+	my $profile = _chaos_profile($spec);
+	my $name = ref $spec->{chaos} ? 'invented' : ($spec->{chaos} // 'off');
 	my $seed = 20260729;
 
 	return unless %$profile;
@@ -860,6 +890,7 @@ sub _chaos_setup
 
 	$ctx->{chaos} = $name;
 	return unless $profile->{points};
+	$ctx->{chaos_points} = 1;
 
 	# Same seed as the rest of the run, so a failure can be replayed.
 	$seed = $1 if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_seed=(\d+)\b/;
@@ -889,9 +920,7 @@ sub _chaos_report
 	my ($node, $ctx) = @_;
 	my ($count, $us);
 
-	return unless $ctx->{chaos};
-	return unless %{ $CHAOS{ $ctx->{chaos} } }
-	  && $CHAOS{ $ctx->{chaos} }->{points};
+	return unless $ctx->{chaos} && $ctx->{chaos_points};
 
 	($count, $us) = split /\|/,
 	  $node->safe_psql('postgres',

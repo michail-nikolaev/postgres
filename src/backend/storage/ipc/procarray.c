@@ -673,6 +673,14 @@ ProcArrayEndTransaction(PGPROC *proc, TransactionId latestXid)
 		Assert(TransactionIdIsValid(proc->xid));
 
 		/*
+		 * The transaction is recorded in CLOG by now but still advertised as
+		 * running here, which is the other half of the window a snapshot
+		 * built from decoded commits falls into: consistency between the two
+		 * is what makes an ordinary snapshot's answer right.
+		 */
+		INJECTION_POINT("xact-end-before-procarray-clear", NULL);
+
+		/*
 		 * If we can immediately acquire ProcArrayLock, we clear our own XID
 		 * and release the lock.  If not, use group XID clearing to improve
 		 * efficiency.

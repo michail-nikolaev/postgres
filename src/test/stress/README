@@ -108,8 +108,23 @@ t/Stress/Plugins.pm under %CHAOS, and a scenario asks for one with
 
   chaos => 'light',
 
-which is orthogonal to its environment.  Soak treats it as a dimension
-of its own and prints it with the rest of the combination.
+which is orthogonal to its environment.
+
+The points worth jittering are listed in %CHAOS_POINTS, each with a cap
+on how likely and how long its sleep may be.  The caps are not decoration:
+a point every commit reaches has to stay rare, a point in a lock queue
+has to stay short, and a phase change in a concurrent build that happens
+a few times a run can be slept on every time.
+
+Soak does not pick from the named profiles.  It invents one -- a few
+points from the pool, each drawn inside its caps -- because there are
+far more combinations of points than anyone would write down and the
+interesting ones are pairs nobody thought to pair.  Most combinations
+get none, so that a failure under chaos can still be told from one that
+does not need it.  The invented profile is printed with the rest of the
+combination and comes back with the seed:
+
+  chaos=[commit-before-clog-update:0.06992/465-11382] discard=0.00044
 
 Two properties are what make a chaos failure worth reporting, and both
 are deliberate.  A profile only ever delays: nothing the server decides

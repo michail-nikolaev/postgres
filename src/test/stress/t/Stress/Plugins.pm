@@ -49,7 +49,8 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 
 our @EXPORT_OK =
-  qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS stress_repack_tolerated);
+  qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS
+  stress_repack_tolerated);
 
 =pod
 
@@ -81,18 +82,97 @@ cascade that tests nothing.
 
 =cut
 
+our %CHAOS_POINTS = (
+	# The commit window: between the flush that lets a decoder see a
+	# commit and the CLOG update that lets an ordinary snapshot see it,
+	# and between that update and the transaction leaving the procarray.
+	# Reached by every commit, so the probability stays low; the sleeps
+	# can be long, since what has to be outlasted is a whole REPACK
+	# startup.
+	'commit-before-clog-update' => { max_p => 0.15, max_us => 60_000 },
+	'xact-end-before-procarray-clear' => { max_p => 0.15, max_us => 60_000 },
+
+	# Catalog staleness: a lock held over a descriptor not yet built, an
+	# invalidation not yet absorbed, a relcache entry half made.
+	'relation-open-after-lock' => { max_p => 0.02, max_us => 10_000 },
+	'accept-invalidation-messages' => { max_p => 0.02, max_us => 10_000 },
+	'relcache-build-catalogs-read' => { max_p => 0.1, max_us => 20_000 },
+	'catcache-list-miss-systable-scan-started' =>
+	  { max_p => 0.1, max_us => 20_000 },
+	'typecache-before-rel-type-cache-insert' =>
+	  { max_p => 0.1, max_us => 20_000 },
+	'inplace-before-pin' => { max_p => 0.2, max_us => 20_000 },
+	'transaction-end-process-inval' => { max_p => 0.05, max_us => 10_000 },
+	'invalidate-catalog-snapshot-end' => { max_p => 0.02, max_us => 10_000 },
+
+	# A snapshot taken and not yet read with, an index list held over the
+	# opening of its members.  The second is the planner's window on a
+	# standby, where replay does not wait for the reader's lock.
+	'transaction-snapshot-taken' => { max_p => 0.02, max_us => 10_000 },
+	'relation-index-list-built' => { max_p => 0.05, max_us => 20_000 },
+
+	# The phase changes of a concurrent build, each of which decides
+	# something on the strength of a wait that has just finished.
+	'wait-for-lockers-done' => { max_p => 1.0, max_us => 30_000 },
+	'define-index-before-set-valid' => { max_p => 1.0, max_us => 30_000 },
+	'reindex-conc-index-built' => { max_p => 1.0, max_us => 30_000 },
+	'reindex-conc-index-safe' => { max_p => 1.0, max_us => 30_000 },
+	'reindex-conc-index-not-safe' => { max_p => 1.0, max_us => 30_000 },
+	'reindex-relation-concurrently-before-swap' =>
+	  { max_p => 1.0, max_us => 30_000 },
+	'reindex-relation-concurrently-before-set-dead' =>
+	  { max_p => 1.0, max_us => 30_000 },
+	'repack-concurrently-before-lock' => { max_p => 1.0, max_us => 30_000 },
+	'detach-partition-before-finalize' => { max_p => 1.0, max_us => 30_000 },
+
+	# Speculative insertion and the checks around it, which is where an
+	# arbiter index that two transactions disagree about does its damage.
+	'exec-insert-before-insert-speculative' =>
+	  { max_p => 0.2, max_us => 10_000 },
+	'check-exclusion-or-unique-constraint-no-conflict' =>
+	  { max_p => 0.2, max_us => 10_000 },
+
+	# Partition routing, where the ancestors of a partition are read and
+	# then relied on.
+	'exec-init-partition-before-open' => { max_p => 0.2, max_us => 10_000 },
+	'exec-init-partition-after-get-partition-ancestors' =>
+	  { max_p => 0.2, max_us => 10_000 },
+
+	# Index page splits left incomplete, which is what a scan or an
+	# amcheck run has to cope with meeting.
+	'nbtree-leave-leaf-split-incomplete' => { max_p => 1.0, max_us => 20_000 },
+	'nbtree-leave-internal-split-incomplete' =>
+	  { max_p => 1.0, max_us => 20_000 },
+	'nbtree-finish-incomplete-split' => { max_p => 1.0, max_us => 20_000 },
+	'nbtree-leave-page-half-dead' => { max_p => 1.0, max_us => 20_000 },
+	'gin-leave-leaf-split-incomplete' => { max_p => 1.0, max_us => 20_000 },
+	'gin-finish-incomplete-split' => { max_p => 1.0, max_us => 20_000 },
+
+	# The horizon a vacuum decided on, before anything is removed on the
+	# strength of it.
+	'vacuum-cutoffs-computed' => { max_p => 1.0, max_us => 30_000 },
+
+	# The lock queue itself.  Short and rare, always: a request that
+	# dawdles at the head of a queue stalls every writer behind it, and
+	# lock_timeout is what ends the run.
+	'lock-before-acquire' => { max_p => 0.0005, max_us => 2000 },
+);
+
 our %CHAOS = (
 	# Named so a scenario can say it wants none.
 	off => {},
 
-	# Wide enough to shake the ordinary catalog and snapshot races, small
-	# enough to leave throughput recognisable.
+	# Catalog and snapshot staleness, plus the build phase changes.  Wide
+	# enough to shake the ordinary races, small enough to leave
+	# throughput recognisable.
 	light => {
 		points => {
 			'relation-open-after-lock' => [ 0.002, 100, 3000 ],
 			'accept-invalidation-messages' => [ 0.001, 100, 3000 ],
 			'transaction-snapshot-taken' => [ 0.002, 100, 3000 ],
+			'relation-index-list-built' => [ 0.01, 200, 5000 ],
 			'wait-for-lockers-done' => [ 0.5, 500, 5000 ],
+			'define-index-before-set-valid' => [ 0.5, 500, 5000 ],
 		},
 		discard_probability => 0.001,
 	},
@@ -103,10 +183,17 @@ our %CHAOS = (
 	heavy => {
 		points => {
 			'commit-before-clog-update' => [ 0.02, 1000, 20000 ],
+			'xact-end-before-procarray-clear' => [ 0.02, 1000, 20000 ],
 			'relation-open-after-lock' => [ 0.01, 500, 8000 ],
 			'accept-invalidation-messages' => [ 0.01, 500, 8000 ],
+			'relcache-build-catalogs-read' => [ 0.05, 500, 8000 ],
 			'transaction-snapshot-taken' => [ 0.01, 500, 8000 ],
+			'relation-index-list-built' => [ 0.05, 500, 8000 ],
 			'wait-for-lockers-done' => [ 0.8, 1000, 15000 ],
+			'define-index-before-set-valid' => [ 0.8, 1000, 15000 ],
+			'reindex-relation-concurrently-before-swap' =>
+			  [ 0.8, 1000, 15000 ],
+			'exec-insert-before-insert-speculative' => [ 0.05, 500, 5000 ],
 			# Short, and rare: see the rule about lock_timeout above.
 			'lock-before-acquire' => [ 0.0002, 100, 1000 ],
 		},
