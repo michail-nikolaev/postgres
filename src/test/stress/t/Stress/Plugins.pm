@@ -981,6 +981,67 @@ our %SCHEMA = (
 		},
 	},
 
+	# A table shaped for a bitmap heap scan to skip fetching pages.
+	#
+	# The skip_fetch optimization lets a bitmap heap scan that needs no
+	# columns -- count(*) with an indexable qual and nothing else -- avoid
+	# reading a page at all when the visibility map says every tuple on it
+	# is visible, taking the tuple count from the bitmap instead.  The
+	# bitmap was built earlier, though, and a vacuum running since can
+	# have removed the dead TIDs in it and marked those pages
+	# all-visible.  The scan then counts TIDs that are no longer there.
+	#
+	# Wide rows at fillfactor 10 put roughly one row on a page, so a few
+	# thousand rows make a few thousand pages: enough that a scan takes
+	# long enough for a vacuum to get ahead of it, which is what the race
+	# needs.  Autovacuum is off so the vacuum that matters is the one the
+	# rotation runs.
+	bitmap_skip_fetch => {
+		setup => q(
+			CREATE TABLE pgb_bmskip (b int NOT NULL, pad char(1024) DEFAULT '')
+				WITH (autovacuum_enabled = false, fillfactor = 10);
+			INSERT INTO pgb_bmskip(b) SELECT g FROM generate_series(1, 4000) g;
+			CREATE INDEX pgb_bmskip_b_idx ON pgb_bmskip(b);
+			VACUUM (ANALYZE) pgb_bmskip;
+
+			-- The same count taken two ways under one snapshot: once by a
+			-- bitmap heap scan that is allowed to skip fetching pages, and
+			-- once by a sequential scan that cannot.  They can only
+			-- disagree if the bitmap scan counted TIDs that are not there.
+			--
+			-- The caller must be in a repeatable read transaction, or the
+			-- two counts are taken under different snapshots.
+			CREATE FUNCTION pgb_bmskip_check() RETURNS boolean
+			LANGUAGE plpgsql AS $fn$
+			DECLARE
+				bitmap_count bigint;
+				seq_count bigint;
+			BEGIN
+				-- No qual and no columns on the scan node is what makes
+				-- the optimization applicable; the index condition does
+				-- all the work.
+				PERFORM set_config('enable_seqscan', 'off', true);
+				PERFORM set_config('enable_indexscan', 'off', true);
+				PERFORM set_config('enable_indexonlyscan', 'off', true);
+				PERFORM set_config('enable_bitmapscan', 'on', true);
+				SELECT count(*) INTO bitmap_count
+					FROM pgb_bmskip WHERE b >= 0;
+
+				PERFORM set_config('enable_seqscan', 'on', true);
+				PERFORM set_config('enable_bitmapscan', 'off', true);
+				SELECT count(*) INTO seq_count FROM pgb_bmskip;
+
+				IF bitmap_count <> seq_count THEN
+					RAISE EXCEPTION
+						'bitmap heap scan counted % rows, the table has % under the same snapshot',
+						bitmap_count, seq_count;
+				END IF;
+				RETURN true;
+			END $fn$;
+		),
+		tables => ['pgb_bmskip'],
+	},
+
 	# Two tables shaped for an index-only scan to race a vacuum, one per
 	# access method that has the problem.
 	#
@@ -2109,6 +2170,31 @@ our %LOAD = (
 		),
 	},
 
+	# The bitmap scan that has to agree with the heap.
+	bmskip_check => {
+		weight => 3,
+		requires => { schema => ['bitmap_skip_fetch'] },
+		script => q(
+			BEGIN ISOLATION LEVEL REPEATABLE READ;
+			SELECT pgb_bmskip_check();
+			COMMIT;
+		),
+	},
+
+	# Rows dying and coming back, so the bitmap has entries for TIDs a
+	# vacuum is about to remove.  The row count is left where it started.
+	bmskip_churn => {
+		weight => 4,
+		requires => { schema => ['bitmap_skip_fetch'] },
+		script => q(
+			\set k random(1, 4000)
+			BEGIN;
+			DELETE FROM pgb_bmskip WHERE b = :k;
+			INSERT INTO pgb_bmskip(b) VALUES (:k);
+			COMMIT;
+		),
+	},
+
 	# The index-only scan that has to agree with the heap.  Repeatable
 	# read, so that the scan and the count that checks it share one
 	# snapshot; the sleep is the window a vacuum has to land in, and is
@@ -2754,6 +2840,18 @@ our %DDL = (
 			}
 			  grep { $_ eq 'pgbench_branches' || $_ eq 'pgbench_tellers' }
 			  @{ $ctx->{tables} };
+		},
+	},
+
+	# The vacuum that gets ahead of a bitmap scan and empties the pages
+	# its bitmap still refers to.
+	vacuum_bmskip => {
+		requires => { schema => ['bitmap_skip_fetch'] },
+		variants => sub {
+			return ({
+				table => 'pgb_bmskip',
+				stmts => ['VACUUM (TRUNCATE false) pgb_bmskip;']
+			});
 		},
 	},
 

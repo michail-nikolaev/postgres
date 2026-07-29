@@ -33,6 +33,7 @@ tests += {
       't/121_triggers.pl',
       't/122_decoding_startup_race.pl',
       't/123_ios_vacuum_race.pl',
+      't/124_bitmap_skip_fetch.pl',
       't/999_soak.pl',
     ],
   },

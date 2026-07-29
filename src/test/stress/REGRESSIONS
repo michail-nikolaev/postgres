@@ -277,6 +277,57 @@ heapallindexed catches directly.
               passes without it.
 
 
+Scans that trust the visibility map for TIDs a vacuum has taken away
+====================================================================
+
+A scan holds a TID it read earlier and asks the visibility map whether
+it still needs to look at the heap.  A vacuum that has removed the TID
+and marked its page all-visible in the meantime turns that question into
+the wrong answer, and the scan returns a row that is not there.
+
+  459e7bf8e2f  2025-04-02  Remove HeapBitmapScan's skip_fetch
+                           optimization
+      A bitmap heap scan needing no columns from the table could skip
+      reading an all-visible page and take its tuple count from the
+      bitmap.  The bitmap is older than the page, so a vacuum running
+      since could have removed the dead TIDs it refers to, and the scan
+      counted them.
+      expect: bitmap_skip_fetch, whose invariant is inside the workload
+              because it needs one snapshot: the same count taken by a
+              bitmap heap scan and by a sequential scan inside one
+              repeatable-read transaction.  count(*) with an indexable
+              qual and nothing else is what makes the scan node's qual
+              and target list both empty, which is the test the
+              optimization used to decide it could skip.
+      revert: git revert conflicts -- the bitmap heap scan has been
+              rebuilt around the read stream API since, and
+              table_beginscan_bm() now takes a flags word rather than a
+              bool.  Hand-resolved: SO_NEED_TUPLES comes back as another
+              ScanOptions flag rather than as the old parameter, the two
+              fields go back on BitmapHeapScanDescData (the base
+              HeapScanDescData has acquired an rs_vmbuffer of its own
+              since, for heap_page_prune_opt, and the two are managed
+              separately), and nodeBitmapHeapscan.c sets the flag from
+              the same qual/targetlist test it used to.
+      status: CATCHES, 1 failure in 1 run at stress_seconds=20, as
+
+                ERROR:  bitmap heap scan counted 4097 rows, the table
+                has 4000 under the same snapshot
+
+              and 3 runs in 3 are clean with the revert taken back out,
+              which is what says the scenario is watching this and not
+              something else.  4000 wide rows at fillfactor 10 put about
+              one row on a page, so the scan is long enough for a vacuum
+              to get ahead of it -- with the 200-row tables the
+              index-only scenario uses, the scan finishes before a
+              vacuum can overtake it and nothing is seen.
+
+  The same shape, still open, is the GiST and SP-GiST index-only scan
+  bug recorded further down: a scan queues TIDs, lets the page go, and
+  the index-only path then trusts the visibility map for them.  459e7bf8
+  is the case that was closed by removing the optimization rather than
+  by building the interlock.
+
 ON CONFLICT arbiter selection during concurrent index operations
 ================================================================
 
