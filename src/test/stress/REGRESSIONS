@@ -1732,6 +1732,61 @@ revert the fix and the suite fails.
               kind that does happen several times a minute.  That is
               where an unaided reproduction should be attempted next.
 
+Another open bug, and a hole in its proposed fix
+===============================================
+
+  "[SP-]GiST IOS visibility bug", Matthias van de Meent
+  https://www.postgresql.org/message-id/flat/CAEze2WgH13m=MDST58KLo-NkZpbwBEt4xNWcgtghWBwRj3J0+A@mail.gmail.com
+  commitfest 5721, needs review
+
+      GiST and SP-GiST index scans do not interlock with their own index
+      vacuum the way btree does.  A scan reads a page, queues the TIDs on
+      it and lets the page go; vacuum is then free to remove those index
+      entries, remove the heap tuples they pointed at, and mark the pages
+      all-visible.  When the scan returns a queued TID, the index-only
+      path sees an all-visible page and returns the value from the index
+      without looking at the heap -- so a row deleted before the scan's
+      snapshot began comes back.
+
+      expect: ios_vacuum_race, whose invariant is inside the workload:
+              the scan and a read of the same table run under one
+              repeatable-read snapshot, so they can only disagree if the
+              scan returned something that is not there.
+      reproduce: PG_TEST_EXTRA='stress_open_bugs=1'.  Tagged open-bug,
+              so it is skipped by default and soak leaves it alone.
+      status: CATCHES, 5 failures in 5 runs at stress_seconds=20 against
+              master, on both access methods, as
+
+                index-only scan on pgb_ios_gist returned 7 rows the heap
+                does not have, out of 207: {"(139,1)","(62,3)"}
+
+      what it found in the fix: with the v02 series applied, GiST is
+              clean and SP-GiST still leaks -- 6 runs in 6, sorted and
+              unsorted alike.  spgLeafTest() checks the visibility of
+              item->heapPtr and attributes the answer to the tuple it
+              then returns, which is leafTuple->heapPtr.  Those are the
+              same only when the search item is itself a leaf; for a
+              descent from an inner tuple, item->heapPtr holds an index
+              block pointer, so the visibility map is consulted for an
+              index block as though it were a heap block.  Checking
+              leafTuple->heapPtr instead makes 4 runs in 4 clean.
+
+              The author's own isolation tests pass against the
+              uncorrected patch, and the reason looks like table size:
+              ten narrow rows fit a single SP-GiST page, so the scan
+              never descends from an inner tuple and item->heapPtr is
+              never the wrong kind of pointer.  This scenario uses two
+              hundred rows at fillfactor 10.
+
+      controls: the same scan with enable_indexonlyscan off is clean in
+              3 runs of 3, which is what says the rows come from the
+              index-only path and not from the check being wrong.  An
+              earlier version of the check compared counts rather than
+              values and was itself wrong: the churn re-inserted the same
+              point it deleted, so a revived row and its replacement were
+              indistinguishable to a count.  Every row version now takes
+              a coordinate from a sequence.
+
 Where the suite falls short
 ===========================
 
