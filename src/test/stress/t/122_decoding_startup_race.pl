@@ -32,9 +32,21 @@
 use strict;
 use warnings FATAL => 'all';
 
+use Test::More;
+
 use FindBin;
 use lib $FindBin::RealBin;
 use Stress::Run;
+
+# The bug this reproduces is still open, so this scenario fails against
+# master by design and would leave the suite permanently red.  It is
+# asked for rather than run, and becomes an ordinary scenario the day the
+# fix lands.
+# $COLLECT means soak is reading this file for its spec rather than
+# running it; skipping then would take the whole soak run with it.
+plan skip_all => 'open-bug reproducers not requested (stress_open_bugs=1)'
+  unless $Stress::Run::COLLECT
+  || ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_open_bugs=1\b/;
 
 run_scenario(
 	'decoding_startup_race',
@@ -49,6 +61,16 @@ run_scenario(
 		ddl_concurrency => 2,
 		checks => [ 'balances', 'amcheck' ],
 		env => 'standalone',
+		# The whole scenario turns on this: the window between the flush
+		# that lets a decoder see a commit and the CLOG update that lets
+		# an ordinary snapshot see it is under 50us in nature, and REPACK
+		# needs it to outlast a 6-15ms gap.  The profile widens it for one
+		# commit in eight.  Without this the scenario runs clean and
+		# proves nothing; see REGRESSIONS for the measurements.
+		chaos => 'decoding',
+		# Fails against master by design: soak leaves it out of the
+		# catalogue walk unless open-bug reproducers were asked for.
+		tags => ['open-bug'],
 		# Far more clients than cores, deliberately.  The window is only
 		# as wide as the committing backend is slow between its flush and
 		# its CLOG update, and the thing that makes a backend slow there

@@ -5,6 +5,9 @@ tests += {
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
   'tap': {
+    'env': {
+       'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
+    },
     'tests': [
       't/100_repack_dml_s1.pl',
       't/101_repack_dml_s50.pl',

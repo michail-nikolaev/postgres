@@ -1673,16 +1673,17 @@ what it took.
       expect: decoding_startup_race (balances).  The scenario is a tight
               REPACK loop over the two smallest hot pgbench tables, with
               far more clients than cores.
-      reproduce: the window has to be widened, which needs three lines in
-              RecordTransactionCommit(), after XLogFlush(XactLastRecEnd)
-              and before TransactionIdCommitTree():
-
-                const char *d = getenv("PG_CLOG_DELAY_US");
-                if (d != NULL && atoi(d) > 0 && (random() % 8) == 0)
-                    pg_usleep(atoi(d));
-
-              then PG_CLOG_DELAY_US=50000 PG_TEST_EXTRA='stress_seconds=30'.
-      status: CATCHES, 3 failures in 3 runs, as
+      reproduce: PG_TEST_EXTRA='stress_open_bugs=1'.  The scenario
+              declares the 'decoding' chaos profile, which attaches
+              jitter to the commit-before-clog-update injection point and
+              widens the window for one commit in eight.  Nothing has to
+              be patched by hand any more.  It is skipped unless asked
+              for, because it fails against master by design and would
+              leave the suite permanently red; it becomes an ordinary
+              scenario the day the fix lands.
+      status: CATCHES, 4 failures in 5 runs at stress_seconds=20 through
+              the chaos profile, and 3 in 3 with the hand-patched window
+              it replaced, as
 
                 not ok - balances agree across all four tables
                 balances disagree: accounts=53172 tellers=53172
@@ -1714,6 +1715,16 @@ what it took.
               hit in the 134 exposures tried.  Raising it means more
               REPACKs in flight, which is why the scenario declares
               ddl_concurrency 2 and the two smallest tables.
+
+              One idea that did not work, recorded so that it is not
+              tried again: forcing running-xacts records from the
+              workload with pg_log_standby_snapshot(), on the theory that
+              they gate how often a decoder can reach a consistent point.
+              Measured A/B at 300 clients with chaos off, 16 decoding
+              startups in 30 seconds without it and 14 with.  They are
+              not the limiter -- ReplicationSlotReserveWal() already logs
+              one per slot created, and what a startup then waits for is
+              the transactions running at that moment to end.
 
               The other consumer of SnapBuildInitialSnapshot() is the
               tablesync of logical replication, where the snapshot is

@@ -91,6 +91,53 @@ verbose errors, backtraces for relation_open and log_lock_waits on:
 these produce no output unless something goes wrong, and a failure that
 arrives without its call site is expensive to chase.
 
+Chaos
+=====
+
+Most of the windows these tests hunt are microseconds wide.  Repetition
+does not find those: a scenario can run for hours without ever placing
+two operations within a microsecond of each other.  What finds them is
+widening the window, for a small fraction of the operations that reach
+it, until it is wide enough to lose.
+
+A chaos profile does that.  It attaches jitter -- a sleep of a given
+length, taken with a given probability -- to injection points in the
+paths these races live in, and can turn on the probabilistic form of
+debug_discard_caches for the cache-flush hazards.  The profiles are in
+t/Stress/Plugins.pm under %CHAOS, and a scenario asks for one with
+
+  chaos => 'light',
+
+which is orthogonal to its environment.  Soak treats it as a dimension
+of its own and prints it with the rest of the combination.
+
+Two properties are what make a chaos failure worth reporting, and both
+are deliberate.  A profile only ever delays: nothing the server decides
+changes because of it, so a failure seen under chaos is a failure that
+exists without it.  And no sleep approaches lock_timeout -- a lock
+request that dawdles at the head of a queue stalls every writer behind
+it, which ends a run in a cascade that tested nothing.
+
+Every run reports what the jitter did:
+
+  # chaos 'decoding': 649 sleeps totalling 26078119us
+
+because a run where nothing slept tested no more than a run without
+chaos, and the two are otherwise indistinguishable from the outside.
+
+A build without injection points ignores all of it, with a note.
+
+Reproducers for open bugs
+=========================
+
+A scenario tagged 'open-bug' reproduces a bug that has not been fixed
+yet, so it fails against master on purpose.  Those are skipped unless
+
+  PG_TEST_EXTRA='stress_open_bugs=1'
+
+which keeps the suite green for the failures nobody expects, and keeps
+soak from walking into one.  When the fix lands, the tag comes off.
+
 Running the tests
 =================
 

@@ -49,7 +49,78 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 
 our @EXPORT_OK =
-  qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS stress_repack_tolerated);
+  qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS stress_repack_tolerated);
+
+=pod
+
+=head2 %CHAOS
+
+A chaos profile widens the windows a race has to be lost in, without
+changing anything the server decides.
+
+Most of the windows this suite hunts are microseconds wide.  Repetition
+does not find those: a scenario can run for hours and never place two
+operations within a microsecond of each other.  What does find them is
+making the window milliseconds wide for a small fraction of the
+operations that reach it -- which is what jitter attached to an
+injection point does, and what the probabilistic form of
+debug_discard_caches does for cache-flush hazards.
+
+C<points> maps an injection point to [ probability, min_us, max_us ].
+C<discard_probability> is the chance of a forced cache flush at each
+opportunity.  A profile is declared by a scenario as C<chaos>, is
+orthogonal to the environment, and does nothing at all on a build
+without injection points.
+
+Two rules hold for every profile here, and both are load-bearing.
+Sleeps only ever delay; a failure seen under chaos is a failure that
+exists without it, which is what makes a chaos run worth reporting.  And
+no sleep may approach lock_timeout: a lock request that dawdles at the
+head of a queue stalls every writer behind it, which ends the run in a
+cascade that tests nothing.
+
+=cut
+
+our %CHAOS = (
+	# Named so a scenario can say it wants none.
+	off => {},
+
+	# Wide enough to shake the ordinary catalog and snapshot races, small
+	# enough to leave throughput recognisable.
+	light => {
+		points => {
+			'relation-open-after-lock' => [ 0.002, 100, 3000 ],
+			'accept-invalidation-messages' => [ 0.001, 100, 3000 ],
+			'transaction-snapshot-taken' => [ 0.002, 100, 3000 ],
+			'wait-for-lockers-done' => [ 0.5, 500, 5000 ],
+		},
+		discard_probability => 0.001,
+	},
+
+	# Everything at once, including the commit window and the lock queue.
+	# Throughput drops noticeably; this is for a hunt rather than for the
+	# catalogue.
+	heavy => {
+		points => {
+			'commit-before-clog-update' => [ 0.02, 1000, 20000 ],
+			'relation-open-after-lock' => [ 0.01, 500, 8000 ],
+			'accept-invalidation-messages' => [ 0.01, 500, 8000 ],
+			'transaction-snapshot-taken' => [ 0.01, 500, 8000 ],
+			'wait-for-lockers-done' => [ 0.8, 1000, 15000 ],
+			# Short, and rare: see the rule about lock_timeout above.
+			'lock-before-acquire' => [ 0.0002, 100, 1000 ],
+		},
+		discard_probability => 0.005,
+	},
+
+	# Aimed at one window: the gap between the flush that lets a decoder
+	# see a commit and the CLOG update that lets an ordinary snapshot see
+	# it.  Sized from the measurements in REGRESSIONS -- REPACK needs the
+	# stall to outlast a 6-15ms gap, and nature almost never provides one.
+	decoding => {
+		points => { 'commit-before-clog-update' => [ 0.125, 20000, 60000 ] },
+	},
+);
 
 =pod
 

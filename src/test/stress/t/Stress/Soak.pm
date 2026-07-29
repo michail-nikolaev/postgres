@@ -76,7 +76,7 @@ use FindBin;
 use Test::More;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS);
+use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS);
 
 our @EXPORT = qw(soak_enabled soak_run);
 
@@ -98,6 +98,18 @@ sub _catalogue
 	}
 
 	die 'collected no scenarios' unless keys %found;
+
+	# Reproducers for bugs that are still open fail on purpose.  They are
+	# no use in a walk whose point is to find failures nobody expected.
+	unless (($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_open_bugs=1\b/)
+	{
+		foreach my $name (keys %found)
+		{
+			delete $found{$name}
+			  if grep { $_ eq 'open-bug' } @{ $found{$name}->{tags} // [] };
+		}
+	}
+
 	return %found;
 }
 
@@ -249,6 +261,13 @@ sub _invent
 	my @io_methods = ('sync', 'worker');
 	push @io_methods, 'io_uring' if _have_io_uring();
 
+	# How wide the windows are.  This is a dimension of its own because it
+	# decides which races are reachable at all rather than how often: a
+	# microsecond window is not hit by running longer, only by widening it.
+	# 'heavy' is left out -- it slows a combination down enough to change
+	# what else gets tested in the time it takes.
+	my @chaos = ('off', 'off', 'light');
+
 	return {
 		schema => \@schema,
 		indexes => \@indexes,
@@ -262,6 +281,7 @@ sub _invent
 		# later having tested nothing.  overlapping_ddl covers N-at-once
 		# as a scenario built to survive it; soak covers breadth.
 		ddl_concurrency => 1,
+		chaos => _pick(@chaos),
 		checks => [ _pick_some(1, 4, @checks) ],
 		env => $env,
 		clients => _pick(10, 20, 30),
@@ -453,6 +473,8 @@ sub _describe
 	$out .= " ddl_concurrency=$spec->{ddl_concurrency}"
 	  if defined $spec->{ddl_concurrency};
 	$out .= " args=$spec->{pgbench_args}" if $spec->{pgbench_args};
+	$out .= " chaos=$spec->{chaos}"
+	  if defined $spec->{chaos} && $spec->{chaos} ne 'off';
 	$out .= ' conf=[' . join(',', @{ $spec->{conf} }) . ']' if $spec->{conf};
 	return $out;
 }

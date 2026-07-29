@@ -60,7 +60,7 @@ use Test::More;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS);
+use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS);
 
 our @EXPORT =
   qw(run_scenario run_one stress_seed stress_assert_defn @STANDARD_DDL);
@@ -245,6 +245,9 @@ sub _validate
 	}
 	die "scenario names unknown env '$spec->{env}'"
 	  unless exists $ENVS{ $spec->{env} };
+
+	die "scenario names unknown chaos profile '$spec->{chaos}'"
+	  if defined $spec->{chaos} && !exists $CHAOS{ $spec->{chaos} };
 
 	# requires/conflicts, declared as { kind => [ names ] }
 	foreach my $kind (sort keys %registry)
@@ -512,6 +515,9 @@ sub run_one
 	$node->append_conf('postgresql.conf', $_)
 	  for map { @{ $LOAD{$_}->{conf} // [] } } @{ $spec->{load} };
 	$node->append_conf('postgresql.conf', $_) for @{ $spec->{conf} // [] };
+	# Chaos needs its settings in place before the server starts: the
+	# module's counters live in shared memory it allocates at startup.
+	$node->append_conf('postgresql.conf', $_) for _chaos_conf($spec);
 	$node->start;
 
 	#
@@ -605,6 +611,11 @@ sub run_one
 		vars => \%vars,
 		%vars,
 	};
+
+	# Attached before anything else runs, and before the environment
+	# builds its extra nodes, so that every part of the run is subject to
+	# it.
+	_chaos_setup($node, $spec, $ctx);
 
 	# Anything the environment needs beyond the primary node -- a
 	# standby, a subscriber -- is built now, with the schema and its
@@ -787,9 +798,109 @@ sub run_one
 		$c->{final}->($node, $ctx) if $c->{final};
 	}
 	$env->{final}->($node, $ctx) if $env->{final};
+	_chaos_report($node, $ctx);
 
 	$_->stop for @{ $ctx->{extra_nodes} // [] };
 	$node->stop;
+	return;
+}
+
+
+=pod
+
+=item chaos
+
+A chaos profile widens the windows a race has to be lost in.  Sleeps are
+attached to injection points and left there while the workload runs;
+nothing decides differently because of them, so a failure under chaos is
+a failure that exists without it.  A build without injection points
+ignores the whole thing.
+
+=cut
+
+# Settings that have to be in postgresql.conf before the server starts.
+sub _chaos_conf
+{
+	my ($spec) = @_;
+	my $profile = $CHAOS{ $spec->{chaos} // 'off' };
+	my @conf;
+
+	return () unless %$profile;
+	return () unless ($ENV{enable_injection_points} // '') eq 'yes';
+
+	# Preloaded rather than loaded on demand, so that the shared counters
+	# exist in every backend from the start -- including one whose first
+	# jitter point is inside a critical section, where the module cannot
+	# attach to shared memory and would otherwise sleep uncounted.
+	push @conf, "shared_preload_libraries = 'injection_points'"
+	  if $profile->{points};
+	push @conf,
+	  "debug_discard_caches_probability = $profile->{discard_probability}"
+	  if $profile->{discard_probability};
+
+	return @conf;
+}
+
+# Attach the profile's jitter, once the server is up.
+sub _chaos_setup
+{
+	my ($node, $spec, $ctx) = @_;
+	my $name = $spec->{chaos} // 'off';
+	my $profile = $CHAOS{$name};
+	my $seed = 20260729;
+
+	return unless %$profile;
+
+	if (($ENV{enable_injection_points} // '') ne 'yes')
+	{
+		Test::More::note(
+			"chaos '$name' skipped: this build has no injection points");
+		return;
+	}
+
+	$ctx->{chaos} = $name;
+	return unless $profile->{points};
+
+	# Same seed as the rest of the run, so a failure can be replayed.
+	$seed = $1 if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_seed=(\d+)\b/;
+
+	$node->safe_psql('postgres', 'CREATE EXTENSION injection_points');
+	foreach my $point (sort keys %{ $profile->{points} })
+	{
+		my ($probability, $min_us, $max_us) =
+		  @{ $profile->{points}->{$point} };
+
+		$node->safe_psql('postgres',
+			"SELECT injection_points_attach_jitter('$point', "
+			  . "$probability, $min_us, $max_us, $seed)");
+	}
+
+	Test::More::note("chaos '$name': "
+		  . scalar(keys %{ $profile->{points} })
+		  . " points, seed $seed");
+	return;
+}
+
+# What the jitter actually did.  A run where nothing slept tested nothing
+# more than a run without chaos, and the two are otherwise identical from
+# the outside, so the numbers are reported rather than assumed.
+sub _chaos_report
+{
+	my ($node, $ctx) = @_;
+	my ($count, $us);
+
+	return unless $ctx->{chaos};
+	return unless %{ $CHAOS{ $ctx->{chaos} } }
+	  && $CHAOS{ $ctx->{chaos} }->{points};
+
+	($count, $us) = split /\|/,
+	  $node->safe_psql('postgres',
+		'SELECT sleep_count, sleep_us FROM injection_points_stats_jitter()');
+
+	Test::More::note(
+		"chaos '$ctx->{chaos}': $count sleeps totalling ${us}us");
+	Test::More::diag("chaos '$ctx->{chaos}' never fired")
+	  if defined $count && $count eq '0';
 	return;
 }
 
