@@ -208,8 +208,12 @@ sub _invent
 	  sort keys %DDL;
 
 	# Indexes a check asks for have to be there; take them all, which is
-	# also more interesting for the rotation.
-	my @indexes = sort keys %INDEXES;
+	# also more interesting for the rotation.  All, that is, except the
+	# ones whose table only exists when a particular decorator was
+	# picked: an index is built by name before the run starts, so one
+	# naming a table that is not there ends the combination in setup
+	# rather than in anything the suite is testing.
+	my @indexes = grep { $eligible->($INDEXES{$_}) } sort keys %INDEXES;
 
 	# How a statement reaches the server decides what gets cached and
 	# when it is replanned, which is the subject of several of the bugs

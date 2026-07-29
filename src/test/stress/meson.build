@@ -27,6 +27,7 @@ tests += {
       't/118_hot_prune.pl',
       't/119_hash_and_constraints.pl',
       't/120_index_build_churn.pl',
+      't/121_triggers.pl',
       't/999_soak.pl',
     ],
   },

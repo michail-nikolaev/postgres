@@ -1725,6 +1725,31 @@ follows is what is left.
     the server has: does something in the standard shape of these
     scenarios turn it off?
 
+10. Until the triggers scenario, nothing here ran a statement from a
+    plan it had not just parsed.  Every load is pgbench SQL, re-parsed
+    on each execution, so a plan could only ever be built against the
+    catalog as it stood; a session that holds a plan across a rebuild --
+    and has to be made to replan when the index that plan chose is
+    swapped or dropped underneath it -- was not represented at all.
+    That is the shape behind get_relation_info() opening an index replay
+    had already removed, and it is what a plpgsql body has by
+    construction: planned once, reused for the life of the session.
+    trigger_audit puts three of them in the rotation's path -- the audit
+    insert, the arbiter inference in the counter upsert, and the lookup
+    audit_probe calls -- and alter_trigger_function invalidates all of
+    them at once without taking a lock on any table.
+
+    The same schema is also the only place where rows arrive from inside
+    a trigger rather than from a statement pgbench sent: pgb_audit's
+    indexes are maintained from the after-trigger queue, and a deferred
+    constraint trigger reads each row back at commit time, through an
+    index a rebuild may have swapped since the insert.
+
+    None of it has been shown to catch anything yet.  It closes a shape
+    the suite was missing, which is not the same as a revert that
+    failed, and it carries the same "untested" status as the entries
+    above until one does.
+
 Duplicated upstream tests
 =========================
 
