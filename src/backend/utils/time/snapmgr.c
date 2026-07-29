@@ -290,6 +290,13 @@ GetTransactionSnapshot(void)
 		return HistoricSnapshot;
 	}
 
+	/*
+	 * A snapshot is about to be taken, and nothing has been read with it
+	 * yet.  Time spent between the two is time for the world it describes to
+	 * stop being true.
+	 */
+	INJECTION_POINT("transaction-snapshot-taken", NULL);
+
 	/* First call in transaction? */
 	if (!FirstSnapshotSet)
 	{

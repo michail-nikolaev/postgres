@@ -115,6 +115,7 @@
 #include <limits.h>
 
 #include "access/htup_details.h"
+#include "common/pg_prng.h"
 #include "access/xact.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
@@ -258,6 +259,7 @@ static InvalidationInfo *inplaceInvalInfo = NULL;
 
 /* GUC storage */
 int			debug_discard_caches = 0;
+double		debug_discard_caches_probability = 0.0;
 
 /*
  * Dynamically-registered callback functions.  Current implementation
@@ -929,6 +931,12 @@ InvalidateSystemCaches(void)
 void
 AcceptInvalidationMessages(void)
 {
+	/*
+	 * Reached before anything is invalidated, so time spent here is time this
+	 * backend spends with a catalog it has already been told is stale.
+	 */
+	INJECTION_POINT("accept-invalidation-messages", NULL);
+
 #ifdef USE_ASSERT_CHECKING
 	/* message handlers shall access catalogs only during transactions */
 	if (IsTransactionState())
@@ -967,7 +975,18 @@ AcceptInvalidationMessages(void)
 	{
 		static int	recursion_depth = 0;
 
-		if (recursion_depth < debug_discard_caches)
+		/*
+		 * debug_discard_caches flushes at every opportunity, which finds
+		 * cache-flush hazards thoroughly and runs about a hundred times
+		 * slower -- too slow to point at a workload.  The probabilistic form
+		 * covers the same hazards at a rate that can be left on while one
+		 * runs, which is what a stress test needs: rare enough not to change
+		 * what is being tested, often enough to land on it eventually.
+		 */
+		if (recursion_depth < debug_discard_caches ||
+			(recursion_depth == 0 && debug_discard_caches_probability > 0.0 &&
+			 pg_prng_double(&pg_global_prng_state) <
+			 debug_discard_caches_probability))
 		{
 			recursion_depth++;
 			InvalidateSystemCachesExtended(true);

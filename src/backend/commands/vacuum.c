@@ -1143,6 +1143,14 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 
 	Assert(TransactionIdIsNormal(cutoffs->OldestXmin));
 
+	/*
+	 * The horizon has been decided and nothing has been removed on the
+	 * strength of it yet.  A concurrent index build that this horizon was
+	 * allowed to advance past has until the end of the vacuum to be wrong
+	 * about, which is the shape of the CONCURRENTLY-versus-xmin bugs.
+	 */
+	INJECTION_POINT("vacuum-cutoffs-computed", NULL);
+
 	/* Acquire OldestMxact */
 	cutoffs->OldestMxact = GetOldestMultiXactId();
 	Assert(MultiXactIdIsValid(cutoffs->OldestMxact));

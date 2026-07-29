@@ -92,6 +92,7 @@
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/injection_point.h"
 
 #define RELCACHE_INIT_FILEMAGIC		0x573266	/* version ID value */
 
@@ -1290,6 +1291,13 @@ retry:
 	 * for the !insertIt case.  For the insertIt case, RelationCacheInsert()
 	 * will enroll this relation in ordinary relcache invalidation processing,
 	 */
+	/*
+	 * The catalogs have been read and the entry is not installed yet, which
+	 * is where an invalidation arriving for this relation has to be noticed
+	 * rather than missed -- the check just below is what notices it.
+	 */
+	INJECTION_POINT("relcache-build-catalogs-read", NULL);
+
 	if (in_progress_list[in_progress_offset].invalidated)
 	{
 		RelationDestroyRelation(relation, false);
@@ -4957,6 +4965,13 @@ RelationGetIndexList(Relation relation)
 		relation->rd_replidindex = InvalidOid;
 	relation->rd_indexvalid = true;
 	MemoryContextSwitchTo(oldcxt);
+
+	/*
+	 * The caller now holds a list of index OIDs and will go on to open them
+	 * one by one.  Nothing keeps an index from being dropped in between --
+	 * on a standby, replay does not wait for the lock this backend holds.
+	 */
+	INJECTION_POINT("relation-index-list-built", NULL);
 
 	/* Don't leak the old list, if there is one */
 	list_free(oldlist);
