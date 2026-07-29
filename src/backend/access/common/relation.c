@@ -28,6 +28,7 @@
 #include "storage/lock.h"
 #include "utils/inval.h"
 #include "utils/syscache.h"
+#include "utils/injection_point.h"
 
 
 /* ----------------
@@ -54,6 +55,13 @@ relation_open(Oid relationId, LOCKMODE lockmode)
 	/* Get the lock before trying to open the relcache entry */
 	if (lockmode != NoLock)
 		LockRelationOid(relationId, lockmode);
+
+	/*
+	 * The lock is held but nothing has been read yet, so the descriptor built
+	 * below reflects whatever the catalog says now.  That is the window a
+	 * concurrent catalog change has to be caught in.
+	 */
+	INJECTION_POINT("relation-open-after-lock", NULL);
 
 	/* The relcache does all the real work... */
 	r = RelationIdGetRelation(relationId);
