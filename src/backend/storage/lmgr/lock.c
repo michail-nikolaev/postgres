@@ -50,6 +50,7 @@
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
+#include "utils/injection_point.h"
 
 
 /* GUC variables */
@@ -942,6 +943,15 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		else
 			return LOCKACQUIRE_ALREADY_HELD;
 	}
+
+	/*
+	 * The lock is not held yet and is about to be requested for real.
+	 * Sleeping here changes who is ahead of whom in the queue, which is what
+	 * decides the order in which two commands reach a relation.  Sleeps here
+	 * are kept short deliberately: a request that dawdles at the head of a
+	 * queue stalls every writer behind it.
+	 */
+	INJECTION_POINT("lock-before-acquire", NULL);
 
 	/*
 	 * We don't acquire any other heavyweight lock while holding the relation

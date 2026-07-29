@@ -25,6 +25,7 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/inval.h"
+#include "utils/injection_point.h"
 
 
 /*
@@ -976,6 +977,13 @@ WaitForLockersMultiple(List *locktags, LOCKMODE lockmode, bool progress)
 
 		pgstat_progress_update_multi_param(3, index, values);
 	}
+
+	/*
+	 * Every locker this waited for has gone.  A concurrent index build
+	 * decides its next phase on the strength of that, so the gap between
+	 * here and the decision is one the build has to be right across.
+	 */
+	INJECTION_POINT("wait-for-lockers-done", NULL);
 
 	list_free_deep(holders);
 }

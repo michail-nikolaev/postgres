@@ -73,6 +73,7 @@
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 #include "utils/wait_event.h"
+#include "utils/injection_point.h"
 
 /*
  *	User-tweakable parameters
@@ -1377,6 +1378,9 @@ RecordTransactionCommit(void)
 													 &RelcacheInitFileInval);
 	wrote_xlog = (XactLastRecEnd != 0);
 
+	/* Loaded before the critical section, where it cannot be looked up */
+	INJECTION_POINT_LOAD("commit-before-clog-update");
+
 	/*
 	 * If we haven't been assigned an XID yet, we neither can, nor do we want
 	 * to write a COMMIT record.
@@ -1542,6 +1546,14 @@ RecordTransactionCommit(void)
 		forceSyncCommit || nrels > 0)
 	{
 		XLogFlush(XactLastRecEnd);
+
+		/*
+		 * The flush above is what lets a decoder see this commit, and the
+		 * CLOG update below is what lets an ordinary snapshot see it.  A
+		 * snapshot built from decoded commits in between reads this
+		 * transaction as neither running nor committed.
+		 */
+		INJECTION_POINT_CACHED("commit-before-clog-update", NULL);
 
 		/*
 		 * Now we may update the CLOG, if we wrote a COMMIT record above
