@@ -1541,6 +1541,7 @@ init_conflict_slot_xmin(void)
 	Assert(MyReplicationSlot &&
 		   !TransactionIdIsValid(MyReplicationSlot->data.xmin));
 
+	LWLockAcquire(ReplicationSlotControlLock, LW_EXCLUSIVE);
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 
 	xmin_horizon = GetOldestSafeDecodingTransactionId(false);
@@ -1553,6 +1554,7 @@ init_conflict_slot_xmin(void)
 	ReplicationSlotsComputeRequiredXmin(true);
 
 	LWLockRelease(ProcArrayLock);
+	LWLockRelease(ReplicationSlotControlLock);
 
 	/* Write this slot to disk */
 	ReplicationSlotMarkDirty();
