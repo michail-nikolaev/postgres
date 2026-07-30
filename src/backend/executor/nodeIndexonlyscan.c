@@ -181,11 +181,11 @@ IndexOnlyNext(IndexOnlyScanState *node)
 				elog(ERROR, "Failed to check visibility for tuple");
 
 				/*
-				 * In case of compilers that don't undertand that elog(ERROR)
-				 * doens't exit, but which do have a functional
+				 * In case of compilers that don't understand that
+				 * elog(ERROR) doesn't return, but which do have a functional
 				 * -Wimplicit-fallthrough warning:
 				 */
-				/* fallthrough */
+				pg_fallthrough;
 			case TMVC_MaybeVisible:
 				{
 					/*
