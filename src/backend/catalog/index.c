@@ -2168,6 +2168,9 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 	 * lock (see comments in RemoveRelations), and a non-concurrent DROP is
 	 * more efficient.
 	 */
+	Assert(get_rel_persistence(indexId) != RELPERSISTENCE_TEMP ||
+		   (!concurrent && !concurrent_lock_mode));
+
 	/*
 	 * To drop an index safely, we must grab exclusive lock on its parent
 	 * table.  Exclusive lock on the index alone is insufficient because
