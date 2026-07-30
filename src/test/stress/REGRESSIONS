@@ -1783,12 +1783,16 @@ revert the fix and the suite fails.
               kind that does happen several times a minute.  That is
               where an unaided reproduction should be attempted next.
 
-Another open bug, and a hole in its proposed fix
-===============================================
+Another bug fixed on this branch only, and a hole that was in the fix
+=====================================================================
 
   "[SP-]GiST IOS visibility bug", Matthias van de Meent
   https://www.postgresql.org/message-id/flat/CAEze2WgH13m=MDST58KLo-NkZpbwBEt4xNWcgtghWBwRj3J0+A@mail.gmail.com
   commitfest 5721, needs review
+
+  Still open in master.  The v02 series from the thread is carried on
+  this branch, together with the correction below, so the scenario runs
+  with the rest of the catalogue and what it guards is the revert.
 
       GiST and SP-GiST index scans do not interlock with their own index
       vacuum the way btree does.  A scan reads a page, queues the TIDs on
@@ -1803,24 +1807,31 @@ Another open bug, and a hole in its proposed fix
               the scan and a read of the same table run under one
               repeatable-read snapshot, so they can only disagree if the
               scan returned something that is not there.
-      reproduce: PG_TEST_EXTRA='stress_open_bugs=1'.  Tagged open-bug,
-              so it is skipped by default and soak leaves it alone.
+      revert: either the v02 commits on this branch -- "Expose visibility
+              checking shim for index usage" and the GiST and SP-GiST
+              ones -- or, for the SP-GiST half alone, "SP-GiST: check the
+              visibility of the tuple that is actually returned".
       status: CATCHES, 5 failures in 5 runs at stress_seconds=20 against
-              master, on both access methods, as
+              unpatched master, on both access methods, as
 
                 index-only scan on pgb_ios_gist returned 7 rows the heap
                 does not have, out of 207: {"(139,1)","(62,3)"}
 
-      what it found in the fix: with the v02 series applied, GiST is
-              clean and SP-GiST still leaks -- 6 runs in 6, sorted and
-              unsorted alike.  spgLeafTest() checks the visibility of
-              item->heapPtr and attributes the answer to the tuple it
-              then returns, which is leafTuple->heapPtr.  Those are the
-              same only when the search item is itself a leaf; for a
-              descent from an inner tuple, item->heapPtr holds an index
-              block pointer, so the visibility map is consulted for an
-              index block as though it were a heap block.  Checking
-              leafTuple->heapPtr instead makes 4 runs in 4 clean.
+              and 4 runs in 4 clean with the fix and the correction, both
+              at stress_seconds=20 and at the default duration.
+
+      what it found in the fix: with the v02 series applied as posted,
+              GiST went clean and SP-GiST still leaked -- 6 runs in 6,
+              sorted and unsorted alike.  spgLeafTest() checked the
+              visibility of item->heapPtr and attributed the answer to
+              the tuple it then returns, which is leafTuple->heapPtr.
+              Those are the same only when the search item is itself a
+              leaf; for a descent from an inner tuple, item->heapPtr
+              holds an index block pointer, so the visibility map was
+              consulted for an index block as though it were a heap
+              block.  Checking leafTuple->heapPtr instead makes 4 runs in
+              4 clean.  That correction is a commit of its own on this
+              branch and has been sent to the thread.
 
               The author's own isolation tests pass against the
               uncorrected patch, and the reason looks like table size:

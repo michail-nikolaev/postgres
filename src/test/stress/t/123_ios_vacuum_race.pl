@@ -25,22 +25,18 @@
 # so they can only disagree if the scan returned something that is not
 # there.
 #
+# The fix is carried on this branch -- the v02 series from the thread,
+# plus a correction to the SP-GiST half of it, which checked the
+# visibility of one TID and attributed the answer to another.  Reverting
+# either brings the failure back; see REGRESSIONS.
+#
 # https://www.postgresql.org/message-id/flat/CAEze2WgH13m=MDST58KLo-NkZpbwBEt4xNWcgtghWBwRj3J0+A@mail.gmail.com
 use strict;
 use warnings FATAL => 'all';
 
-use Test::More;
-
 use FindBin;
 use lib $FindBin::RealBin;
 use Stress::Run;
-
-# The bug is open, so this fails against master by design.  $COLLECT
-# means soak is reading the spec rather than running it; skipping then
-# would take the whole soak run with it.
-plan skip_all => 'open-bug reproducers not requested (stress_open_bugs=1)'
-  unless $Stress::Run::COLLECT
-  || ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_open_bugs=1\b/;
 
 run_scenario(
 	'ios_vacuum_race',
@@ -53,5 +49,4 @@ run_scenario(
 		checks => ['balances'],
 		env => 'standalone',
 		clients => 20,
-		tags => ['open-bug'],
 	});

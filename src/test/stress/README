@@ -152,9 +152,12 @@ fails on purpose.  Those are skipped unless
 
 which keeps the suite green for the failures nobody expects, and keeps
 soak from walking into one.  The tag comes off when the fix lands -- or,
-as with the logical decoding race in REGRESSIONS, when the proposed fix
-is carried on this branch, at which point the scenario becomes an
-ordinary guard against reverting it.
+as with the logical decoding race and the [SP-]GiST index-only scan bug
+in REGRESSIONS, when the proposed fix is carried on this branch, at
+which point the scenario becomes an ordinary guard against reverting it.
+
+No scenario is tagged at the moment, both having gone that way.  The
+machinery stays for the next one.
 
 Running the tests
 =================
