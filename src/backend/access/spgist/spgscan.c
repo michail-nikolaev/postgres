@@ -591,7 +591,7 @@ spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,
 		{
 			Assert(item != NULL);
 			vischeck = table_index_vischeck_tuple(tableRel, &so->vmbuf,
-												  &item->heapPtr);
+												  &leafTuple->heapPtr);
 		}
 
 		/* item passes the scankeys */
