@@ -7316,10 +7316,11 @@ get_actual_variable_endpoint(Relation heapRel,
 				elog(ERROR, "Failed to check visibility for tuple");
 
 				/*
-				 * In case of compilers that don't undertand that elog(ERROR)
-				 * doens't exit, and which have -Wimplicit-fallthrough:
+				 * In case of compilers that don't understand that
+				 * elog(ERROR) doesn't return, and which have
+				 * -Wimplicit-fallthrough:
 				 */
-				/* fallthrough */
+				pg_fallthrough;
 			case TMVC_MaybeVisible:
 				{
 					/* Rats, we have to visit the heap to check visibility */
