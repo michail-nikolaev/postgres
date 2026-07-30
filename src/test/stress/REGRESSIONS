@@ -94,7 +94,8 @@ heapallindexed catches directly.
               from inside the pgbench script.  Reverting is therefore a
               calibration exercise -- does this suite catch it too, and
               how much faster -- rather than a gap being closed.
-      status: CATCHES, 2 failures in 8 runs at stressval 8, as
+      status: WAS CATCHING, and no longer does -- see below.  Recorded
+              at the time as 2 failures in 8 runs at stressval 8, as
 
                 ERROR:  heap tuple (0,94) from table "pgbench_history"
                 lacks matching index tuple within index
@@ -121,6 +122,36 @@ heapallindexed catches directly.
               better than this suite here and must not be retired on the
               strength of index_build_churn.  See the note in
               "Duplicated upstream tests".
+
+      no longer reproducible: building the revert pairs at the end of this
+              branch turned up that this one does not fail any more.  0
+              failures in 22 runs at stressval 8, where 2 in 8 would make
+              22 clean runs a one-in-six-hundred coincidence.
+
+              The revert is not at fault, and this was established rather
+              than assumed.  A probe on the disabled branch -- an elog
+              where the "goto retry" used to be -- fires 181 times in a
+              single run: 145 times for pgbench_history, whose index list
+              is the thing that has to go stale for the bug to bite, and
+              36 times for pgb_history_delta_idx itself.  So the window is
+              being entered constantly and the invalidation is being
+              ignored, exactly as before the fix, and amcheck still passes.
+
+              What that leaves is that ignoring a mid-build invalidation
+              no longer has the consequence it had in 2021.  The likely
+              reason -- stated as a hypothesis, not a conclusion, because
+              it has not been chased down -- is that the index list is
+              built on demand by RelationGetIndexList() and invalidated
+              through rd_indexvalid, separately from the descriptor
+              RelationBuildDesc() assembles, so a stale descriptor
+              self-heals before anything uses the list.  If that is right
+              the retry is defence in depth on this tree, and confirming
+              it means finding which commit made it so.
+
+              No revert pair is committed for this entry, since a pair
+              whose first half does not fail is worse than none.  It is
+              the one entry of the twenty-four where that happened, and
+              the pairs found it, which is what they are for.
 
   3cd9c3b9219  2021-10-23  Fix CREATE INDEX CONCURRENTLY for the newest
                            prepared transactions.
