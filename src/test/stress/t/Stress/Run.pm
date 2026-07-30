@@ -507,7 +507,13 @@ sub run_one
 	# The environment decides how the cluster is initialized: a standby
 	# or a subscriber needs the primary set up for replication before it
 	# can connect at all.
-	$node->init(%{ $env->{init} // {} });
+	# A modifier may need something decided at initdb time -- data
+	# checksums are written into the cluster, not set by a GUC -- so its
+	# init options are merged with the environment's.
+	my %init = (%{ $env->{init} // {} },
+		%{ $spec->{modifier} ? ($MODIFIERS{ $spec->{modifier} }->{init} // {})
+			: {} });
+	$node->init(%init);
 
 	# How long to wait before deciding a statement is never getting its
 	# lock.  The default is generous because a concurrent build waits for
@@ -691,6 +697,12 @@ sub run_one
 			note "modifier '$mod': $name = "
 			  . (defined $got ? $got : '(unreadable)');
 		}
+
+		# An initdb-time decision leaves no conf line to read back, so
+		# report the state it produced instead.
+		note "modifier '$mod': data_checksums = "
+		  . $node->safe_psql('postgres', 'SHOW data_checksums')
+		  if $MODIFIERS{$mod}->{init};
 	}
 
 	# Settings a build may not accept.  Applied here rather than in

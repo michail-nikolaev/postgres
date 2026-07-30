@@ -113,7 +113,10 @@ our %MODIFIERS = (
 
 	# Durability actually engaged.  A test cluster runs with fsync off, so
 	# every scenario in this suite has always been testing the code path
-	# where the WAL writes never wait for the disk.
+	# where the WAL writes never wait for the disk.  full_page_writes is
+	# pinned rather than changed -- its boot value is already on -- so that
+	# this stays the durable end of the axis whatever the default becomes;
+	# the variation in the other direction is no_full_page_writes.
 	durable => {
 		# Slow enough that the lock timeout has to be scaled with it.
 		slow => 1,
@@ -198,6 +201,23 @@ our %MODIFIERS = (
 			'max_wal_size = 48MB',
 			'checkpoint_completion_target = 0.1',
 		],
+	},
+
+	# Data checksums off.  initdb in this tree turns them on, so every
+	# scenario has been reading and writing pages with a checksum computed
+	# and verified on each one; without them that whole path is skipped.
+	# It is an initdb decision rather than a GUC, which is why a modifier
+	# can carry init options.
+	no_checksums => {
+		init => { no_data_checksums => 1 },
+	},
+
+	# Full page writes off.  The boot value is on and nothing here changed
+	# it, so the path this suite has never taken is the one where a page
+	# modified after a checkpoint is not written to WAL in full -- which
+	# is a different WAL record stream, and a different amount of it.
+	no_full_page_writes => {
+		conf => [ 'full_page_writes = off', ],
 	},
 
 	# Asynchronous IO turned off altogether.  io_method defaults to
@@ -1246,6 +1266,57 @@ our %SCHEMA = (
 			END $fn$;
 		),
 		tables => ['pgb_bmskip'],
+	},
+
+	# The helper that drives the data checksum transitions.
+	#
+	# Enabling checksums is not a switch: a background worker walks every
+	# page of every relation, reads it, computes a checksum and writes it
+	# back, and the cluster reports "inprogress-on" until it finishes.
+	# That is a whole-database rewrite running against the rotation's own
+	# rewrites, which nothing else in this suite reaches.
+	#
+	# The helper flips to whichever state the cluster is not in, so every
+	# turn does real work rather than finding itself already there, and
+	# waits for the worker before returning so two transitions are never
+	# in flight at once.
+	data_checksum_helper => {
+		setup => q(
+			CREATE FUNCTION pgb_flip_data_checksums() RETURNS text
+			LANGUAGE plpgsql AS $fn$
+			DECLARE
+				state text;
+				target text;
+			BEGIN
+				SELECT current_setting('data_checksums') INTO state;
+
+				-- Mid-transition: let it finish rather than stack another.
+				IF state NOT IN ('on', 'off') THEN
+					RETURN state;
+				END IF;
+
+				IF state = 'on' THEN
+					PERFORM pg_disable_data_checksums();
+					target := 'off';
+				ELSE
+					-- cost_delay 0 and a high cost_limit: the point is to
+					-- finish inside the run, not to be gentle about it.
+					PERFORM pg_enable_data_checksums(0, 10000);
+					target := 'on';
+				END IF;
+
+				-- Wait for the worker, bounded: a run that ends mid-flip
+				-- leaves the cluster in an inprogress state, which the
+				-- next turn would then decline to touch.
+				FOR i IN 1..600 LOOP
+					EXIT WHEN current_setting('data_checksums') = target;
+					PERFORM pg_sleep(0.05);
+				END LOOP;
+
+				RETURN current_setting('data_checksums');
+			END $fn$;
+		),
+		tables => [],
 	},
 
 	# Two tables shaped for an index-only scan to race a vacuum, one per
@@ -3093,6 +3164,28 @@ our %DDL = (
 			return map {
 				{ table => $_, stmts => ["VACUUM (TRUNCATE false) $_;"] }
 			} (qw(pgb_ios_gist pgb_ios_spgist));
+		},
+	},
+
+	# Data checksums turned off and on again while the workload runs.
+	#
+	# Enabling them is not a switch: a background worker walks every page
+	# of every relation, reads it, computes a checksum and writes it back,
+	# and the cluster sits in an "inprogress-on" state until it finishes.
+	# That is a whole-database rewrite running concurrently with the
+	# rotation's own rewrites, which is the same shape as everything else
+	# here and is reached by nothing else in the suite.
+	#
+	# Aimed at the cluster rather than a relation, so it cannot be gated
+	# per-table the way the rest of the rotation is.
+	toggle_data_checksums => {
+		requires => { schema => ['data_checksum_helper'] },
+		solo => 1,
+		variants => sub {
+			return ({
+				table => 'pg_database',
+				stmts => ['SELECT pgb_flip_data_checksums();']
+			});
 		},
 	},
 

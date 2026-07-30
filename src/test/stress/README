@@ -192,6 +192,14 @@ checks now pin the GUCs they depend on and assert the plan they actually
 got, with EXPLAIN (FORMAT JSON) so the whole plan is examined rather than
 its first line.
 
+Two of them are corrections rather than additions.  full_page_writes has
+a boot value of on and nothing here ever changed it, so the path this
+suite had never taken was the one with them off, not on; and initdb in
+this tree creates clusters with data checksums, so every page read and
+written has been checksummed and the untested path is again the other
+one.  Checksums are decided at initdb time rather than by a GUC, which is
+why a modifier can carry init options as well as conf.
+
 Asynchronous IO is one of these.  io_method defaults to 'worker' in this
 tree, so the synchronous path is the one nothing exercises unless it asks
 -- the reverse of what one might expect -- and io_uring is a wholly
