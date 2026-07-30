@@ -49,7 +49,7 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 
 our @EXPORT_OK =
-  qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS
+  qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS %MODIFIERS
   stress_repack_tolerated stress_rollback_prepared);
 
 =pod
@@ -81,6 +81,147 @@ head of a queue stalls every writer behind it, which ends the run in a
 cascade that tests nothing.
 
 =cut
+
+=pod
+
+=head2 %MODIFIERS
+
+A modifier is a set of GUCs at values that change how the server does
+its work without changing what the work produces.  Where a chaos profile
+widens a window, a modifier moves the whole run onto a different code
+path: everything spills instead of fitting in memory, the planner picks a
+different node, WAL is really flushed, a vacuum freezes at once.
+
+The invariants have to hold under every one of them.  That is the whole
+claim, and it is what makes them cheap coverage: a modifier costs no new
+scenario, no new check, and no new plugin combination, and every scenario
+in the catalogue can be run under each.
+
+Two rules, both learned the hard way in this file.  A modifier may not
+change results -- so nothing here touches isolation level, or a GUC that
+decides what a query returns rather than how it gets there.  And a
+modifier must not silently disable the thing a scenario exists to test:
+turning off enable_indexscan would leave the index-only scan scenario
+comparing two sequential scans and passing for the wrong reason, which is
+why those checks now pin the GUCs they need and assert the plan they got.
+
+=cut
+
+our %MODIFIERS = (
+	# The default: whatever the environment already set.
+	none => {},
+
+	# Durability actually engaged.  A test cluster runs with fsync off, so
+	# every scenario in this suite has always been testing the code path
+	# where the WAL writes never wait for the disk.
+	durable => {
+		conf => [
+			'fsync = on',
+			'full_page_writes = on',
+			'wal_log_hints = on',
+			'wal_compression = on',
+			'synchronous_commit = on',
+		],
+	},
+
+	# Nothing fits in memory.  Sorts spill, hash aggregates spill, hash
+	# joins batch, and the index builds the rotation runs use their
+	# external path rather than an in-memory one -- which is a different
+	# tuplesort code path being driven against a live workload.
+	spill => {
+		conf => [
+			'work_mem = 64kB',
+			'maintenance_work_mem = 1MB',
+			'hash_mem_multiplier = 1.0',
+			'temp_buffers = 800kB',
+		],
+	},
+
+	# The planner denied its usual answers.  None of these changes a
+	# result; each moves the executor onto another node.  enable_indexscan
+	# is deliberately absent: it gates index-only scans too, and two
+	# scenarios depend on getting one.
+	other_plans => {
+		conf => [
+			'enable_seqscan = off',
+			'enable_hashagg = off',
+			'enable_hashjoin = off',
+			'enable_material = off',
+			'enable_memoize = off',
+			'enable_incremental_sort = off',
+			'enable_partition_pruning = off',
+		],
+	},
+
+	# Parallelism wherever it can be had.  The rotation's index builds and
+	# the checks' aggregates are what pick it up.
+	parallel => {
+		conf => [
+			'min_parallel_table_scan_size = 0',
+			'min_parallel_index_scan_size = 0',
+			'parallel_setup_cost = 0',
+			'parallel_tuple_cost = 0',
+			'max_parallel_workers_per_gather = 4',
+			'max_parallel_maintenance_workers = 4',
+		],
+	},
+
+	# Freezing and pruning as eagerly as possible, which is what decides
+	# whether a concurrent build's horizon is respected.
+	eager_vacuum => {
+		conf => [
+			'vacuum_freeze_min_age = 0',
+			'vacuum_freeze_table_age = 0',
+			'vacuum_multixact_freeze_min_age = 0',
+			'vacuum_cost_delay = 0',
+			'autovacuum_naptime = 1s',
+			'autovacuum_vacuum_threshold = 1',
+			'autovacuum_vacuum_scale_factor = 0.0',
+		],
+	},
+
+	# Buffers evicted and checkpoints taken constantly, so a rewrite's
+	# pages are written, evicted and read back rather than staying
+	# resident.
+	buffer_churn => {
+		conf => [
+			'shared_buffers = 1MB',
+			'bgwriter_delay = 10ms',
+			'bgwriter_lru_maxpages = 1000',
+			'checkpoint_timeout = 30s',
+			'max_wal_size = 48MB',
+			'checkpoint_completion_target = 0.1',
+		],
+	},
+
+	# Reads issued through different machinery, and toast compressed by
+	# the other algorithm.
+	#
+	# The compression setting is optional because it depends on how the
+	# server was built: an unsupported value in postgresql.conf stops it
+	# from starting, so anything build-dependent goes here and is applied
+	# afterwards, where the refusal can be caught.
+	io_variants => {
+		conf => [
+			'effective_io_concurrency = 16',
+			'maintenance_io_concurrency = 16',
+			'io_combine_limit = 8',
+		],
+		conf_optional => [ "default_toast_compression = 'lz4'", ],
+	},
+
+	# JIT for everything it can be used for.  Entirely optional: a build
+	# without LLVM accepts jit = on and ignores it, and the cost settings
+	# are meaningless there, so nothing is lost by trying.
+	jit_always => {
+		conf_optional => [
+			'jit = on',
+			'jit_above_cost = 0',
+			'jit_inline_above_cost = 0',
+			'jit_optimize_above_cost = 0',
+		],
+	},
+);
 
 our %CHAOS_POINTS = (
 	# The commit window: between the flush that lets a decoder see a
@@ -1027,6 +1168,7 @@ our %SCHEMA = (
 			DECLARE
 				bitmap_count bigint;
 				seq_count bigint;
+				plan text;
 			BEGIN
 				-- No qual and no columns on the scan node is what makes
 				-- the optimization applicable; the index condition does
@@ -1035,6 +1177,15 @@ our %SCHEMA = (
 				PERFORM set_config('enable_indexscan', 'off', true);
 				PERFORM set_config('enable_indexonlyscan', 'off', true);
 				PERFORM set_config('enable_bitmapscan', 'on', true);
+				-- Assert the shape rather than assume it: a bitmap heap
+				-- scan is the whole point, and a modifier could take it
+				-- away without anything noticing.
+				EXECUTE 'EXPLAIN (COSTS OFF, FORMAT JSON) '
+					'SELECT count(*) FROM pgb_bmskip WHERE b >= 0' INTO plan;
+				IF plan NOT LIKE '%%Bitmap Heap Scan%%' THEN
+					RAISE EXCEPTION 'not a bitmap heap scan: %', plan;
+				END IF;
+
 				SELECT count(*) INTO bitmap_count
 					FROM pgb_bmskip WHERE b >= 0;
 
@@ -1116,12 +1267,33 @@ our %SCHEMA = (
 				ios text[] := '{}';
 				heap text[];
 				extra text[];
+				plan text;
 			BEGIN
 				-- The cursor has to be an index-only scan for any of this
 				-- to mean anything.
+				-- enable_indexscan has to be pinned as well: it gates
+				-- index-only scan paths too, so a server-level modifier
+				-- that turned it off would leave this comparing a
+				-- sequential scan against a sequential scan and passing
+				-- for the wrong reason.
 				PERFORM set_config('enable_seqscan', 'off', true);
 				PERFORM set_config('enable_bitmapscan', 'off', true);
+				PERFORM set_config('enable_indexscan', 'on', true);
 				PERFORM set_config('enable_indexonlyscan', 'on', true);
+
+				-- Assert the shape rather than assume it.  If this is not
+				-- an index-only scan the comparison below is vacuous.
+				-- FORMAT JSON, so the whole plan arrives as one row: a
+				-- plain EXPLAIN INTO takes only the first line, which for
+				-- this query happens to be the scan and would have made
+				-- the test pass for the wrong reason.
+				EXECUTE format(
+					'EXPLAIN (COSTS OFF, FORMAT JSON) SELECT a FROM %I '
+					'ORDER BY a <-> point ''(0,0)''', p_table) INTO plan;
+				IF plan NOT LIKE '%%Index Only Scan%%' THEN
+					RAISE EXCEPTION
+						'not an index-only scan on %: %', p_table, plan;
+				END IF;
 
 				OPEN c NO SCROLL FOR EXECUTE format(
 					'SELECT a FROM %I ORDER BY a <-> point ''(0,0)''',

@@ -82,7 +82,7 @@ use FindBin;
 use Test::More;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS);
+use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS %MODIFIERS);
 
 our @EXPORT = qw(soak_enabled soak_run);
 
@@ -326,6 +326,12 @@ sub _invent
 	# nobody thought to pair.
 	my $chaos = _invent_chaos();
 
+	# How the server goes about its work.  A dimension of its own because
+	# it decides which code paths the same workload runs through -- whether
+	# sorts spill, whether WAL waits for the disk, which node the planner
+	# picks -- without changing what any of it produces.
+	my $modifier = _pick(sort keys %MODIFIERS);
+
 	return {
 		schema => \@schema,
 		indexes => \@indexes,
@@ -340,6 +346,7 @@ sub _invent
 		# as a scenario built to survive it; soak covers breadth.
 		ddl_concurrency => 1,
 		chaos => $chaos,
+		modifier => $modifier,
 		checks => [ _pick_some(1, 4, @checks) ],
 		env => $env,
 		clients => _pick(10, 20, 30),
@@ -541,6 +548,8 @@ sub _describe
 	$out .= " ddl_concurrency=$spec->{ddl_concurrency}"
 	  if defined $spec->{ddl_concurrency};
 	$out .= " args=$spec->{pgbench_args}" if $spec->{pgbench_args};
+	$out .= " modifier=$spec->{modifier}"
+	  if defined $spec->{modifier} && $spec->{modifier} ne 'none';
 	if (ref $spec->{chaos} eq 'HASH')
 	{
 		my $points = $spec->{chaos}->{points};

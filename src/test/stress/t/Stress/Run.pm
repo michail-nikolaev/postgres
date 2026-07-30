@@ -39,6 +39,8 @@ hand outside the harness.
   checks           invariants, checked during and/or after the run
   env              which cluster to run against
   conf             extra postgresql.conf lines for this scenario
+  modifier         a named set of GUCs that changes how the server works
+                   without changing what it produces; see %MODIFIERS
   pgbench_args     extra pgbench arguments
   clients          pgbench clients
   duration         seconds at stressval 1 (default 6)
@@ -61,7 +63,7 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use IPC::Run;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS
+use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS %MODIFIERS
   stress_rollback_prepared);
 
 our @EXPORT =
@@ -247,6 +249,9 @@ sub _validate
 	}
 	die "scenario names unknown env '$spec->{env}'"
 	  unless exists $ENVS{ $spec->{env} };
+
+	die "scenario names unknown modifier '$spec->{modifier}'"
+	  if defined $spec->{modifier} && !exists $MODIFIERS{ $spec->{modifier} };
 
 	if (defined $spec->{chaos} && !ref $spec->{chaos})
 	{
@@ -537,6 +542,16 @@ sub run_one
 	# has to be enabled before a client can prepare a transaction.
 	$node->append_conf('postgresql.conf', $_)
 	  for map { @{ $LOAD{$_}->{conf} // [] } } @{ $spec->{load} };
+	# Before the scenario's own conf, so a scenario that needs a
+	# particular setting still wins.
+	if (my $mod = $spec->{modifier})
+	{
+		$node->append_conf('postgresql.conf', $_)
+		  for @{ $MODIFIERS{$mod}->{conf} // [] };
+		note "modifier '$mod': "
+		  . scalar(@{ $MODIFIERS{$mod}->{conf} // [] })
+		  . ' settings';
+	}
 	$node->append_conf('postgresql.conf', $_) for @{ $spec->{conf} // [] };
 	# Chaos needs its settings in place before the server starts: the
 	# module's counters live in shared memory it allocates at startup.
@@ -634,6 +649,26 @@ sub run_one
 		vars => \%vars,
 		%vars,
 	};
+
+	# Settings a build may not accept.  Applied here rather than in
+	# postgresql.conf because an unsupported value there stops the server
+	# from starting, while ALTER SYSTEM gives an ordinary error that can be
+	# caught and reported.
+	if (my $mod = $spec->{modifier})
+	{
+		foreach my $setting (@{ $MODIFIERS{$mod}->{conf_optional} // [] })
+		{
+			my ($name, $value) = $setting =~ /^(\S+)\s*=\s*(.+)$/;
+			my $ok = eval {
+				$node->safe_psql('postgres',
+					"ALTER SYSTEM SET $name = $value");
+				1;
+			};
+			note "modifier '$mod': this build will not take $name"
+			  unless $ok;
+		}
+		$node->safe_psql('postgres', 'SELECT pg_reload_conf()');
+	}
 
 	# Attached before anything else runs, and before the environment
 	# builds its extra nodes, so that every part of the run is subject to

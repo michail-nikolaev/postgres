@@ -159,6 +159,46 @@ which point the scenario becomes an ordinary guard against reverting it.
 No scenario is tagged at the moment, both having gone that way.  The
 machinery stays for the next one.
 
+Modifiers
+=========
+
+A modifier is a named set of GUCs at values that change how the server
+does its work without changing what the work produces.  Where a chaos
+profile widens a window, a modifier moves the whole run onto another code
+path: everything spills instead of fitting in memory, the planner picks a
+different node, WAL is really flushed to disk, a vacuum freezes at once.
+They are in t/Stress/Plugins.pm under %MODIFIERS, and a scenario asks for
+one with
+
+  modifier => 'spill',
+
+which is orthogonal to its environment and to its chaos profile.  Soak
+treats it as a dimension of its own and prints it with the combination.
+
+The claim a modifier makes is that the invariants still hold, and that is
+what makes them cheap: a modifier costs no new scenario, no new check and
+no new plugin combination, and every scenario in the catalogue can be run
+under each one.  A modifier that breaks an invariant means either a bug or
+a badly chosen modifier, and which one is worth finding out.
+
+Two rules, both learned here.  A modifier may not change results, so
+nothing in the registry touches isolation level or any GUC that decides
+what a query returns rather than how it gets there.  And a modifier must
+not silently disable what a scenario exists to test: enable_indexscan
+gates index-only scan paths as well as plain ones, so turning it off
+server-wide would have left the index-only scan scenario comparing two
+sequential scans and passing for the wrong reason.  That is why those
+checks now pin the GUCs they depend on and assert the plan they actually
+got, with EXPLAIN (FORMAT JSON) so the whole plan is examined rather than
+its first line.
+
+Settings a build may not accept -- lz4 toast compression, the JIT costs --
+go in conf_optional rather than conf.  An unsupported value in
+postgresql.conf stops the server from starting; applied afterwards with
+ALTER SYSTEM it gives an ordinary error, which is caught and reported:
+
+  # modifier 'io_variants': this build will not take default_toast_compression
+
 Replaying a catch
 =================
 
