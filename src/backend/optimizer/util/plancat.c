@@ -1003,7 +1003,7 @@ infer_arbiter_indexes(PlannerInfo *root)
 		 * negatives, we require that we include in the set of inferred
 		 * indexes at least one index that is marked valid.
 		 */
-		if (!idxForm->indisready)
+		if (!idxForm->indisvalid)
 			continue;
 
 		/*
@@ -1201,8 +1201,7 @@ infer_arbiter_indexes(PlannerInfo *root)
 	list_free(indexRelList);
 	table_close(relation, NoLock);
 
-	/* We require at least one indisvalid index */
-	if (results == NIL || !foundValid)
+	if (results == NIL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("there is no unique or exclusion constraint matching the ON CONFLICT specification")));
