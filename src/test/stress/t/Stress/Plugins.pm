@@ -181,6 +181,16 @@ our %MODIFIERS = (
 	# Parallelism wherever it can be had.  The rotation's index builds and
 	# the checks' aggregates are what pick it up.
 	parallel => {
+		# Not with the expr_xid index.  That index's expression assigns a
+		# transaction id every time it is evaluated -- deliberately, to
+		# make a concurrent build keep up with one -- and amcheck has to
+		# evaluate it to fingerprint the index.  With parallelism forced
+		# even onto a one-row catalog scan, that evaluation happens while
+		# the leader is in parallel mode, where assigning an XID is an
+		# error.  The expression is declared IMMUTABLE and is not, which is
+		# the suite's own doing, so the pair is declared incompatible
+		# rather than blamed on the server.
+		conflicts => { indexes => ['expr_xid'] },
 		conf => [
 			'min_parallel_table_scan_size = 0',
 			'min_parallel_index_scan_size = 0',
@@ -209,6 +219,13 @@ our %MODIFIERS = (
 	# pages are written, evicted and read back rather than staying
 	# resident.
 	buffer_churn => {
+		# One megabyte is a hundred and twenty-eight buffers, and a backend
+		# pins several at a time, so this does not survive a scenario with
+		# hundreds of clients: the workload dies with "no unpinned buffers
+		# available", which is the modifier being wrong for the scenario
+		# rather than anything about the server.  Found by a soak that gave
+		# it to decoding_startup_race, which runs three hundred.
+		max_clients => 50,
 		# Slow enough that the lock timeout has to be scaled with it.
 		slow => 1,
 		# And not combinable with the cancellation environment.  That

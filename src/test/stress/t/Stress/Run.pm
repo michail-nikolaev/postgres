@@ -254,11 +254,30 @@ sub _validate
 
 	if (defined $spec->{modifier})
 	{
-		foreach my $cenv (
-			@{ $MODIFIERS{ $spec->{modifier} }->{conflicts}->{env} // [] })
+		my $m = $MODIFIERS{ $spec->{modifier} };
+
+		foreach my $cenv (@{ $m->{conflicts}->{env} // [] })
 		{
 			die "modifier '$spec->{modifier}' conflicts with env '$cenv'"
 			  if ($spec->{env} // '') eq $cenv;
+		}
+
+		die "modifier '$spec->{modifier}' cannot be combined with "
+		  . "clients '$spec->{clients}'"
+		  if $m->{max_clients} && ($spec->{clients} // 0) > $m->{max_clients};
+
+		foreach my $kind (sort keys %{ $m->{conflicts} // {} })
+		{
+			next if $kind eq 'env';
+			die "modifier '$spec->{modifier}' conflicts with unknown kind "
+			  . "'$kind'"
+			  unless exists $registry{$kind};
+			foreach my $cname (@{ $m->{conflicts}->{$kind} })
+			{
+				die "modifier '$spec->{modifier}' conflicts with "
+				  . "$kind '$cname'"
+				  if grep { $_ eq $cname } @{ $spec->{$kind} // [] };
+			}
 		}
 	}
 

@@ -170,6 +170,23 @@ sub _pick_some
 	return @shuffled[ 0 .. $n - 1 ];
 }
 
+# Whether a modifier can be used with this environment, client count and
+# index set.  Kept in one place because soak asks it twice -- once for a
+# combination it invented, once for a catalogue scenario it is decorating.
+sub _modifier_fits
+{
+	my ($name, $env, $clients, $indexes) = @_;
+	my $m = $MODIFIERS{$name};
+
+	return 0 if $m->{max_clients} && $clients > $m->{max_clients};
+	return 0 if grep { $_ eq $env } @{ $m->{conflicts}->{env} // [] };
+	foreach my $ci (@{ $m->{conflicts}->{indexes} // [] })
+	{
+		return 0 if grep { $_ eq $ci } @$indexes;
+	}
+	return 1;
+}
+
 # Invent a chaos profile: a few points from the pool, each with a
 # probability and a sleep range drawn inside the bounds that point
 # declares.  Those bounds are what keeps an invented profile from
@@ -337,9 +354,7 @@ sub _invent
 	# sorts spill, whether WAL waits for the disk, which node the planner
 	# picks -- without changing what any of it produces.
 	my $modifier = _pick(
-		grep {
-			!grep { $_ eq $env } @{ $MODIFIERS{$_}->{conflicts}->{env} // [] }
-		} sort keys %MODIFIERS);
+		grep { _modifier_fits($_, $env, 10, \@indexes) } sort keys %MODIFIERS);
 
 	return {
 		schema => \@schema,
@@ -526,13 +541,12 @@ sub soak_run
 			# catalogue under them is how it gets tested.
 			unless (defined $spec->{modifier})
 			{
-				my $senv = $spec->{env} // '';
 				$spec = {
 					%$spec,
 					modifier => _pick(
 						grep {
-							!grep { $_ eq $senv }
-							  @{ $MODIFIERS{$_}->{conflicts}->{env} // [] }
+							_modifier_fits($_, $spec->{env} // '',
+								$spec->{clients} // 0, $spec->{indexes} // [])
 						} sort keys %MODIFIERS)
 				};
 			}
