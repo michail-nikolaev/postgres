@@ -546,11 +546,25 @@ sub run_one
 	# particular setting still wins.
 	if (my $mod = $spec->{modifier})
 	{
-		$node->append_conf('postgresql.conf', $_)
-		  for @{ $MODIFIERS{$mod}->{conf} // [] };
-		note "modifier '$mod': "
-		  . scalar(@{ $MODIFIERS{$mod}->{conf} // [] })
-		  . ' settings';
+		my $need = $MODIFIERS{$mod}->{requires_build};
+
+		# A modifier can rest on how the server was built.  Where that
+		# setting is a postmaster GUC there is no catching it afterwards --
+		# an unsupported value stops the server from starting -- so the
+		# build is asked instead, and the modifier steps aside if the
+		# answer is no.
+		if ($need && !PostgreSQL::Test::Utils::check_pg_config($need))
+		{
+			note "modifier '$mod' skipped: this build has no $need";
+		}
+		else
+		{
+			$node->append_conf('postgresql.conf', $_)
+			  for @{ $MODIFIERS{$mod}->{conf} // [] };
+			note "modifier '$mod': "
+			  . scalar(@{ $MODIFIERS{$mod}->{conf} // [] })
+			  . ' settings';
+		}
 	}
 	$node->append_conf('postgresql.conf', $_) for @{ $spec->{conf} // [] };
 	# Chaos needs its settings in place before the server starts: the
@@ -649,6 +663,25 @@ sub run_one
 		vars => \%vars,
 		%vars,
 	};
+
+	# What the modifier actually achieved, read back from the running
+	# server rather than assumed.  Twice now a setting this suite believed
+	# it had applied was not applied at all and nothing failed -- the run
+	# simply did less than it said -- so a dimension that cannot be seen
+	# working is not worth having.
+	if (my $mod = $spec->{modifier})
+	{
+		my @names =
+		  map { /^(\S+)\s*=/ ? $1 : () }
+		  @{ $MODIFIERS{$mod}->{conf} // [] };
+
+		foreach my $name (@names)
+		{
+			my $got = eval { $node->safe_psql('postgres', "SHOW $name") };
+			note "modifier '$mod': $name = "
+			  . (defined $got ? $got : '(unreadable)');
+		}
+	}
 
 	# Settings a build may not accept.  Applied here rather than in
 	# postgresql.conf because an unsupported value there stops the server

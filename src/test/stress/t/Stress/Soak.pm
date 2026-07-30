@@ -360,9 +360,16 @@ sub _invent
 		# in setup buys nothing.
 		pgbench_scale => 1,
 		pgbench_args => "--protocol=$protocol",
+		# io_method is left to the modifier when the chosen one owns it.
+		# Both would otherwise write the setting and the scenario's own
+		# conf would quietly win, which is how a dimension stops varying
+		# without anything saying so.
 		conf => [
 			'plan_cache_mode = ' . _pick(@plan_modes),
-			'io_method = ' . _pick(@io_methods),
+			(
+				grep { /^io_method\b/ }
+				  @{ $MODIFIERS{$modifier}->{conf} // [] }
+			) ? () : ('io_method = ' . _pick(@io_methods)),
 		],
 		tags => ['soak'],
 	};

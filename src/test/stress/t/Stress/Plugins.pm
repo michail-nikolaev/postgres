@@ -194,6 +194,44 @@ our %MODIFIERS = (
 		],
 	},
 
+	# Asynchronous IO turned off altogether.  io_method defaults to
+	# 'worker' in this tree, so the synchronous path is the one no
+	# scenario exercises unless it asks -- the reverse of what one might
+	# expect.  Every one of these commands rewrites a relation and reads
+	# it back, so which machinery those reads go through is a dimension in
+	# its own right.
+	aio_sync => {
+		conf => [ 'io_method = sync', ],
+	},
+
+	# The worker method leaned on: more workers than the default, kept
+	# alive, and a deeper queue, so the reads really are handed off rather
+	# than completed inline.
+	aio_worker_busy => {
+		conf => [
+			'io_method = worker',
+			'io_min_workers = 4',
+			'io_max_workers = 8',
+			'io_max_concurrency = 128',
+			'io_worker_idle_timeout = 1s',
+			'io_worker_launch_interval = 1ms',
+		],
+	},
+
+	# io_uring, which completes in the issuing backend rather than through
+	# a worker and is a wholly separate implementation.  Gated on the
+	# build: io_method is a postmaster GUC, so an unsupported value cannot
+	# be caught after startup the way conf_optional handles the rest -- the
+	# server simply refuses to start.
+	aio_uring => {
+		requires_build => '#define USE_LIBURING 1',
+		conf => [
+			'io_method = io_uring',
+			'io_max_concurrency = 128',
+			'io_combine_limit = 16',
+		],
+	},
+
 	# Reads issued through different machinery, and toast compressed by
 	# the other algorithm.
 	#

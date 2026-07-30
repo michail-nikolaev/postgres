@@ -192,12 +192,37 @@ checks now pin the GUCs they depend on and assert the plan they actually
 got, with EXPLAIN (FORMAT JSON) so the whole plan is examined rather than
 its first line.
 
+Asynchronous IO is one of these.  io_method defaults to 'worker' in this
+tree, so the synchronous path is the one nothing exercises unless it asks
+-- the reverse of what one might expect -- and io_uring is a wholly
+separate implementation that completes in the issuing backend.  aio_sync,
+aio_worker_busy and aio_uring cover the three.  Soak leaves io_method
+alone when the modifier it picked already sets it, rather than letting the
+scenario conf quietly win.
+
+Every setting a modifier applies is read back from the running server and
+reported:
+
+  # modifier 'aio_uring': io_method = io_uring
+  # modifier 'aio_uring': io_max_concurrency = 128
+
+That is not decoration.  Twice a setting this suite believed it had
+applied was not applied at all, and nothing failed -- the runs simply did
+less than they claimed.  A dimension that cannot be seen working is not
+worth having.
+
 Settings a build may not accept -- lz4 toast compression, the JIT costs --
 go in conf_optional rather than conf.  An unsupported value in
 postgresql.conf stops the server from starting; applied afterwards with
 ALTER SYSTEM it gives an ordinary error, which is caught and reported:
 
   # modifier 'io_variants': this build will not take default_toast_compression
+
+That works because those are runtime settings.  A postmaster GUC cannot be
+caught that way -- an unsupported value stops the server from starting
+before anything can ask -- so a modifier resting on one declares
+requires_build instead, and steps aside when the build says no.  aio_uring
+does that with USE_LIBURING.
 
 Replaying a catch
 =================
