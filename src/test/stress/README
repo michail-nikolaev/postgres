@@ -159,6 +159,43 @@ which point the scenario becomes an ordinary guard against reverting it.
 No scenario is tagged at the moment, both having gone that way.  The
 machinery stays for the next one.
 
+Replaying a catch
+=================
+
+REGRESSIONS records, for each historical bug, whether reverting its fix
+has been shown to make this suite fail.  The commits at the end of this
+branch make those claims executable: each is a pair --
+
+  Revert "<fix>" to expose the bug
+  Reapply "<fix>"
+
+-- so that checking out the first of a pair gives a tree where the named
+scenario fails, and the second puts it back.  The tip is unaffected: the
+two commits are exact inverses, which is worth checking with
+
+  git diff <reapply-commit>~2 <reapply-commit>
+
+which must be empty.
+
+That is what makes them useful after the framework is refactored.  A
+scenario that still passes proves nothing on its own -- it may have
+stopped testing anything.  To confirm it still catches what it used to:
+
+  git checkout <the revert commit of the pair>
+  ninja -C build && meson test -C build --suite setup
+  meson test -C build --suite stress <scenario>
+
+and it must fail, with the message the revert commit's own message
+quotes.  Each revert commit names its scenario, the failure rate that
+was measured, and the symptom, so there is nothing to look up.
+
+Several of the reverts could not be produced with "git revert" -- the
+surrounding code has moved since the fix -- and were written by hand.
+Those commits say so and say what the hand-written change amounts to,
+because a hand-written revert that is subtly wrong produces a failure
+that means nothing, which happened more than once while this suite was
+being built.
+
 Running the tests
 =================
 
