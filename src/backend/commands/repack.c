@@ -2814,7 +2814,7 @@ restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot)
 			varlensz = VARSIZE_ANY(&chunk_header);
 
 			value = palloc(varlensz);
-			memcpy(value, &chunk_header, VARHDRSZ);
+			SET_VARSIZE(value, VARSIZE_ANY(&chunk_header));
 			BufFileReadExact(file, (char *) value + VARHDRSZ, varlensz - VARHDRSZ);
 
 			slot->tts_values[i] = PointerGetDatum(value);
