@@ -152,6 +152,17 @@ BitmapTableScanSetup(BitmapHeapScanState *node)
 		if (node->ss.ps.state->es_instrument & INSTRUMENT_IO)
 			flags |= SO_SCAN_INSTRUMENT;
 
+		/*
+		 * We can potentially skip fetching heap pages if we do not need any
+		 * columns of the table, either for checking non-indexable quals or
+		 * for returning data.  This test is a bit simplistic, as it checks
+		 * the stronger condition that there's no qual or return tlist at all.
+		 * But in most cases it's probably not worth working harder than that.
+		 */
+		if (node->ss.ps.plan->qual != NIL ||
+			node->ss.ps.plan->targetlist != NIL)
+			flags |= SO_NEED_TUPLES;
+
 		node->ss.ss_currentScanDesc =
 			table_beginscan_bm(node->ss.ss_currentRelation,
 							   node->ss.ps.state->es_snapshot,

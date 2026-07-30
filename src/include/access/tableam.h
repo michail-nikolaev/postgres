@@ -73,6 +73,13 @@ typedef enum ScanOptions
 
 	/* collect scan instrumentation */
 	SO_SCAN_INSTRUMENT = 1 << 11,
+
+	/*
+	 * At the discretion of the table AM, bitmap table scans may be able to
+	 * skip fetching a block from the table if none of the table data is
+	 * needed. If table data may be needed, set SO_NEED_TUPLES.
+	 */
+	SO_NEED_TUPLES = 1 << 12,
 }			ScanOptions;
 
 /*
