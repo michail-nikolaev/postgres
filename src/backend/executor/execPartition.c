@@ -891,12 +891,8 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 				INJECTION_POINT("exec-init-partition-after-get-partition-ancestors", NULL);
 
 
-				/*
-				 * The dedup e6d6e32f424 added is dropped here: a second index
-				 * whose parent has already been seen is matched again rather
-				 * than treated as unparented.
-				 */
-				if (ancestors != NIL)
+				if (ancestors != NIL &&
+					!list_member_oid(ancestors_seen, linitial_oid(ancestors)))
 				{
 					foreach_oid(parent_idx, rootResultRelInfo->ri_onConflictArbiterIndexes)
 					{
