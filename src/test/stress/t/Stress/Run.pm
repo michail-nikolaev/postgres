@@ -61,7 +61,6 @@ use Exporter 'import';
 use Test::More;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use IPC::Run;
 
 use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS %MODIFIERS
   stress_rollback_prepared);
@@ -252,6 +251,16 @@ sub _validate
 
 	die "scenario names unknown modifier '$spec->{modifier}'"
 	  if defined $spec->{modifier} && !exists $MODIFIERS{ $spec->{modifier} };
+
+	if (defined $spec->{modifier})
+	{
+		foreach my $cenv (
+			@{ $MODIFIERS{ $spec->{modifier} }->{conflicts}->{env} // [] })
+		{
+			die "modifier '$spec->{modifier}' conflicts with env '$cenv'"
+			  if ($spec->{env} // '') eq $cenv;
+		}
+	}
 
 	if (defined $spec->{chaos} && !ref $spec->{chaos})
 	{

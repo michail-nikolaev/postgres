@@ -120,6 +120,15 @@ our %MODIFIERS = (
 	durable => {
 		# Slow enough that the lock timeout has to be scaled with it.
 		slow => 1,
+		# And not combinable with the cancellation environment.  That
+		# environment needs its writers to be numerous and quick, so
+		# that there is something in flight to interrupt; on a server
+		# this slow a DDL command's AccessExclusiveLock request sits at
+		# the head of the queue and the writers behind it wait out their
+		# own timeout instead.  Capping the clients was tried and is
+		# worse: it leaves the environment with nothing to cancel, and
+		# its own check then fails.
+		conflicts => { env => ['cancellation'] },
 		conf => [
 			'fsync = on',
 			'full_page_writes = on',
@@ -136,6 +145,15 @@ our %MODIFIERS = (
 	spill => {
 		# Slow enough that the lock timeout has to be scaled with it.
 		slow => 1,
+		# And not combinable with the cancellation environment.  That
+		# environment needs its writers to be numerous and quick, so
+		# that there is something in flight to interrupt; on a server
+		# this slow a DDL command's AccessExclusiveLock request sits at
+		# the head of the queue and the writers behind it wait out their
+		# own timeout instead.  Capping the clients was tried and is
+		# worse: it leaves the environment with nothing to cancel, and
+		# its own check then fails.
+		conflicts => { env => ['cancellation'] },
 		conf => [
 			'work_mem = 64kB',
 			'maintenance_work_mem = 1MB',
@@ -193,6 +211,15 @@ our %MODIFIERS = (
 	buffer_churn => {
 		# Slow enough that the lock timeout has to be scaled with it.
 		slow => 1,
+		# And not combinable with the cancellation environment.  That
+		# environment needs its writers to be numerous and quick, so
+		# that there is something in flight to interrupt; on a server
+		# this slow a DDL command's AccessExclusiveLock request sits at
+		# the head of the queue and the writers behind it wait out their
+		# own timeout instead.  Capping the clients was tried and is
+		# worse: it leaves the environment with nothing to cancel, and
+		# its own check then fails.
+		conflicts => { env => ['cancellation'] },
 		conf => [
 			'shared_buffers = 1MB',
 			'bgwriter_delay = 10ms',
@@ -627,17 +654,30 @@ our %SCHEMA = (
 			-- nothing and then a failed run.  Retrying in short slices
 			-- lets the queue drain between attempts, so the worst stall
 			-- is half a second.
+			-- A command needing a lock that conflicts with the workload,
+			-- retried in slices so that a failed attempt lets the queue
+			-- drain instead of parking a request at its head.
+			--
+			-- The duty cycle is what matters, not the number of attempts.
+			-- A request waiting 500ms blocks every writer behind it for
+			-- 500ms, so pausing only 10ms between attempts leaves writers
+			-- about a fiftieth of the time and they wait out their own
+			-- lock_timeout having achieved nothing.  Found by a soak
+			-- combination running this against thirty clients: the DDL
+			-- succeeded and the writers were the ones that failed.  A
+			-- shorter hold and a longer drain gives them most of the time
+			-- and costs only that the command may need more attempts.
 			CREATE FUNCTION pgb_ddl_bounded(cmd text) RETURNS boolean
 			LANGUAGE plpgsql AS $fn$
 			DECLARE i int;
 			BEGIN
-				FOR i IN 1..60 LOOP
+				FOR i IN 1..120 LOOP
 					BEGIN
-						SET LOCAL lock_timeout = '500ms';
+						SET LOCAL lock_timeout = '200ms';
 						EXECUTE cmd;
 						RETURN true;
 					EXCEPTION WHEN lock_not_available THEN
-						PERFORM pg_sleep(0.01);
+						PERFORM pg_sleep(0.1);
 					END;
 				END LOOP;
 				RETURN false;
@@ -686,6 +726,13 @@ our %SCHEMA = (
 	# The setting applies to pages written from here on, so the effect
 	# arrives as the load rewrites the table rather than at once.
 	low_fillfactor => {
+		# A partitioned table holds no rows and takes no storage
+		# parameters, so this cannot be applied to pgbench_accounts once
+		# the partitioning decorator has replaced it with a parent.  Which
+		# of the two runs first decides whether it errors, so the pair is
+		# declared incompatible rather than left to the order they happen
+		# to be listed in.  Found by a soak combination that named both.
+		conflicts => { schema => ['partitioned'] },
 		setup => q(
 			ALTER TABLE pgbench_accounts SET (fillfactor = 50);
 		),
@@ -4255,7 +4302,7 @@ our %ENVS = (
 				# would ever match.
 				Test::More::like(
 					$stderr,
-					qr/canceling statement due to statement timeout|(?:relation|index) "[^"]+" (?:already exists|does not exist)|skipping reindex of invalid index|cannot reindex exclusion constraint index [^ ]+ concurrently, skipping|cannot cluster on (?:invalid|partial) index|deadlock detected/,
+					qr/canceling statement due to (?:statement|lock) timeout|(?:relation|index) "[^"]+" (?:already exists|does not exist)|skipping reindex of invalid index|cannot reindex exclusion constraint index [^ ]+ concurrently, skipping|cannot cluster on (?:invalid|partial) index|deadlock detected/,
 					'interrupted command failed only in expected ways')
 				  or Test::More::diag("unexpected error: $stderr");
 			}

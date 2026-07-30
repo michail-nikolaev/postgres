@@ -45,6 +45,12 @@ and takes these further settings:
                           catalogue scenarios that do not choose their
                           own.
 
+Every combination gets a modifier, invented or catalogue, unless the
+scenario names one itself.  A modifier does not change what the workload
+produces, so a catalogue scenario running under one is still testing what
+it was written to test -- and whether that holds is exactly the claim
+modifiers make.
+
 The last one turns a soak into a survey.  At stress_seconds=1 a
 combination costs what its cluster costs to build and nothing more, so
 a slice covers several times as many of them -- enough to find the ones
@@ -330,7 +336,10 @@ sub _invent
 	# it decides which code paths the same workload runs through -- whether
 	# sorts spill, whether WAL waits for the disk, which node the planner
 	# picks -- without changing what any of it produces.
-	my $modifier = _pick(sort keys %MODIFIERS);
+	my $modifier = _pick(
+		grep {
+			!grep { $_ eq $env } @{ $MODIFIERS{$_}->{conflicts}->{env} // [] }
+		} sort keys %MODIFIERS);
 
 	return {
 		schema => \@schema,
@@ -349,7 +358,18 @@ sub _invent
 		modifier => $modifier,
 		checks => [ _pick_some(1, 4, @checks) ],
 		env => $env,
-		clients => _pick(10, 20, 30),
+		# Ten, because the invented combinations run at scale 1 and a
+		# scale-1 pgbench has exactly one pgbench_branches row that every
+		# transaction updates.  Twenty or thirty clients serialize on that
+		# row, and once the queue is long enough any DDL command that wants
+		# a conflicting lock turns it into a cascade: the writers wait out
+		# their own lock_timeout and the run reports a starvation that says
+		# nothing about the server.  REGRESSIONS records the same thing
+		# happening to partitioned_pgbench, which settled on ten clients
+		# for the same reason.  Soak went on inventing thirty until a
+		# combination of add_validate_constraint and thirty clients failed
+		# four runs in five.
+		clients => 10,
 		# Always the smallest scale.  A larger one is a real dimension --
 		# it is what makes an index multi-level -- but it belongs in a
 		# scenario built for it, repack_dml_s50, not here.  Inventing it
@@ -497,6 +517,24 @@ sub soak_run
 				&& ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_chaos=/)
 			{
 				$spec = { %$spec, chaos => _invent_chaos() };
+			}
+
+			# And a modifier, for the same reason.  A modifier is
+			# outcome-neutral by definition, so a catalogue scenario can
+			# take one without its invariants meaning anything different --
+			# which is the whole claim modifiers make, and running the
+			# catalogue under them is how it gets tested.
+			unless (defined $spec->{modifier})
+			{
+				my $senv = $spec->{env} // '';
+				$spec = {
+					%$spec,
+					modifier => _pick(
+						grep {
+							!grep { $_ eq $senv }
+							  @{ $MODIFIERS{$_}->{conflicts}->{env} // [] }
+						} sort keys %MODIFIERS)
+				};
 			}
 		}
 		else
