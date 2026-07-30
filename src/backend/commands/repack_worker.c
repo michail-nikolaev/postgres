@@ -300,7 +300,7 @@ repack_cleanup_logical_decoding(LogicalDecodingContext *ctx)
 		ExecDropSingleTupleTableSlot(dstate->slot);
 
 	FreeDecodingContext(ctx);
-	ReplicationSlotDropAcquired(true);
+	ReplicationSlotDropAcquired(false);
 }
 
 /*
