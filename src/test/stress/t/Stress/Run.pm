@@ -868,31 +868,6 @@ sub _chaos_profile
 
 # Settings that have to be in postgresql.conf before the server starts.
 
-# Whether this build has the probabilistic cache discard.  A chaos
-# profile turns itself off rather than failing when it does not: the
-# framework is meant to run against a tree that has not got the chaos
-# machinery yet, which is how it is arranged in this branch's own history
-# and how it will be if that machinery is ever proposed separately.  The
-# GUC has to be known before the server starts, so this asks the binary
-# rather than a catalog.
-my $chaos_have_discard;
-
-sub _chaos_have_discard
-{
-	my $out = '';
-
-	return $chaos_have_discard if defined $chaos_have_discard;
-
-	eval {
-		IPC::Run::run [ 'postgres', '--describe-config' ], '>', \$out, '2>',
-		  \my $err;
-	};
-	$chaos_have_discard =
-	  ($out =~ /^debug_discard_caches_probability\b/m) ? 1 : 0;
-
-	return $chaos_have_discard;
-}
-
 sub _chaos_conf
 {
 	my ($spec) = @_;
@@ -908,10 +883,6 @@ sub _chaos_conf
 	# attach to shared memory and would otherwise sleep uncounted.
 	push @conf, "shared_preload_libraries = 'injection_points'"
 	  if $profile->{points};
-	push @conf,
-	  "debug_discard_caches_probability = $profile->{discard_probability}"
-	  if $profile->{discard_probability} && _chaos_have_discard();
-
 	return @conf;
 }
 
@@ -933,6 +904,37 @@ sub _chaos_setup
 	}
 
 	$ctx->{chaos} = $name;
+
+	# The cache discard is set here rather than in postgresql.conf, because
+	# a build without the GUC would refuse to start on an unknown name and
+	# there is no way to ask a binary about a GUC marked not-in-sample --
+	# --describe-config leaves those out, which is how an earlier version of
+	# this silently never applied it at all.  ALTER SYSTEM on a name the
+	# server does not know is an ordinary error, so it can be tried.
+	if ($profile->{discard_probability})
+	{
+		my $p = $profile->{discard_probability};
+		my $set = eval {
+			$node->safe_psql('postgres',
+				"ALTER SYSTEM SET debug_discard_caches_probability = $p");
+			$node->safe_psql('postgres', 'SELECT pg_reload_conf()');
+			1;
+		};
+		if (!$set)
+		{
+			Test::More::note(
+				"chaos '$name': this build has no cache discard probability");
+		}
+		else
+		{
+			# Read back, so a run that thinks it is discarding caches
+			# really is.
+			my $got = $node->safe_psql('postgres',
+				'SHOW debug_discard_caches_probability');
+			Test::More::note("chaos '$name': cache discard at $got");
+		}
+	}
+
 	return unless $profile->{points};
 	$ctx->{chaos_points} = 1;
 
@@ -941,7 +943,7 @@ sub _chaos_setup
 
 	$node->safe_psql('postgres', 'CREATE EXTENSION injection_points');
 
-	# Same reasoning as _chaos_have_discard: the jitter callback may not
+	# Same reasoning as the cache discard above: the jitter callback may not
 	# be in this build's injection_points module, in which case the
 	# profile does nothing rather than ending the run.
 	if ($node->safe_psql(
