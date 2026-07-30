@@ -246,6 +246,17 @@ our %CHAOS = (
 		discard_probability => 0.005,
 	},
 
+	# Aimed at the gap between a relcache entry being built from the
+	# catalogs and the check for an invalidation absorbed while that was
+	# happening -- and at how long a backend may then go on using the
+	# stale entry before absorbing anything.
+	relcache_probe => {
+		points => {
+			'relcache-build-catalogs-read' => [ 0.2, 2000, 20000 ],
+			'accept-invalidation-messages' => [ 0.05, 2000, 20000 ],
+		},
+	},
+
 	# Aimed at one window: the gap between the flush that lets a decoder
 	# see a commit and the CLOG update that lets an ordinary snapshot see
 	# it.  Sized from the measurements in REGRESSIONS -- REPACK needs the

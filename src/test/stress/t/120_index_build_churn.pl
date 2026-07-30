@@ -39,6 +39,7 @@ run_scenario(
 		ddl_concurrency => 1,
 		checks => ['amcheck'],
 		env => 'standalone',
+		chaos => 'relcache_probe',
 		clients => 30,
 		tags => ['ci'],
 	});
