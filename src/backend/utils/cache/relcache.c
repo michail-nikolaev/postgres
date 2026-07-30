@@ -1298,7 +1298,7 @@ retry:
 	 */
 	INJECTION_POINT("relcache-build-catalogs-read", NULL);
 
-	if (false && in_progress_list[in_progress_offset].invalidated)
+	if (in_progress_list[in_progress_offset].invalidated)
 	{
 		RelationDestroyRelation(relation, false);
 		goto retry;
