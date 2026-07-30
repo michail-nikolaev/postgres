@@ -94,8 +94,9 @@ heapallindexed catches directly.
               from inside the pgbench script.  Reverting is therefore a
               calibration exercise -- does this suite catch it too, and
               how much faster -- rather than a gap being closed.
-      status: WAS CATCHING, and no longer does -- see below.  Recorded
-              at the time as 2 failures in 8 runs at stressval 8, as
+      status: CATCHES, but only with chaos -- see below.  1 failure in 2
+              runs at stressval 8 with the relcache_probe profile, and
+              originally 2 in 8 without it, as
 
                 ERROR:  heap tuple (0,94) from table "pgbench_history"
                 lacks matching index tuple within index
@@ -123,35 +124,36 @@ heapallindexed catches directly.
               strength of index_build_churn.  See the note in
               "Duplicated upstream tests".
 
-      no longer reproducible: building the revert pairs at the end of this
-              branch turned up that this one does not fail any more.  0
-              failures in 22 runs at stressval 8, where 2 in 8 would make
-              22 clean runs a one-in-six-hundred coincidence.
+      the catch lapsed, and chaos brought it back: this is the one entry
+              of the twenty-four where building the revert pairs found
+              something.  With the retry disabled the scenario failed 0
+              times in 22 runs at stressval 8, where 2 in 8 would make 22
+              clean runs a one-in-six-hundred coincidence.
 
-              The revert is not at fault, and this was established rather
-              than assumed.  A probe on the disabled branch -- an elog
-              where the "goto retry" used to be -- fires 181 times in a
-              single run: 145 times for pgbench_history, whose index list
-              is the thing that has to go stale for the bug to bite, and
-              36 times for pgb_history_delta_idx itself.  So the window is
-              being entered constantly and the invalidation is being
-              ignored, exactly as before the fix, and amcheck still passes.
+              The revert was not at fault, and that was measured rather
+              than assumed.  A probe where the "goto retry" used to be
+              fires 181 times in a single run -- 145 times for
+              pgbench_history, whose index list is the thing that has to
+              go stale, and 36 for pgb_history_delta_idx itself.  So the
+              window was still being entered constantly and the
+              invalidation still ignored, exactly as before the fix, and
+              amcheck still passed.  What had changed was not whether the
+              race is reached but how long the stale entry survives:
+              something absorbs an invalidation and heals it before
+              anything reads the index list.
 
-              What that leaves is that ignoring a mid-build invalidation
-              no longer has the consequence it had in 2021.  The likely
-              reason -- stated as a hypothesis, not a conclusion, because
-              it has not been chased down -- is that the index list is
-              built on demand by RelationGetIndexList() and invalidated
-              through rd_indexvalid, separately from the descriptor
-              RelationBuildDesc() assembles, so a stale descriptor
-              self-heals before anything uses the list.  If that is right
-              the retry is defence in depth on this tree, and confirming
-              it means finding which commit made it so.
+              Widening that window is what brought it back.  The scenario
+              now declares the relcache_probe chaos profile, which jitters
+              relcache-build-catalogs-read -- where the entry has been
+              built and the invalidation is about to be checked -- and
+              accept-invalidation-messages, which is how long a backend
+              goes on using what it has.  1 failure in 2 runs with it.
 
-              No revert pair is committed for this entry, since a pair
-              whose first half does not fail is worse than none.  It is
-              the one entry of the twenty-four where that happened, and
-              the pairs found it, which is what they are for.
+              This is the clearest argument for the chaos machinery in the
+              file.  A catch does not lapse loudly: the scenario went on
+              passing, and would have gone on passing, while no longer
+              reaching the thing it was written for.  The pairs are what
+              made that visible, and the profile is what fixed it.
 
   3cd9c3b9219  2021-10-23  Fix CREATE INDEX CONCURRENTLY for the newest
                            prepared transactions.
