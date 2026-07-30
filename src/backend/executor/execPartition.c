@@ -2366,17 +2366,12 @@ CreatePartitionPruneState(EState *estate, PartitionPruneInfo *pruneinfo,
 			 * set to -1, as if they were pruned.  By construction, both
 			 * arrays are in partition bounds order.
 			 */
-			/*
-			 * Both assumptions dbca3469ebf removed are put back here: that
-			 * the descriptor can only have gained partitions, and that an
-			 * equal count means an equal set.
-			 */
-			Assert(partdesc->nparts >= pinfo->nparts);
-
 			pprune->nparts = partdesc->nparts;
 			pprune->subplan_map = palloc_array(int, partdesc->nparts);
 
-			if (partdesc->nparts == pinfo->nparts)
+			if (partdesc->nparts == pinfo->nparts &&
+				memcmp(partdesc->oids, pinfo->relid_map,
+					   sizeof(int) * partdesc->nparts) == 0)
 			{
 				pprune->subpart_map = pinfo->subpart_map;
 				pprune->leafpart_rti_map = pinfo->leafpart_rti_map;
