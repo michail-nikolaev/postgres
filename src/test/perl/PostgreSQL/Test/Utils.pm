@@ -367,6 +367,42 @@ sub has_wal_read_bug
 
 =pod
 
+=item stress_concurrently_scale()
+
+Returns the run-time multiplier for stress tests of CONCURRENTLY commands.
+A return value of 0 means the test should be skipped, via skip_all.
+
+The multiplier is taken from the C<stress_concurrently=N> string in
+PG_TEST_EXTRA.  Each such test is calibrated so that a multiplier of 1
+makes it run for about 6 seconds, and the increase is roughly linear.
+If PG_TEST_EXTRA contains C<stress_concurrently> without a value, the
+multiplier is 1; an explicit value of 0 disables the tests.
+
+If PG_TEST_EXTRA does not mention C<stress_concurrently> at all, the
+multiplier defaults to 1, so that these tests run by default; but 0 is
+returned if the environment declares itself slow by setting
+PG_TEST_TIMEOUT_DEFAULT (as Valgrind buildfarm animals and the like do),
+so as not to burden such environments.  Use an explicit value in
+PG_TEST_EXTRA to override that.
+
+=cut
+
+sub stress_concurrently_scale
+{
+	my $extra = $ENV{PG_TEST_EXTRA} // '';
+
+	if ($extra =~ /\bstress_concurrently(?:=(\d+))?\b/)
+	{
+		return defined($1) ? int($1) : 1;
+	}
+
+	return 0 if defined $ENV{PG_TEST_TIMEOUT_DEFAULT};
+
+	return 1;
+}
+
+=pod
+
 =item system_log(@cmd)
 
 Run (via C<system()>) the command passed as argument; the return
