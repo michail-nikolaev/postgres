@@ -65,7 +65,6 @@
 #include "optimizer/optimizer.h"
 #include "parser/parse_relation.h"
 #include "pgstat.h"
-#include "replication/logicalrelation.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
@@ -917,12 +916,14 @@ check_concurrent_repack_requirements(Relation rel, Oid *ident_idx_p)
 
 	/*
 	 * Obtain the replica identity index -- either one that has been set
-	 * explicitly, or a non-deferrable primary key.  If none of these cases
-	 * apply, the table cannot be repacked concurrently.  It might be possible
-	 * to have repack work with a FULL replica identity; however that requires
-	 * more work and is not implemented yet.
+	 * explicitly, or the primary key.  If none of these cases apply, the
+	 * table cannot be repacked concurrently.  It might be possible to have
+	 * repack work with a FULL replica identity; however that requires more
+	 * work and is not implemented yet.
 	 */
-	ident_idx = GetRelationIdentityOrPK(rel);
+	ident_idx = RelationGetReplicaIndex(rel);
+	if (!OidIsValid(ident_idx) && OidIsValid(rel->rd_pkindex))
+		ident_idx = rel->rd_pkindex;
 	if (!OidIsValid(ident_idx))
 	{
 		/* This special case warrants its own error message */
