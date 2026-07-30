@@ -878,7 +878,6 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 
 		reserve_wal_for_local_slot(remote_slot->restart_lsn);
 
-		LWLockAcquire(ReplicationSlotControlLock, LW_EXCLUSIVE);
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 		xmin_horizon = GetOldestSafeDecodingTransactionId(true);
 		SpinLockAcquire(&slot->mutex);
@@ -887,7 +886,6 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 		SpinLockRelease(&slot->mutex);
 		ReplicationSlotsComputeRequiredXmin(true);
 		LWLockRelease(ProcArrayLock);
-		LWLockRelease(ReplicationSlotControlLock);
 
 		update_and_persist_local_synced_slot(remote_slot, remote_dbid,
 											 slot_persistence_pending);
