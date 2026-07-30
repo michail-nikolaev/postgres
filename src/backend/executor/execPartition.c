@@ -936,13 +936,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 					map_unparented_to_root_arbiters(leaf_part_rri,
 													rootResultRelInfo,
 													unparented_idxs);
-			/*
-			 * The "unparented indexes may be arbiters too" fallback that
-			 * 90eae926abb added is disabled here, which puts the bug back.
-			 * Only this branch: the one above is a later fix for the case
-			 * where the partition has no matching arbiter at all.
-			 */
-			else if (false && unparented_idxs && arbiterIndexes)
+			else if (unparented_idxs && arbiterIndexes)
 			{
 				foreach_int(unparented_i, unparented_idxs)
 				{
