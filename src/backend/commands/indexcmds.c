@@ -626,10 +626,7 @@ DefineIndex(ParseState *pstate,
 	 * is more efficient.  Do this before any use of the concurrent option is
 	 * done.
 	 */
-	if (stmt->concurrent && get_rel_persistence(tableId) != RELPERSISTENCE_TEMP)
-		concurrent = true;
-	else
-		concurrent = false;
+	concurrent = stmt->concurrent;
 
 	/*
 	 * Start progress report.  If we're building a partition, this was already
@@ -3118,8 +3115,7 @@ ReindexIndex(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 
 	if (relkind == RELKIND_PARTITIONED_INDEX)
 		ReindexPartitions(stmt, indOid, params, isTopLevel);
-	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			 persistence != RELPERSISTENCE_TEMP)
+	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0)
 		ReindexRelationConcurrently(stmt, indOid, params);
 	else
 	{
@@ -3234,8 +3230,7 @@ ReindexTable(const ReindexStmt *stmt, const ReindexParams *params, bool isTopLev
 
 	if (get_rel_relkind(heapOid) == RELKIND_PARTITIONED_TABLE)
 		ReindexPartitions(stmt, heapOid, params, isTopLevel);
-	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			 get_rel_persistence(heapOid) != RELPERSISTENCE_TEMP)
+	else if ((params->options & REINDEXOPT_CONCURRENTLY) != 0)
 	{
 		result = ReindexRelationConcurrently(stmt, heapOid, params);
 
@@ -3658,8 +3653,7 @@ ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const Reind
 		 */
 		Assert(!RELKIND_HAS_PARTITIONS(relkind));
 
-		if ((params->options & REINDEXOPT_CONCURRENTLY) != 0 &&
-			relpersistence != RELPERSISTENCE_TEMP)
+		if ((params->options & REINDEXOPT_CONCURRENTLY) != 0)
 		{
 			ReindexParams newparams = *params;
 
