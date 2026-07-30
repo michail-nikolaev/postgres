@@ -523,6 +523,16 @@ sub run_one
 	my $lock_timeout = 1000 * $PostgreSQL::Test::Utils::timeout_default;
 	$lock_timeout = 1000 * _max(30, 5 * $duration)
 	  if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_seconds=\d+\b/;
+
+	# A modifier that makes the server substantially slower has to take
+	# this with it.  The timeout is calibrated to how long a rebuild needs
+	# at ordinary speed; with fsync really engaged, or every sort spilling,
+	# the same work takes long enough that a healthy run trips it and
+	# reports a lock timeout that says nothing about the server.  Found by
+	# a soak combination doing exactly that under 'durable'.
+	$lock_timeout *= 3
+	  if $spec->{modifier} && $MODIFIERS{ $spec->{modifier} }->{slow};
+
 	$node->append_conf('postgresql.conf', "lock_timeout = $lock_timeout");
 	# Layer 0: a failure should arrive with its call site attached.
 	$node->append_conf('postgresql.conf', $_)

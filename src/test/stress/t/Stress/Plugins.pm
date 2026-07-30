@@ -115,6 +115,8 @@ our %MODIFIERS = (
 	# every scenario in this suite has always been testing the code path
 	# where the WAL writes never wait for the disk.
 	durable => {
+		# Slow enough that the lock timeout has to be scaled with it.
+		slow => 1,
 		conf => [
 			'fsync = on',
 			'full_page_writes = on',
@@ -129,6 +131,8 @@ our %MODIFIERS = (
 	# external path rather than an in-memory one -- which is a different
 	# tuplesort code path being driven against a live workload.
 	spill => {
+		# Slow enough that the lock timeout has to be scaled with it.
+		slow => 1,
 		conf => [
 			'work_mem = 64kB',
 			'maintenance_work_mem = 1MB',
@@ -184,6 +188,8 @@ our %MODIFIERS = (
 	# pages are written, evicted and read back rather than staying
 	# resident.
 	buffer_churn => {
+		# Slow enough that the lock timeout has to be scaled with it.
+		slow => 1,
 		conf => [
 			'shared_buffers = 1MB',
 			'bgwriter_delay = 10ms',
