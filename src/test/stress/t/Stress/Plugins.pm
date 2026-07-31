@@ -3338,19 +3338,26 @@ our %DDL = (
 	# goes through the bounded helper; what it races is not the lock but
 	# the several transactions a concurrent command spans, having decided
 	# which index it would use in the first of them.
+	# Both moves in one turn, rather than one per turn.  The rotation
+	# picks between several entries and a six-second run may reach this
+	# one only once or not at all, so a variant that moved the identity a
+	# single step could leave a run having seen one identity and proved
+	# nothing -- which is what identity_moved reported when it was written
+	# that way.
 	move_replica_identity => {
 		requires => { schema => ['movable_identity'] },
 		variants => sub {
-			return map {
-				{
-					table => 'pgbench_accounts',
-					stmts => [
-						"SELECT pgb_ddl_bounded('ALTER TABLE pgbench_accounts "
-						  . "REPLICA IDENTITY USING INDEX $_');",
-						'SELECT pgb_note_identity();'
-					]
-				}
-			} (qw(pgb_ident_a pgb_ident_b));
+			return ({
+				table => 'pgbench_accounts',
+				stmts => [
+					"SELECT pgb_ddl_bounded('ALTER TABLE pgbench_accounts "
+					  . "REPLICA IDENTITY USING INDEX pgb_ident_b');",
+					'SELECT pgb_note_identity();',
+					"SELECT pgb_ddl_bounded('ALTER TABLE pgbench_accounts "
+					  . "REPLICA IDENTITY USING INDEX pgb_ident_a');",
+					'SELECT pgb_note_identity();'
+				]
+			});
 		},
 	},
 
@@ -4223,6 +4230,12 @@ our %CHECK = (
 	# lock, which is a real possibility: the bounded helper does not wait.
 	identity_moved => {
 		requires => { schema => ['movable_identity'] },
+		# Sampled by the workload too, not only by the rotation, so what
+		# ends up recorded does not depend on how often the DDL client
+		# happened to pick the entry that moves it.
+		script => q(
+			SELECT pgb_note_identity();
+		),
 		final => sub {
 			my ($node, $ctx) = @_;
 			my $seen = $node->safe_psql('postgres',
