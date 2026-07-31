@@ -38,6 +38,7 @@ tests += {
       't/126_data_checksums_standby.pl',
       't/127_data_checksums_crash.pl',
       't/128_moving_identity.pl',
+      't/129_moving_identity_sub.pl',
       't/999_soak.pl',
     ],
   },
