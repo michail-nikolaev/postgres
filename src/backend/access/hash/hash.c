@@ -508,6 +508,7 @@ hashbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	Buffer		metabuf = InvalidBuffer;
 	HashMetaPage metap;
 	HashMetaPage cachedmetap;
+	HashMetaPageData local_metapage;
 	HashBulkDeleteStreamPrivate stream_private;
 	ReadStream *stream = NULL;
 	XLogRecPtr	recptr;
@@ -520,9 +521,18 @@ hashbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	 * values to compute bucket page addresses, but a cached copy should be
 	 * good enough.  (If not, we'll detect that further down and refresh the
 	 * cache as necessary.)
+	 *
+	 * It has to be a copy of our own, not the relcache's.  The loop below
+	 * locks buffers and can accept invalidation messages, and an
+	 * invalidation for this index pfrees rd_amcache -- after which both
+	 * cachedmetap here and the copy the read stream callback holds would
+	 * be dangling, and BUCKET_TO_BLKNO() would compute a block number out
+	 * of freed memory.
 	 */
 	cachedmetap = _hash_getcachedmetap(rel, &metabuf, false);
 	Assert(cachedmetap != NULL);
+	memcpy(&local_metapage, cachedmetap, sizeof(local_metapage));
+	cachedmetap = &local_metapage;
 
 	orig_maxbucket = cachedmetap->hashm_maxbucket;
 	orig_ntuples = cachedmetap->hashm_ntuples;
@@ -601,6 +611,8 @@ bucket_loop:
 			{
 				cachedmetap = _hash_getcachedmetap(rel, &metabuf, true);
 				Assert(cachedmetap != NULL);
+				memcpy(&local_metapage, cachedmetap, sizeof(local_metapage));
+				cachedmetap = &local_metapage;
 
 				/*
 				 * Reset stream with updated metadata for remaining buckets.

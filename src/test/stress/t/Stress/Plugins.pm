@@ -580,6 +580,15 @@ our %CHAOS = (
 	# Only the probabilistic cache discard, and nothing else.  Used to
 	# tell a crash that needs a forced catalog flush from one that needs a
 	# widened window: they are different findings.
+	# The cache discard turned up hard.  Ten times the ordinary rate, for
+	# hunting rather than for a catalogue run: it costs a great deal of
+	# throughput, but a bug that needs an invalidation at one particular
+	# instruction needs the invalidations to be dense.
+	discard_hard => {
+		slow => 1,
+		discard_probability => 0.02,
+	},
+
 	discard_only => {
 		# Slow enough that the lock timeout has to be scaled with it: a
 		# forced cache flush at every opportunity costs about two orders of
