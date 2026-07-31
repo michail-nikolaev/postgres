@@ -509,6 +509,11 @@ our %CHAOS = (
 	# Throughput drops noticeably; this is for a hunt rather than for the
 	# catalogue.
 	heavy => {
+		# Slow enough that the lock timeout has to be scaled with it: a
+		# forced cache flush at every opportunity costs about two orders of
+		# magnitude, and a healthy run then trips a timeout calibrated for
+		# an ordinary server.
+		slow => 1,
 		points => {
 			'commit-before-clog-update' => [ 0.02, 1000, 20000 ],
 			'xact-end-before-procarray-clear' => [ 0.02, 1000, 20000 ],
@@ -556,6 +561,11 @@ our %CHAOS = (
 	# checksummed for most of the time the worker is on it -- which is the
 	# state a concurrent rewrite has to be safe against.
 	checksums_heavy => {
+		# Slow enough that the lock timeout has to be scaled with it: a
+		# forced cache flush at every opportunity costs about two orders of
+		# magnitude, and a healthy run then trips a timeout calibrated for
+		# an ordinary server.
+		slow => 1,
 		points => {
 			'datachecksums-before-page' => [ 0.25, 5000, 30000 ],
 			'datachecksums-after-page' => [ 0.25, 5000, 30000 ],
@@ -571,6 +581,11 @@ our %CHAOS = (
 	# tell a crash that needs a forced catalog flush from one that needs a
 	# widened window: they are different findings.
 	discard_only => {
+		# Slow enough that the lock timeout has to be scaled with it: a
+		# forced cache flush at every opportunity costs about two orders of
+		# magnitude, and a healthy run then trips a timeout calibrated for
+		# an ordinary server.
+		slow => 1,
 		discard_probability => 0.002,
 	},
 

@@ -39,6 +39,8 @@ hand outside the harness.
   checks           invariants, checked during and/or after the run
   env              which cluster to run against
   conf             extra postgresql.conf lines for this scenario
+  no_forced_chaos  exempt from stress_chaos=<profile>, for a scenario
+                   whose dimension needs a server fast enough to run it
   modifier         a named set of GUCs that changes how the server works
                    without changing what it produces; see %MODIFIERS
   pgbench_args     extra pgbench arguments
@@ -567,6 +569,12 @@ sub run_one
 	$lock_timeout *= 3
 	  if $spec->{modifier} && $MODIFIERS{ $spec->{modifier} }->{slow};
 
+	# And the same for a chaos profile that slows the whole server rather
+	# than one path.  Forcing a cache flush at every opportunity is the
+	# clearest case: it costs about two orders of magnitude, and the
+	# timeout is calibrated for a server that is not doing that.
+	$lock_timeout *= 3 if _chaos_profile($spec)->{slow};
+
 	$node->append_conf('postgresql.conf', "lock_timeout = $lock_timeout");
 	# Layer 0: a failure should arrive with its call site attached.
 	$node->append_conf('postgresql.conf', $_)
@@ -1035,7 +1043,12 @@ sub _chaos_setup
 {
 	my ($node, $spec, $ctx) = @_;
 	my $profile = _chaos_profile($spec);
-	my $name = ref $spec->{chaos} ? 'invented' : ($spec->{chaos} // 'off');
+	my $name =
+	  (($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_chaos=([a-z_]+)\b/
+		  && exists $CHAOS{$1}
+		  && !$spec->{no_forced_chaos}) ? $1
+	  : ref $spec->{chaos} ? 'invented'
+	  : ($spec->{chaos} // 'off');
 	my $seed = 20260729;
 
 	return unless %$profile;
