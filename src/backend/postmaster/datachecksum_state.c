@@ -855,11 +855,16 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 		pgstat_report_activity(STATE_IDLE, NULL);
 		return true;
 	}
-	RelationGetSmgr(rel);
-
 	for (ForkNumber fnum = 0; fnum <= MAX_FORKNUM; fnum++)
 	{
-		if (smgrexists(rel->rd_smgr, fnum))
+		/*
+		 * Fetch the smgr handle on each use rather than holding rd_smgr
+		 * across the loop.  ProcessSingleRelationFork() below reads
+		 * catalogs and accepts invalidation messages, and a relcache
+		 * invalidation resets rd_smgr to NULL -- after which the next
+		 * iteration would dereference it.
+		 */
+		if (smgrexists(RelationGetSmgr(rel), fnum))
 		{
 			if (!ProcessSingleRelationFork(rel, fnum, strategy))
 			{
