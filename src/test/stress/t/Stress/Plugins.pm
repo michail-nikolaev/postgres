@@ -1373,7 +1373,13 @@ our %SCHEMA = (
 				RETURN true;
 			END $fn$;
 		),
-		tables => ['pgb_bmskip'],
+		# Deliberately not in the rotation.  This table has no primary key
+		# and no replica identity -- it is shaped for a bitmap heap scan,
+		# not for being rewritten -- so REPACK (CONCURRENTLY) refuses it
+		# and reindex_pkey_concurrently names an index that does not
+		# exist.  The scenario's own DDL entries name it explicitly.
+		# Found by soak, which combined it with the standard rotation.
+		tables => [],
 	},
 
 	# Two indexes either of which can serve as the replica identity, so
@@ -1618,7 +1624,11 @@ our %SCHEMA = (
 				RETURN true;
 			END $fn$;
 		),
-		tables => [ 'pgb_ios_gist', 'pgb_ios_spgist' ],
+		# Not in the rotation, for the same reason as pgb_bmskip: no
+		# primary key and no replica identity, so REPACK refuses them and
+		# the primary-key reindex has nothing to name.  vacuum_ios_tables
+		# and the scenario's reindex entry name them directly.
+		tables => [],
 	},
 
 	# Triggers on the table the rotation rebuilds, and the tables they
@@ -2994,6 +3004,14 @@ our %DDL = (
 	# an exclusive lock, so both run against a live workload, and
 	# VALIDATE scans the whole table while the rotation rewrites it.
 	add_validate_constraint => {
+		# Kept out of the combinations soak invents.  ADD and DROP
+		# CONSTRAINT need AccessExclusiveLock, which queues ahead of every
+		# writer, and at scale 1 the pgbench_branches row is contended
+		# enough that the queue does not drain: the writers wait out their
+		# own lock_timeout and the run reports a starvation that says
+		# nothing about the server.  REGRESSIONS records the class.  The
+		# hand-written scenario that uses it is tuned for it.
+		catalogue_only => 1,
 		variants => sub {
 			my ($ctx) = @_;
 			return map {
