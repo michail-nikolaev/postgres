@@ -473,8 +473,8 @@ our %CHAOS_POINTS = (
 	# rotation, so the gap between counting a relation's blocks and
 	# processing them is the one that matters.  Reached only by a scenario
 	# that drives the transitions.
-	'datachecksums-before-page' => { max_p => 0.02, max_us => 5000 },
-	'datachecksums-after-page' => { max_p => 0.02, max_us => 5000 },
+	'datachecksums-before-page' => { max_p => 0.25, max_us => 30_000 },
+	'datachecksums-after-page' => { max_p => 0.25, max_us => 30_000 },
 	'datachecksumsworker-startup-delay' => { max_p => 1.0, max_us => 20_000 },
 	'datachecksumsworker-launcher-delay' => { max_p => 1.0, max_us => 20_000 },
 	'datachecksums-enable-checksums-delay' =>
@@ -548,6 +548,30 @@ our %CHAOS = (
 			'datachecksums-after-page' => [ 0.01, 500, 5000 ],
 			'datachecksumsworker-startup-delay' => [ 1.0, 1000, 15000 ],
 		},
+	},
+
+	# The checksum worker held open as wide as the caps allow.  A quarter
+	# of its pages wait up to thirty milliseconds before being read and
+	# again after being dirtied, so a relation is in the middle of being
+	# checksummed for most of the time the worker is on it -- which is the
+	# state a concurrent rewrite has to be safe against.
+	checksums_heavy => {
+		points => {
+			'datachecksums-before-page' => [ 0.25, 5000, 30000 ],
+			'datachecksums-after-page' => [ 0.25, 5000, 30000 ],
+			'datachecksumsworker-startup-delay' => [ 1.0, 5000, 20000 ],
+			'datachecksumsworker-launcher-delay' => [ 1.0, 5000, 20000 ],
+			'relation-open-after-lock' => [ 0.01, 500, 8000 ],
+			'transaction-snapshot-taken' => [ 0.01, 500, 8000 ],
+		},
+		discard_probability => 0.002,
+	},
+
+	# Only the probabilistic cache discard, and nothing else.  Used to
+	# tell a crash that needs a forced catalog flush from one that needs a
+	# widened window: they are different findings.
+	discard_only => {
+		discard_probability => 0.002,
 	},
 
 	# Aimed at one window: the gap between the flush that lets a decoder
@@ -4290,7 +4314,12 @@ our %CHECK = (
 					IF current_setting('data_checksums') <> 'on' THEN
 						PERFORM pg_enable_data_checksums(0, 10000);
 					END IF;
-					FOR i IN 1..600 LOOP
+					-- Generous, because a chaos profile can hold the
+					-- worker on every page: the heavy one injects tens of
+					-- seconds of sleep into a single run, and a wait that
+					-- expires leaves the cluster in inprogress-on, which
+					-- reads as a failure but is only impatience.
+					FOR i IN 1..4800 LOOP
 						EXIT WHEN current_setting('data_checksums') = 'on';
 						PERFORM pg_sleep(0.05);
 					END LOOP;

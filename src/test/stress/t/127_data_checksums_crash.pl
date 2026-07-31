@@ -45,7 +45,7 @@ run_scenario(
 		checks => [ 'balances', 'amcheck', 'no_checksum_failures' ],
 		env => 'crash_loop',
 		clients => 20,
-		chaos => 'checksums',
+		chaos => 'checksums_heavy',
 		# The cluster has to start without checksums for the enabling
 		# worker to have anything to do on the first turn.
 		modifier => 'no_checksums',
