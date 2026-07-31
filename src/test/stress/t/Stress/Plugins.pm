@@ -468,6 +468,18 @@ our %CHAOS_POINTS = (
 	# strength of it.
 	'vacuum-cutoffs-computed' => { max_p => 1.0, max_us => 30_000 },
 
+	# The online data checksum worker.  It walks every page of every
+	# relation, and the relations are being rewritten underneath it by the
+	# rotation, so the gap between counting a relation's blocks and
+	# processing them is the one that matters.  Reached only by a scenario
+	# that drives the transitions.
+	'datachecksums-before-page' => { max_p => 0.02, max_us => 5000 },
+	'datachecksums-after-page' => { max_p => 0.02, max_us => 5000 },
+	'datachecksumsworker-startup-delay' => { max_p => 1.0, max_us => 20_000 },
+	'datachecksumsworker-launcher-delay' => { max_p => 1.0, max_us => 20_000 },
+	'datachecksums-enable-checksums-delay' =>
+	  { max_p => 1.0, max_us => 20_000 },
+
 	# The lock queue itself.  Short and rare, always: a request that
 	# dawdles at the head of a queue stalls every writer behind it, and
 	# lock_timeout is what ends the run.
@@ -524,6 +536,17 @@ our %CHAOS = (
 		points => {
 			'relcache-build-catalogs-read' => [ 0.2, 2000, 20000 ],
 			'accept-invalidation-messages' => [ 0.05, 2000, 20000 ],
+		},
+	},
+
+	# Aimed at the online checksum worker: the gap between counting a
+	# relation's blocks and writing each of them, which is when the
+	# rotation can swap the relfilenode out from under it.
+	checksums => {
+		points => {
+			'datachecksums-before-page' => [ 0.01, 500, 5000 ],
+			'datachecksums-after-page' => [ 0.01, 500, 5000 ],
+			'datachecksumsworker-startup-delay' => [ 1.0, 1000, 15000 ],
 		},
 	},
 
@@ -1353,6 +1376,47 @@ our %SCHEMA = (
 		tables => ['pgb_bmskip'],
 	},
 
+	# Two indexes either of which can serve as the replica identity, so
+	# that the identity can be moved between them while a command that
+	# depends on it is running.
+	#
+	# REPACK (CONCURRENTLY) picks the identity index once, in
+	# check_concurrent_repack_requirements(), and then uses it to replay
+	# the changes that happen while it copies.  It runs in several
+	# transactions, so ALTER TABLE ... REPLICA IDENTITY can commit in
+	# between -- and the index it picked may by then be neither the
+	# identity nor, if it was dropped, present at all.  That is the same
+	# shape as the apply worker holding a stale identity across a REINDEX,
+	# which is a fix carried earlier in this branch.
+	movable_identity => {
+		# The identity moves between indexes of pgbench_accounts, which
+		# the partitioning decorator replaces.
+		conflicts => { schema => ['partitioned'] },
+		setup => q(
+			CREATE UNIQUE INDEX pgb_ident_a ON pgbench_accounts(aid);
+			CREATE UNIQUE INDEX pgb_ident_b ON pgbench_accounts(aid)
+				INCLUDE (bid);
+			ALTER TABLE pgbench_accounts REPLICA IDENTITY USING INDEX pgb_ident_a;
+
+			-- Which identity has been seen, so the run can prove the
+			-- identity really moved.  ALTER TABLE ... REPLICA IDENTITY
+			-- needs AccessExclusiveLock and goes through the bounded
+			-- helper, which gives up rather than waiting; a run where it
+			-- always gave up would pass while testing nothing.
+			CREATE TABLE pgb_ident_seen(idx name PRIMARY KEY);
+
+			CREATE FUNCTION pgb_note_identity() RETURNS void
+			LANGUAGE sql AS $$
+				INSERT INTO pgb_ident_seen
+					SELECT c.relname FROM pg_index i
+					JOIN pg_class c ON c.oid = i.indexrelid
+					WHERE i.indrelid = 'pgbench_accounts'::regclass
+					  AND i.indisreplident
+				ON CONFLICT DO NOTHING;
+			$$;
+		),
+	},
+
 	# The helper that drives the data checksum transitions.
 	#
 	# Enabling checksums is not a switch: a background worker walks every
@@ -1367,6 +1431,21 @@ our %SCHEMA = (
 	# in flight at once.
 	data_checksum_helper => {
 		setup => q(
+			-- Needed by no_checksum_failures to pull every page through
+			-- shared buffers.  Without it that check reads nothing and
+			-- passes for the wrong reason, which is how it was written the
+			-- first time.
+			CREATE EXTENSION IF NOT EXISTS pg_prewarm;
+
+			-- An unlogged relation, which the checksum worker handles
+			-- differently: it dirties the pages without logging them,
+			-- because a crash resets the relation from its init fork --
+			-- and the init fork is logged, precisely so a standby does not
+			-- inherit a stale one that fails verification after promotion.
+			CREATE UNLOGGED TABLE pgb_unlogged(id int PRIMARY KEY, pad text);
+			INSERT INTO pgb_unlogged
+				SELECT g, repeat(md5(g::text), 8)
+				FROM generate_series(1, 2000) g;
 			CREATE FUNCTION pgb_flip_data_checksums() RETURNS text
 			LANGUAGE plpgsql AS $fn$
 			DECLARE
@@ -3252,6 +3331,29 @@ our %DDL = (
 		},
 	},
 
+	# The replica identity moved from one index to another, and back,
+	# while the rotation rebuilds and repacks the table it belongs to.
+	#
+	# ALTER TABLE ... REPLICA IDENTITY needs AccessExclusiveLock, so it
+	# goes through the bounded helper; what it races is not the lock but
+	# the several transactions a concurrent command spans, having decided
+	# which index it would use in the first of them.
+	move_replica_identity => {
+		requires => { schema => ['movable_identity'] },
+		variants => sub {
+			return map {
+				{
+					table => 'pgbench_accounts',
+					stmts => [
+						"SELECT pgb_ddl_bounded('ALTER TABLE pgbench_accounts "
+						  . "REPLICA IDENTITY USING INDEX $_');",
+						'SELECT pgb_note_identity();'
+					]
+				}
+			} (qw(pgb_ident_a pgb_ident_b));
+		},
+	},
+
 	# Data checksums turned off and on again while the workload runs.
 	#
 	# Enabling them is not a switch: a background worker walks every page
@@ -3423,6 +3525,27 @@ C<final> is a sub run against the node once the workload is over.
 Either may be omitted.
 
 =cut
+
+# Pull every block of every permanent relation through shared buffers and
+# report how many, so a read-back that reads nothing is visible instead of
+# passing.  A page is only verified when it is read, so this is what makes
+# the checksum counter afterwards mean anything.
+my $checksum_read_all = q(
+	SELECT COALESCE(sum(pg_prewarm(c.oid::regclass, 'buffer')), 0)
+	FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+	WHERE c.relkind IN ('r', 'i', 'm', 't')
+	  AND c.relpersistence IN ('p', 'u')
+	  AND n.nspname <> 'pg_toast';
+);
+
+# The same, for a standby, which cannot read unlogged relations at all.
+my $checksum_read_all_standby = q(
+	SELECT COALESCE(sum(pg_prewarm(c.oid::regclass, 'buffer')), 0)
+	FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+	WHERE c.relkind IN ('r', 'i', 'm', 't')
+	  AND c.relpersistence = 'p'
+	  AND n.nspname <> 'pg_toast';
+);
 
 our %CHECK = (
 	# The four sums move together or not at all.  Read in one statement,
@@ -4091,6 +4214,120 @@ our %CHECK = (
 			}
 			Test::More::pass(
 				'no invalid index was left behind that could not be dropped');
+		},
+	},
+
+	# The replica identity really moved during the run.
+	#
+	# Without this the scenario passes when every ALTER gave up on the
+	# lock, which is a real possibility: the bounded helper does not wait.
+	identity_moved => {
+		requires => { schema => ['movable_identity'] },
+		final => sub {
+			my ($node, $ctx) = @_;
+			my $seen = $node->safe_psql('postgres',
+				'SELECT count(*) FROM pgb_ident_seen');
+			Test::More::cmp_ok($seen, '>=', 2,
+				'the replica identity moved between both indexes')
+			  or Test::More::diag("identities seen: $seen");
+			return;
+		},
+	},
+
+	# No page failed its checksum, and every page was readable.
+	#
+	# This is the detector for the online checksum transitions.  The
+	# counter is the server's own: a page whose checksum does not match
+	# what the data says increments it, and nothing else does.  Reading it
+	# is not enough on its own, though, because a page is only verified
+	# when it is read, so the check reads everything first -- every block
+	# of every relation, through pg_relation_check_pages if this build has
+	# it and by a full scan of each table otherwise.
+	no_checksum_failures => {
+		requires => { schema => ['data_checksum_helper'] },
+		# Catching up before reading the standby, without reaching into
+		# the environment for how.
+		catchup => 1,
+		final => sub {
+			my ($node, $ctx) = @_;
+
+			# Leave the cluster with checksums on, so that what follows
+			# actually verifies them, and wait for the worker.
+			$node->safe_psql('postgres', q(
+				DO $$
+				BEGIN
+					IF current_setting('data_checksums') <> 'on' THEN
+						PERFORM pg_enable_data_checksums(0, 10000);
+					END IF;
+					FOR i IN 1..600 LOOP
+						EXIT WHEN current_setting('data_checksums') = 'on';
+						PERFORM pg_sleep(0.05);
+					END LOOP;
+				END $$;
+			));
+
+			Test::More::is(
+				$node->safe_psql('postgres', 'SHOW data_checksums'),
+				'on', 'checksums are on at the end of the run');
+
+			# Evict everything, so the reads below come from disk rather
+			# than from buffers that were never written out.
+			$node->safe_psql('postgres', 'CHECKPOINT');
+
+			# Read every block of every relation.  A bad checksum is an
+			# error here and a counter increment below; both are wanted,
+			# since an error names the relation.
+			#
+			# The count of blocks read is returned and asserted, because a
+			# read-back that silently reads nothing passes every check
+			# after it.  That is not hypothetical: the first version of
+			# this swallowed a missing pg_prewarm and proved nothing.
+			my ($rc, $out, $err) = $node->psql(
+				'postgres', $checksum_read_all, on_error_stop => 0);
+			Test::More::is($rc, 0, 'every page could be read back')
+			  or Test::More::diag($err);
+			Test::More::cmp_ok($out, '>', 100,
+				'the read-back really read the cluster')
+			  or Test::More::diag("blocks read: $out");
+
+			Test::More::is(
+				$node->safe_psql('postgres',
+					'SELECT COALESCE(sum(checksum_failures), 0) '
+					  . 'FROM pg_stat_database'),
+				'0', 'no page failed its checksum');
+
+			# And the same on a standby, if the environment built one.
+			#
+			# This is the case the worker's own comment warns about: a
+			# replica can hold a page whose checksum is invalid, from
+			# unlogged changes made on the primary while checksums were
+			# off, and only a full page image repairs it.  It takes
+			# checksums on, then off, then on again to get there, which is
+			# exactly what the rotation does.
+			if (my $standby = $ctx->{standby})
+			{
+				$node->wait_for_catchup($standby, 'replay');
+
+				Test::More::is(
+					$standby->safe_psql('postgres', 'SHOW data_checksums'),
+					'on', 'checksums are on at the standby too');
+
+				$standby->safe_psql('postgres', 'CHECKPOINT');
+				my ($src, $sout, $serr) = $standby->psql(
+					'postgres', $checksum_read_all_standby, on_error_stop => 0);
+				Test::More::is($src, 0, 'every standby page could be read')
+				  or Test::More::diag($serr);
+				Test::More::cmp_ok($sout, '>', 100,
+					'the standby read-back really read the cluster')
+				  or Test::More::diag("blocks read: $sout");
+
+				Test::More::is(
+					$standby->safe_psql('postgres',
+						'SELECT COALESCE(sum(checksum_failures), 0) '
+						  . 'FROM pg_stat_database'),
+					'0', 'no standby page failed its checksum');
+			}
+			return;
 		},
 	},
 

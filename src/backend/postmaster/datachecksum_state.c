@@ -732,7 +732,17 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 	 */
 	for (BlockNumber blknum = 0; blknum < numblocks; blknum++)
 	{
-		Buffer		buf = ReadBufferExtended(reln, forkNum, blknum, RBM_NORMAL, strategy);
+		Buffer		buf;
+
+		/*
+		 * The block count was taken before this loop started, and the
+		 * relation can be rewritten underneath it -- REPACK, CLUSTER and
+		 * VACUUM FULL all swap the relfilenode while this worker holds the
+		 * relation open.  This is the gap that has to be survived.
+		 */
+		INJECTION_POINT("datachecksums-before-page", NULL);
+
+		buf = ReadBufferExtended(reln, forkNum, blknum, RBM_NORMAL, strategy);
 
 		/* Need to get an exclusive lock to mark the buffer as dirty */
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -766,6 +776,12 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		END_CRIT_SECTION();
 
 		UnlockReleaseBuffer(buf);
+
+		/*
+		 * The page has been dirtied and logged but not necessarily written.
+		 * A checkpoint, or an eviction, decides when it reaches disk.
+		 */
+		INJECTION_POINT("datachecksums-after-page", NULL);
 
 		/* Check if we are asked to abort, the abortion will bubble up. */
 		Assert(operation == ENABLE_DATACHECKSUMS);
