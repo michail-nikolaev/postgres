@@ -39,8 +39,14 @@ hand outside the harness.
   checks           invariants, checked during and/or after the run
   env              which cluster to run against
   conf             extra postgresql.conf lines for this scenario
+  chaos            a named chaos profile from %CHAOS, or a profile soak
+                   invented; widens race windows with injection-point
+                   jitter and the probabilistic cache discard
   no_forced_chaos  exempt from stress_chaos=<profile>, for a scenario
                    whose dimension needs a server fast enough to run it
+  no_forced_modifier  the same exemption from stress_modifier=<name>; a
+                   scenario slowed by a forced modifier starves the same
+                   dimensions a forced chaos profile does
   modifier         a named set of GUCs that changes how the server works
                    without changing what it produces; see %MODIFIERS
   pgbench_args     extra pgbench arguments
@@ -231,6 +237,18 @@ sub spec_is_runnable
 sub _validate
 {
 	my ($spec) = @_;
+
+	# An unknown key is a typo, and a typo'd key is worse than a typo'd
+	# name: 'check' for 'checks' does not fail anything, it silently runs
+	# a scenario with no checks at all.
+	my %known = map { $_ => 1 }
+	  qw(schema pgbench_scale indexes load ddl ddl_concurrency checks env
+	  conf chaos modifier no_forced_chaos no_forced_modifier pgbench_args
+	  clients duration tags);
+	foreach my $key (sort keys %$spec)
+	{
+		die "scenario has unknown field '$key'" unless $known{$key};
+	}
 
 	my %registry = (
 		schema => \%SCHEMA,
@@ -597,14 +615,17 @@ sub run_one
 	# Before the scenario's own conf, so a scenario that needs a
 	# particular setting still wins.
 	# A forced modifier overrides the scenario's own, unless the scenario
-	# opts out the same way it can for chaos.
+	# opts out with no_forced_modifier -- its own flag, because being
+	# exempt from a forced chaos profile and from a forced modifier are
+	# separate claims, even though the scenarios that need one usually
+	# need both.
 	my $forced_mod = ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_modifier=([a-z_]+)\b/
 	  ? $1
 	  : undef;
 	$spec = { %$spec, modifier => $forced_mod }
 	  if defined $forced_mod
 	  && exists $MODIFIERS{$forced_mod}
-	  && !$spec->{no_forced_chaos};
+	  && !$spec->{no_forced_modifier};
 
 	if (my $mod = $spec->{modifier})
 	{
@@ -835,7 +856,7 @@ sub run_one
 	# Write the scripts out and remember two sets of --file options: all
 	# of them, and the read-only checks alone, which is what a standby
 	# can be given.
-	my (@all_opts, @check_opts, @ro_check_opts, @noddl_opts);
+	my (@all_opts, @ro_check_opts, @noddl_opts);
 	foreach my $fn (sort keys %files)
 	{
 		(my $bare = $fn) =~ s/\@\d+$//;
@@ -845,7 +866,6 @@ sub run_one
 		push @all_opts, '--file' => "$path$weight";
 		push @noddl_opts, '--file' => "$path$weight" unless $bare eq 'ddl.sql';
 		next unless $bare =~ /^check_(.*)\.sql$/;
-		push @check_opts, '--file' => "$path$weight";
 		# A check that takes row locks or otherwise writes cannot run
 		# against a standby, however read-only it looks.
 		push @ro_check_opts, '--file' => "$path$weight"
@@ -895,8 +915,6 @@ sub run_one
 	}x;
 
 	$ctx->{pgbench_cmd} = $pgbench_cmd;
-	$ctx->{all_opts} = \@all_opts;
-	$ctx->{check_opts} = \@check_opts;
 	$ctx->{ro_check_opts} = \@ro_check_opts;
 	# Everything but the DDL, for an environment that issues the commands
 	# itself rather than letting a pgbench client do it.
@@ -917,7 +935,6 @@ sub run_one
 	  [ map { $DDL{$_}->{variants}->($ctx) } @{ $spec->{ddl} } ];
 	$ctx->{stderr_re} = $stderr_re;
 	$ctx->{duration} = $duration;
-	$ctx->{spec} = $spec;
 
 	if ($env->{run})
 	{
@@ -1098,7 +1115,22 @@ sub _chaos_setup
 	# Same seed as the rest of the run, so a failure can be replayed.
 	$seed = $1 if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_seed=(\d+)\b/;
 
-	$node->safe_psql('postgres', 'CREATE EXTENSION injection_points');
+	# The build has injection points, but the module may still be missing
+	# from the installation under test -- installcheck against a server
+	# whose test modules were never installed.  That is a reason to skip
+	# the profile with a note, not to fail a run that is testing the
+	# server rather than the installation.
+	if (!eval {
+			$node->safe_psql('postgres', 'CREATE EXTENSION injection_points');
+			1;
+		})
+	{
+		Test::More::note("chaos '$name' skipped: "
+			  . 'the injection_points extension is not installed');
+		delete $ctx->{chaos_points};
+		delete $ctx->{chaos};
+		return;
+	}
 
 	# Same reasoning as the cache discard above: the jitter callback may not
 	# be in this build's injection_points module, in which case the

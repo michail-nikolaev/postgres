@@ -50,7 +50,8 @@ use Test::More;
 
 our @EXPORT_OK =
   qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS %MODIFIERS
-  stress_repack_tolerated stress_rollback_prepared);
+  stress_repack_tolerated stress_rollback_prepared
+  stress_drop_invalid_indexes);
 
 =pod
 
@@ -708,6 +709,52 @@ sub stress_rollback_prepared
 	$node->safe_psql('postgres', $_) for @rollbacks;
 
 	return scalar @rollbacks;
+}
+
+=pod
+
+=head2 stress_drop_invalid_indexes($node)
+
+Drop every invalid index.  An interrupted concurrent build may leave one
+behind, which is documented; it must at least be droppable, and the
+environments that interrupt commands -- a crash, a cancellation -- call
+this to prove it is and to leave the cluster clean for what follows.
+
+=cut
+
+sub stress_drop_invalid_indexes
+{
+	my ($node) = @_;
+
+	$node->safe_psql(
+		'postgres', q(
+		DO $$
+		DECLARE
+			idx oid;
+		BEGIN
+			FOR idx IN SELECT indexrelid FROM pg_index
+				WHERE NOT indisvalid
+			LOOP
+				CONTINUE WHEN NOT EXISTS
+					(SELECT 1 FROM pg_class WHERE oid = idx);
+				EXECUTE format('DROP INDEX %s', idx::regclass);
+			END LOOP;
+		END;
+		$$;
+	));
+	return;
+}
+
+# The two assertions every environment that drives pgbench itself has to
+# make: the workload really ran, and its clients said nothing beyond
+# what the stderr whitelist allows.  One helper, so the environments
+# cannot drift apart in what they accept.
+sub _pgbench_ok
+{
+	my ($out, $err, $ctx, $what) = @_;
+	Test::More::like($out, qr{actually processed}, "$what ran");
+	Test::More::like($err, $ctx->{stderr_re}, "$what reported nothing");
+	return;
 }
 
 our %SCHEMA = (
@@ -4324,9 +4371,6 @@ our %CHECK = (
 	# it and by a full scan of each table otherwise.
 	no_checksum_failures => {
 		requires => { schema => ['data_checksum_helper'] },
-		# Catching up before reading the standby, without reaching into
-		# the environment for how.
-		catchup => 1,
 		final => sub {
 			my ($node, $ctx) = @_;
 
@@ -4563,22 +4607,7 @@ our %ENVS = (
 				# An interrupted concurrent build may leave an invalid
 				# index behind, which is documented; it must at least be
 				# droppable.
-				$node->safe_psql(
-					'postgres', q(
-					DO $$
-					DECLARE
-						idx oid;
-					BEGIN
-						FOR idx IN SELECT indexrelid FROM pg_index
-							WHERE NOT indisvalid
-						LOOP
-							CONTINUE WHEN NOT EXISTS
-								(SELECT 1 FROM pg_class WHERE oid = idx);
-							EXECUTE format('DROP INDEX %s', idx::regclass);
-						END LOOP;
-					END;
-					$$;
-				));
+				stress_drop_invalid_indexes($node);
 			}
 			return;
 		},
@@ -4667,8 +4696,7 @@ our %ENVS = (
 			}
 
 			IPC::Run::finish($h);
-			Test::More::like($out, qr{actually processed}, 'writers completed');
-			Test::More::like($err, $ctx->{stderr_re}, 'writers reported nothing');
+			_pgbench_ok($out, $err, $ctx, 'writers');
 			Test::More::note(
 				"$attempts commands issued, $interrupted of them interrupted");
 
@@ -4693,21 +4721,7 @@ our %ENVS = (
 			}
 
 			# Whatever was cut off, nothing may be left half-built.
-			$node->safe_psql(
-				'postgres', q(
-				DO $$
-				DECLARE
-					idx oid;
-				BEGIN
-					FOR idx IN SELECT indexrelid FROM pg_index WHERE NOT indisvalid
-					LOOP
-						CONTINUE WHEN NOT EXISTS
-							(SELECT 1 FROM pg_class WHERE oid = idx);
-						EXECUTE format('DROP INDEX %s', idx::regclass);
-					END LOOP;
-				END;
-				$$;
-			));
+			stress_drop_invalid_indexes($node);
 			return;
 		},
 		final => sub {
@@ -4801,15 +4815,8 @@ our %ENVS = (
 			IPC::Run::finish($ph);
 			IPC::Run::finish($sh) if $sh;
 
-			Test::More::like($po, qr{actually processed}, 'primary workload ran');
-			Test::More::like($pe, $ctx->{stderr_re}, 'primary reported nothing');
-			if ($sh)
-			{
-				Test::More::like($so, qr{actually processed},
-					'standby workload ran');
-				Test::More::like($se, $ctx->{stderr_re},
-					'standby reported nothing');
-			}
+			_pgbench_ok($po, $pe, $ctx, 'primary workload');
+			_pgbench_ok($so, $se, $ctx, 'standby workload') if $sh;
 			return;
 		},
 		final => sub {
@@ -5023,15 +5030,8 @@ our %ENVS = (
 			IPC::Run::finish($ph);
 			IPC::Run::finish($sh) if $sh;
 
-			Test::More::like($po, qr{actually processed}, 'publisher workload ran');
-			Test::More::like($pe, $ctx->{stderr_re}, 'publisher reported nothing');
-			if ($sh)
-			{
-				Test::More::like($so, qr{actually processed},
-					'subscriber workload ran');
-				Test::More::like($se, $ctx->{stderr_re},
-					'subscriber reported nothing');
-			}
+			_pgbench_ok($po, $pe, $ctx, 'publisher workload');
+			_pgbench_ok($so, $se, $ctx, 'subscriber workload') if $sh;
 			Test::More::note("$resync table resynchronizations");
 			return;
 		},

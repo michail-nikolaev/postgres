@@ -31,8 +31,9 @@ It is off unless asked for:
 
 and takes these further settings:
 
-  stress_soak_minutes=N   wall-clock budget, default 12, chosen to fit
+  stress_soak_minutes=N   wall-clock budget, default 8, chosen to fit
                           inside the 1000 seconds meson allows a test
+                          with room for the last combination to finish
   stress_seed=N           replay a previous soak exactly
   stress_soak_skip=N      start at combination N rather than the first
   stress_soak_count=M     stop after M combinations
