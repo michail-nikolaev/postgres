@@ -2352,3 +2352,25 @@ each needs a combination no hand-written scenario names.
     topology.  Its neighbour, the cancellation disruptor's final, polls
     the same thing and was already declared incompatible for the same
     reason.
+
+4.  A rewrite the triggers forbid.
+
+    alter_trigger_function pulls in the trigger_audit schema, whose
+    audit trigger on pgbench_accounts carries
+
+      WHEN (OLD.abalance IS DISTINCT FROM NEW.abalance)
+
+    so abalance is a column used in a trigger definition, and
+    alter_table_rewrite -- which changes exactly that column's type --
+    is refused:
+
+      ERROR:  cannot alter type of a column used in a trigger definition
+
+    The server is right and says so plainly; the combination is simply
+    not one to invent.  The generated schema already declared this
+    conflict for the same class of reason (a stored generated column
+    pins the type of what it reads), and trigger_audit now does too.
+
+    Newly reachable because a command pulls its own schema in: before
+    that, naming alter_trigger_function meant naming trigger_audit, and
+    soak only offered commands whose schema was already chosen.

@@ -43,6 +43,15 @@ schema trigger_audit => {
 		conflicts => {
 			schema => ['partitioned'],
 			topology => ['subscription'],
+			# The audit trigger's WHEN clause names abalance, so the
+			# column is "used in a trigger definition" and the rewriting
+			# ALTER cannot change its type -- the server says exactly
+			# that and is right.  The generated schema declares the same
+			# conflict for the same class of reason.  Newly reachable
+			# once a command pulled its own schema in: soak can now pick
+			# alter_trigger_function, which brings this schema, next to
+			# alter_table_rewrite.
+			ddl => ['alter_table_rewrite'],
 		},
 		setup => q(
 			CREATE TABLE pgb_audit(
