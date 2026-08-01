@@ -488,6 +488,10 @@ sub run_one
 			  . ' settings';
 		}
 	}
+	# The randomized settings, after the modifier and before the
+	# scenario's own conf, so a scenario that pins a value still wins.
+	$node->append_conf('postgresql.conf', "$_ = $spec->{settings}->{$_}")
+	  for sort keys %{ $spec->{settings} // {} };
 	$node->append_conf('postgresql.conf', $_) for @{ $spec->{conf} // [] };
 	# Chaos needs its settings in place before the server starts: the
 	# module's counters live in shared memory it allocates at startup.
@@ -614,6 +618,15 @@ sub run_one
 		note "modifier '$mod': data_checksums = "
 		  . $node->safe_psql('postgres', 'SHOW data_checksums')
 		  if $MODIFIERS{$mod}->{init};
+	}
+
+	# The randomized settings, read back like the modifier's: a knob
+	# this suite believed it had turned and had not is a dimension that
+	# stopped varying with nothing saying so.
+	foreach my $sname (sort keys %{ $spec->{settings} // {} })
+	{
+		my $got = eval { $node->safe_psql('postgres', "SHOW $sname") };
+		note "setting: $sname = " . (defined $got ? $got : '(unreadable)');
 	}
 
 	# Settings a build may not accept.  Applied here rather than in

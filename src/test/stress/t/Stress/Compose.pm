@@ -62,7 +62,7 @@ our @EXPORT_OK = qw(resolve validate fits spec_is_runnable describe_effective);
 # Keys starting with an underscore are resolve()'s own bookkeeping.
 my %known_field = map { $_ => 1 }
   qw(schema pgbench_scale indexes load ddl ddl_concurrency checks
-  no_checks topology disruptor profile conf chaos modifier
+  no_checks topology disruptor profile conf chaos modifier settings
   no_forced_chaos no_forced_modifier pgbench_args clients duration
   tags);
 
@@ -478,6 +478,34 @@ sub validate
 				  . "$kind '$cname'"
 				  if grep { $_ eq $cname } @{ $spec->{$kind} // [] };
 			}
+		}
+	}
+
+	# Randomized settings: each must be a declared knob at one of its
+	# declared values, and a knob a chosen modifier or profile already
+	# sets cannot be drawn on top of it -- both would write the GUC and
+	# whichever lands last in the conf would silently win.
+	foreach my $sname (sort keys %{ $spec->{settings} // {} })
+	{
+		my $s = $SETTINGS{$sname};
+		die "scenario names unknown setting '$sname'" unless $s;
+
+		my $value = $spec->{settings}->{$sname};
+		die "setting '$sname' has no choice '$value'"
+		  unless grep { "$_" eq "$value" } @{ $s->{choices} };
+
+		foreach my $owner (
+			defined $spec->{modifier}
+			? [ modifier => $MODIFIERS{ $spec->{modifier} } ]
+			: (),
+			defined $spec->{profile}
+			? [ profile => $PROFILES{ $spec->{profile} } ]
+			: ())
+		{
+			my ($okind, $odefn) = @$owner;
+			die "setting '$sname' is already set by the $okind"
+			  if grep { /^\s*\Q$sname\E\s*=/ }
+			  @{ $odefn->{conf} // [] };
 		}
 	}
 

@@ -30,7 +30,20 @@ schema trigger_audit => {
 		# Which of the two runs first decides whether the trigger ends up
 		# on the parent or on the partition holding the old rows, and the
 		# DDL that names it later would only find it in one of those.
-		conflicts => { schema => ['partitioned'] },
+		#
+		# And not against a subscription.  The deferred audit trigger
+		# stretches every publisher commit, and against the topology's
+		# own churn -- tablesync re-copies, publication refreshes, the
+		# apply worker's stream -- an unbounded CONCURRENTLY command in
+		# the rotation can then outwait a survey's lock timeout twice
+		# over with nothing being wrong.  Driving triggers against a
+		# subscription deserves a scenario tuned for it, not an invented
+		# combination that mostly measures queueing.  Found by the first
+		# soak in which the trigger loads pulled this schema themselves.
+		conflicts => {
+			schema => ['partitioned'],
+			topology => ['subscription'],
+		},
 		setup => q(
 			CREATE TABLE pgb_audit(
 				id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -222,6 +235,14 @@ ddl create_drop_trigger => {
 ddl create_drop_constraint_trigger => {
 		requires => { schema => ['trigger_audit'] },
 		solo => 1,
+		# Not against a subscription.  This leaves its deferrable trigger
+		# installed between invocations, so every row the apply worker
+		# writes queues an event for commit; with tablesync re-copies and
+		# publication churn on the same tables, a concurrent reindex on
+		# the publisher can then outwait a survey's lock timeout without
+		# anything being wrong.  Found by the first soak in which the
+		# trigger loads pulled their schema in themselves.
+		conflicts => { topology => ['subscription'] },
 		variants => sub {
 			my ($ctx) = @_;
 			return map {

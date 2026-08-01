@@ -184,27 +184,30 @@ use File::Basename qw(dirname);
 
 our (%SCHEMA, %INDEXES, %LOAD, %DDL, %CHECK);
 our (%TOPOLOGIES, %DISRUPTORS, %PROFILES);
-our (%MODIFIERS, %CHAOS_POINTS, %CHAOS_EXCLUDED, %CHAOS, %TEMPLATES);
+our (%MODIFIERS, %SETTINGS, %CHAOS_POINTS, %CHAOS_EXCLUDED, %CHAOS, %TEMPLATES);
 
 our @EXPORT_OK = (
 	qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK
 	  %TOPOLOGIES %DISRUPTORS %PROFILES
-	  %MODIFIERS %CHAOS_POINTS %CHAOS_EXCLUDED %CHAOS %TEMPLATES),
+	  %MODIFIERS %SETTINGS %CHAOS_POINTS %CHAOS_EXCLUDED %CHAOS %TEMPLATES),
 	qw(schema index_def load ddl check
 	  topology disruptor settings_profile
-	  modifier chaos_point chaos_exclude chaos_profile scenario_template),
+	  modifier setting chaos_point chaos_exclude chaos_profile
+	  scenario_template),
 	qw(load_all));
 
 our %EXPORT_TAGS = (
 	registries => [
 		qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK
 		  %TOPOLOGIES %DISRUPTORS %PROFILES
-		  %MODIFIERS %CHAOS_POINTS %CHAOS_EXCLUDED %CHAOS %TEMPLATES)
+		  %MODIFIERS %SETTINGS %CHAOS_POINTS %CHAOS_EXCLUDED %CHAOS
+		  %TEMPLATES)
 	],
 	declare => [
 		qw(schema index_def load ddl check
 		  topology disruptor settings_profile
-		  modifier chaos_point chaos_exclude chaos_profile scenario_template)
+		  modifier setting chaos_point chaos_exclude chaos_profile
+		  scenario_template)
 	],
 );
 
@@ -221,6 +224,7 @@ my %registry_of = (
 	disruptor => \%DISRUPTORS,
 	profile => \%PROFILES,
 	modifier => \%MODIFIERS,
+	setting => \%SETTINGS,
 	chaos_point => \%CHAOS_POINTS,
 	chaos_exclude => \%CHAOS_EXCLUDED,
 	chaos_profile => \%CHAOS,
@@ -255,6 +259,10 @@ sub settings_profile { _register('profile', @_); return }
 sub modifier      { _register('modifier', @_); return }
 sub chaos_point   { _register('chaos_point', @_); return }
 sub chaos_profile { _register('chaos_profile', @_); return }
+
+# One knob soak may turn at random, with its discrete choices; the
+# modifier rules apply to every entry.  See Cross/SettingsPool.pm.
+sub setting { _register('setting', @_); return }
 
 # A point that must never be jittered, with the reason it must not.
 # The IS_INJECTION_POINT_ATTACHED sites are excluded mechanically --

@@ -383,6 +383,29 @@ sub _invent
 		grep { _modifier_fits($_, \%axes, 10, \@indexes) }
 		  sort keys %MODIFIERS);
 
+	# And a few knobs on top, from the settings pool: half of the
+	# combinations get one to three of them, at one of the ends each
+	# knob declares.  A knob the modifier or the profile already sets is
+	# out, for that combination only -- both would write the GUC, and
+	# whichever landed last in the conf would silently win.
+	my %settings;
+	if (rand() < 0.5)
+	{
+		my @owned = (
+			@{ $MODIFIERS{$modifier}->{conf} // [] },
+			defined $axes{profile}
+			? @{ $PROFILES{ $axes{profile} }->{conf} // [] }
+			: ());
+		my @eligible = grep {
+			my $s = $_;
+			!grep { /^\s*\Q$s\E\s*=/ } @owned
+		} sort keys %SETTINGS;
+		foreach my $sname (_pick_some(1, 3, @eligible))
+		{
+			$settings{$sname} = _pick(@{ $SETTINGS{$sname}->{choices} });
+		}
+	}
+
 	return {
 		schema => \@schema,
 		indexes => \@indexes,
@@ -398,6 +421,7 @@ sub _invent
 		ddl_concurrency => 1,
 		chaos => $chaos,
 		modifier => $modifier,
+		(%settings ? (settings => \%settings) : ()),
 		# No checks named: the loads and commands bring their own, and
 		# the auto set joins wherever it applies.  Soak used to sample
 		# checks as a dimension, which mostly invented combinations that
@@ -667,6 +691,11 @@ sub _describe
 	$out .= " args=$spec->{pgbench_args}" if $spec->{pgbench_args};
 	$out .= " modifier=$spec->{modifier}"
 	  if defined $spec->{modifier} && $spec->{modifier} ne 'none';
+	$out .= ' settings=['
+	  . join(',',
+		map { "$_=$spec->{settings}->{$_}" } sort keys %{ $spec->{settings} })
+	  . ']'
+	  if $spec->{settings} && %{ $spec->{settings} };
 	if (ref $spec->{chaos} eq 'HASH')
 	{
 		my $points = $spec->{chaos}->{points};

@@ -69,6 +69,16 @@ schema movable_identity => {
 # nothing -- which is what identity_moved reported when it was written
 # that way.
 ddl move_replica_identity => {
+		# Kept out of the combinations soak invents.  Winning the
+		# AccessExclusiveLock this needs is a matter of catching a gap in
+		# the writers, and the moving-identity scenarios are tuned for
+		# exactly that -- four clients, a long run, no forced slowdowns.
+		# Under soak's ten clients the bounded helper never wins, and
+		# identity_moved reports a dimension that could not fire; the
+		# check doing its job, but the invention wasting a slot.  Found
+		# by the first soak in which the check travelled with the
+		# command.
+		catalogue_only => 1,
 		requires => { schema => ['movable_identity'] },
 		checks => ['identity_moved'],
 		variants => sub {

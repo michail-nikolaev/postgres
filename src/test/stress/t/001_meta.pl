@@ -144,6 +144,47 @@ foreach my $name (sort keys %catalogue)
 }
 
 {
+	# The randomized settings: a knob must exist, hold one of its
+	# declared values, and not fight the modifier over the same GUC.
+	my $ok = eval {
+		Stress::Compose::validate(
+			Stress::Compose::resolve(
+				{
+					load => ['tpcb_like'],
+					ddl => ['vacuum'],
+					settings => { deadlock_timeout => '50ms' }
+				}));
+		1;
+	};
+	ok($ok, 'a declared setting at a declared value validates') or diag($@);
+
+	my $died = !eval {
+		Stress::Compose::validate(
+			Stress::Compose::resolve(
+				{
+					load => ['tpcb_like'],
+					ddl => ['vacuum'],
+					settings => { deadlock_timeout => '77ms' }
+				}));
+		1;
+	};
+	ok($died, 'an undeclared value fails validation');
+
+	$died = !eval {
+		Stress::Compose::validate(
+			Stress::Compose::resolve(
+				{
+					load => ['tpcb_like'],
+					ddl => ['vacuum'],
+					modifier => 'spill',
+					settings => { temp_buffers => '64MB' }
+				}));
+		1;
+	};
+	ok($died, 'a knob the modifier already sets cannot be drawn over it');
+}
+
+{
 	# The axes carry their own constraints: a disruptor whose victim
 	# picker or restart loop is written for one node refuses the
 	# topologies it has not been built for.
