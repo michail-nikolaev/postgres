@@ -12,6 +12,7 @@ use warnings FATAL => 'all';
 
 use Test::More;
 use Stress::Registry ':declare';
+use Stress::MVCC qw(mvcc_or_empty);
 
 # A materialized view over the ledger column, so REFRESH ...
 # CONCURRENTLY has something whose contents can be predicted:
@@ -47,12 +48,16 @@ ddl refresh_matview_concurrently => {
 check matview_matches => {
 		weight => 1,
 		requires => { schema => ['matview'] },
-		script => q(
-			SELECT stress_assert(cnt = 0 OR sum = 0,
+		script => sub {
+			my ($ctx) = @_;
+			my $tol = mvcc_or_empty($ctx, 'cnt');
+			return qq(
+			SELECT stress_assert(${tol}sum = 0,
 				format('matview has %s buckets summing to %s', cnt, sum))
 			FROM (SELECT COUNT(*) AS cnt, COALESCE(SUM(s), 0) AS sum
 				FROM pgb_mv) x;
-		),
+			);
+		},
 };
 
 # REFRESH MATERIALIZED VIEW CONCURRENTLY needs a unique index on the

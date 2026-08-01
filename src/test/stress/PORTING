@@ -125,8 +125,10 @@ files are gone from the tree and only the git history has them:
                               a slot decoded another.  Needs a load
                               targeting a second database.
 
-  REPACK's MVCC tolerance     stress_repack_tolerated() now expresses
-                              the caveat in one place, and the checks
+  REPACK's MVCC tolerance     Stress::MVCC now expresses the caveat in
+                              one place, switched by whether the
+                              scenario's rotation carries a command
+                              declared mvcc_safe => 0, and the checks
                               that read a repacked relation use it.  What
                               is still open is the loads: one of them had
                               to be written to survive an empty read (see

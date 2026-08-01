@@ -13,6 +13,7 @@ use warnings FATAL => 'all';
 
 use Test::More;
 use Stress::Registry ':declare';
+use Stress::MVCC qw(mvcc_or_empty);
 
 # A column whose sum never moves, because every writer applies a
 # balanced pair of updates.  Several dimensions need an invariant
@@ -56,12 +57,16 @@ load balanced_pair => {
 check ledger_sum => {
 		weight => 1,
 		requires => { schema => ['ledger'] },
-		script => q(
-			SELECT stress_assert(cnt = 0 OR sum = 0,
+		script => sub {
+			my ($ctx) = @_;
+			my $tol = mvcc_or_empty($ctx, 'cnt');
+			return qq(
+			SELECT stress_assert(${tol}sum = 0,
 				format('ledger has %s rows summing to %s', cnt, sum))
 			FROM (SELECT COUNT(*) AS cnt, COALESCE(SUM(ledger), 0) AS sum
 				FROM pgbench_accounts) x;
-		),
+			);
+		},
 		final => sub {
 			my ($node, $ctx) = @_;
 			Test::More::is(
@@ -81,24 +86,27 @@ check row_lock_durability => {
 		requires => { schema => ['ledger'], load => ['row_lock'] },
 		# Takes row locks, so it cannot run on a standby.
 		writes => 1,
-		script => q(
-			\set lo random(1, :naccounts - 4)
+		script => sub {
+			my ($ctx) = @_;
+			my $tol = mvcc_or_empty($ctx, ':reread_cnt::bigint');
+			return qq(
+			\\set lo random(1, :naccounts - 4)
 			BEGIN;
 			SELECT COUNT(*) AS cnt, COALESCE(SUM(ledger), 0) AS sum FROM
 				(SELECT ledger FROM pgbench_accounts
 					WHERE aid BETWEEN :lo AND :lo + 4
-					ORDER BY aid FOR UPDATE) s \gset locked_
-			\sleep 20 ms
+					ORDER BY aid FOR UPDATE) s \\gset locked_
+			\\sleep 20 ms
 			SELECT COUNT(*) AS cnt, COALESCE(SUM(ledger), 0) AS sum
-				FROM pgbench_accounts WHERE aid BETWEEN :lo AND :lo + 4 \gset reread_
+				FROM pgbench_accounts WHERE aid BETWEEN :lo AND :lo + 4 \\gset reread_
 			COMMIT;
-			SELECT stress_assert(:reread_cnt::bigint = 0
-					OR (:locked_cnt::bigint = :reread_cnt::bigint
+			SELECT stress_assert($tol(:locked_cnt::bigint = :reread_cnt::bigint
 						AND :locked_sum::bigint = :reread_sum::bigint),
 				format('rows changed under a held lock: locked (%s rows, sum %s), re-read (%s rows, sum %s)',
 					:locked_cnt::bigint, :locked_sum::bigint,
 					:reread_cnt::bigint, :reread_sum::bigint));
-		),
+			);
+		},
 };
 
 1;

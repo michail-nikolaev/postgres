@@ -14,7 +14,7 @@ use warnings FATAL => 'all';
 use Test::More;
 use Stress::Registry ':declare';
 
-use Stress::MVCC qw(stress_repack_tolerated);
+use Stress::MVCC qw(mvcc_or_empty);
 
 # A self-referencing foreign key, so that every repoint fires a
 # referential integrity check that resolves the parent through
@@ -103,7 +103,8 @@ check no_orphans => {
 			# The relation is in the rotation's reach, so it reading empty
 			# has to be allowed for: an empty table would make every
 			# reference look like an orphan.
-			my $tol = stress_repack_tolerated('rows');
+			my ($ctx) = @_;
+			my $tol = mvcc_or_empty($ctx, 'rows');
 			return qq(
 			SELECT stress_assert(${tol}orphans = 0,
 				format('%s rows reference a missing parent', orphans))

@@ -71,6 +71,7 @@ load hot_churn => {
 # the snapshot and reaching the row a commit is racing.  pgbench's
 # accounts and history are far too big for either.
 ddl repack_hot_small => {
+		mvcc_safe => 0,
 		variants => sub {
 			my ($ctx) = @_;
 			return map {

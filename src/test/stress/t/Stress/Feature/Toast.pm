@@ -14,7 +14,7 @@ use warnings FATAL => 'all';
 use Test::More;
 use Stress::Registry ':declare';
 
-use Stress::MVCC qw(stress_repack_tolerated);
+use Stress::MVCC qw(mvcc_or_empty);
 
 # Wide values that go out of line, stored with an md5 of themselves
 # so that a torn or stale TOAST fetch is visible as a mismatch.  The
@@ -64,7 +64,8 @@ check toast_md5 => {
 		weight => 1,
 		requires => { schema => ['toast'] },
 		script => sub {
-			my $tol = stress_repack_tolerated('cnt');
+			my ($ctx) = @_;
+			my $tol = mvcc_or_empty($ctx, 'cnt');
 			return qq(
 			SELECT stress_assert(${tol}bad = 0,
 				format('%s rows whose payload does not match its md5', bad))

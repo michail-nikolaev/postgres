@@ -71,7 +71,8 @@ load cursor_hold => {
 		requires => { schema => ['ledger'] },
 		checks => ['ledger_sum'],
 		setup => q(
-			CREATE FUNCTION pgb_cursor_sum(expected bigint) RETURNS void
+			CREATE FUNCTION pgb_cursor_sum(expected bigint, strict int)
+			RETURNS void
 			LANGUAGE plpgsql AS $$
 			DECLARE
 				c CURSOR FOR SELECT ledger FROM pgbench_accounts;
@@ -91,9 +92,10 @@ load cursor_hold => {
 				END LOOP;
 				CLOSE c;
 				-- REPACK (CONCURRENTLY) is not MVCC-safe yet: a snapshot
-				-- spanning its swap may find the table empty.  Anything
-				-- else must add up.
-				IF seen <> 0 AND total <> expected THEN
+				-- spanning its swap may find the table empty, and the
+				-- caller says whether its rotation makes that reachable.
+				-- Anything else must add up.
+				IF (seen <> 0 OR strict = 1) AND total <> expected THEN
 					RAISE EXCEPTION 'cursor read % over % rows, not %',
 						total, seen, expected;
 				END IF;
@@ -101,7 +103,7 @@ load cursor_hold => {
 			$$;
 		),
 		script => q(
-			SELECT pgb_cursor_sum(0);
+			SELECT pgb_cursor_sum(0, :strict_mvcc);
 		),
 };
 

@@ -54,29 +54,43 @@ load subscriber_delete_reinsert => {
 		# Deleting an account row, even for the instant this transaction
 		# holds it, breaks a foreign key pointed at it.
 		conflicts => { schema => ['fk_child'] },
-		script => q(
-			\set aid random(1, :naccounts)
+		script => sub {
+			my ($ctx) = @_;
+
+			# The delete is wrapped so that this always returns exactly
+			# one row.  When the rotation carries a repack, a statement
+			# spanning its swap can find the table empty and delete
+			# nothing -- the row is still there in the new relfilenode,
+			# so there is nothing to put back and the insert is skipped.
+			# Without one, a delete under the advisory lock that finds
+			# anything but one row is the failure this load exists to
+			# catch.
+			my $guard =
+			  $ctx->{mvcc_gap_possible}
+			  ? ''
+			  : q(
+			SELECT stress_assert(:del_n = 1,
+				format('delete under lock found %s rows', :del_n));
+			);
+			return qq(
+			\\set aid random(1, :naccounts)
 			BEGIN;
 			SELECT pg_advisory_xact_lock(:aid);
-			-- The delete is wrapped so that this always returns exactly
-			-- one row: REPACK (CONCURRENTLY) is not MVCC-safe yet, and a
-			-- statement that spans its swap can find the table empty and
-			-- delete nothing.  When that happens the row is still there
-			-- in the new relfilenode, so there is nothing to put back.
 			WITH d AS (DELETE FROM pgbench_accounts WHERE aid = :aid
 					RETURNING bid, abalance)
 				SELECT COUNT(*) AS n, COALESCE(MAX(bid), 0) AS bid,
-					COALESCE(MAX(abalance), 0) AS abalance FROM d \gset del_
-			\sleep 1 ms
-			\if :del_n > 0
+					COALESCE(MAX(abalance), 0) AS abalance FROM d \\gset del_
+			$guard\\sleep 1 ms
+			\\if :del_n > 0
 				-- The casts are for the extended and prepared protocols,
 				-- where these arrive as query parameters and the values
-				-- came back through \gset with no type attached.
+				-- came back through \\gset with no type attached.
 				INSERT INTO pgbench_accounts(aid, bid, abalance, sub_local)
 					VALUES (:aid, :del_bid::int, :del_abalance::int, 0);
-			\endif
+			\\endif
 			COMMIT;
-		),
+			);
+		},
 };
 
 topology standalone => {

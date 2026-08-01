@@ -515,6 +515,10 @@ sub run_one
 		naccounts => $naccounts,
 		ntellers => 10 * $pgbench_scale,
 		nbranches => $pgbench_scale,
+		# For scripts whose tolerance lives inside a server-side
+		# function: 1 when every read must add up, 0 when a repack in
+		# the rotation may legitimately show a table empty.
+		strict_mvcc => $spec->{_mvcc_gap} ? 0 : 1,
 	);
 	my @tables;
 	my @indexes;
@@ -583,6 +587,7 @@ sub run_one
 		pgbench_scale => $pgbench_scale,
 		files => \%load_files,
 		vars => \%vars,
+		mvcc_gap_possible => $spec->{_mvcc_gap},
 		%vars,
 	};
 

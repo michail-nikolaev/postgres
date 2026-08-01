@@ -66,6 +66,10 @@ sub _unpartitioned_indexes
 }
 
 ddl repack_concurrently => {
+		# Not MVCC-safe yet: a snapshot spanning the relfilenode swap can
+		# find the table empty.  This flag is what turns the checks'
+		# tolerance on; see Stress::MVCC.
+		mvcc_safe => 0,
 		variants => sub {
 			my ($ctx) = @_;
 			return map {
@@ -79,6 +83,7 @@ ddl repack_concurrently => {
 };
 
 ddl repack_using_index => {
+		mvcc_safe => 0,
 		variants => sub {
 			my ($ctx) = @_;
 			return map {

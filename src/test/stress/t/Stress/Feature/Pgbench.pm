@@ -304,12 +304,35 @@ load bulk_copy => {
 # on every check.
 check balances => {
 		weight => 1,
-		script => q(
+		script => sub {
+			my ($ctx) = @_;
+
+			# The sums are read in one statement, so they share a
+			# snapshot; the counts are only fetched when they disagree,
+			# since counting every account is far too expensive to do on
+			# every check.  When the rotation carries a repack, a snapshot
+			# spanning its swap can see a table empty, and only that is
+			# forgiven -- see Stress::MVCC.
+			my $fetch = q(
 			SELECT (SELECT COALESCE(SUM(abalance), 0) FROM pgbench_accounts) AS a,
 				   (SELECT COALESCE(SUM(tbalance), 0) FROM pgbench_tellers) AS t,
 				   (SELECT COALESCE(SUM(bbalance), 0) FROM pgbench_branches) AS b,
 				   (SELECT COALESCE(SUM(delta), 0) FROM pgbench_history) AS h
 				\gset bal_
+			);
+			my $assert = q(
+				SELECT stress_assert(false,
+					format('balances disagree: accounts=%s tellers=%s branches=%s history=%s',
+						:bal_a::bigint, :bal_t::bigint, :bal_b::bigint, :bal_h::bigint));
+			);
+
+			return $fetch . q(
+			\if :bal_a != :bal_t or :bal_t != :bal_b or :bal_b != :bal_h)
+			  . $assert . q(
+			\endif
+			) unless $ctx->{mvcc_gap_possible};
+
+			return $fetch . q(
 			\if :bal_a != :bal_t or :bal_t != :bal_b or :bal_b != :bal_h
 				SELECT (SELECT COUNT(*) FROM pgbench_accounts) AS a,
 					   (SELECT COUNT(*) FROM pgbench_tellers) AS t,
@@ -318,13 +341,12 @@ check balances => {
 					\gset cnt_
 				\if :cnt_a = 0 or :cnt_t = 0 or :cnt_b = 0 or :cnt_h = 0
 					SELECT 'repack: empty view tolerated' AS marker;
-				\else
-					SELECT stress_assert(false,
-						format('balances disagree: accounts=%s tellers=%s branches=%s history=%s',
-							:bal_a::bigint, :bal_t::bigint, :bal_b::bigint, :bal_h::bigint));
+				\else)
+			  . "\t" . $assert . q(
 				\endif
 			\endif
-		),
+			);
+		},
 		final => sub {
 			my ($node, $ctx) = @_;
 			my $row = $node->safe_psql(

@@ -266,6 +266,20 @@ sub resolve
 	$eff{_check_prov} = \%prov;
 	$eff{_checks_dropped} = \@dropped;
 	$eff{_schema_pulled} = [ sort keys %pulled ];
+
+	# Whether a snapshot in this scenario can legitimately find a table
+	# empty: only when the rotation carries a command that is declared
+	# not MVCC-safe, and stress_strict_mvcc=1 does not override.  The
+	# checks pick their tolerant or strict form off this one flag.
+	my $gap = 0;
+	foreach my $dname (@{ $eff{ddl} // [] })
+	{
+		my $d = $DDL{$dname} or next;
+		$gap = 1 if defined $d->{mvcc_safe} && !$d->{mvcc_safe};
+	}
+	$gap = 0
+	  if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_strict_mvcc=1\b/;
+	$eff{_mvcc_gap} = $gap;
 	return \%eff;
 }
 
@@ -340,6 +354,7 @@ sub describe_effective
 	$out .= ' dropped=[' . join(',', @{ $spec->{_checks_dropped} }) . ']'
 	  if @{ $spec->{_checks_dropped} // [] };
 	$out .= " topology=$spec->{topology}";
+	$out .= ' mvcc_gap=' . ($spec->{_mvcc_gap} ? 'tolerated' : 'strict');
 	$out .= " disruptor=$spec->{disruptor}"
 	  if ($spec->{disruptor} // 'none') ne 'none';
 	$out .= " profile=$spec->{profile}" if defined $spec->{profile};

@@ -14,7 +14,7 @@ use warnings FATAL => 'all';
 use Test::More;
 use Stress::Registry ':declare';
 
-use Stress::MVCC qw(stress_repack_tolerated);
+use Stress::MVCC qw(mvcc_or_empty);
 
 # How each column of pgbench_accounts is defined: whether it is stored,
 # virtual or neither, and the expression behind it.  REPACK swaps the
@@ -117,7 +117,8 @@ check generated_matches => {
 		weight => 1,
 		requires => { schema => ['generated'] },
 		script => sub {
-			my $tol = stress_repack_tolerated('cnt');
+			my ($ctx) = @_;
+			my $tol = mvcc_or_empty($ctx, 'cnt');
 			return qq(
 			SELECT stress_assert(${tol}bad = 0,
 				format('%s rows whose generated column does not match', bad))
