@@ -2397,3 +2397,31 @@ each needs a combination no hand-written scenario names.
     going round again.  Worth noting what this says about the check:
     comparing the tables at the end would never have caught it, and the
     log line was the whole evidence.
+
+Which lever to point at the whole catalogue (2026-08-02)
+=======================================================
+
+Recorded because it has now cost two people time, and the answer is not
+the obvious one.
+
+Forcing discard_hard -- the cache discard at ten times the ordinary
+rate -- on every scenario at once starves the catalogue rather than
+searching it.  One full-catalogue pass in eight ended with
+
+  ERROR:  canceling statement due to lock timeout
+
+in 109_plancache_and_matview, after REPACK (CONCURRENTLY) on
+pgbench_tellers sat at the head of the lock queue for nine minutes
+waiting for the AccessExclusiveLock its final swap needs, with every
+writer stacked behind it.  Nothing about the server: forcing a catalog
+flush at every opportunity costs about two orders of magnitude, and a
+command that must briefly exclude every writer cannot get through a
+queue that never drains.  The commit that introduced stress_chaos=
+measured the same thing at the same rate -- one failure in twelve.
+
+So for a pass over the whole catalogue, use discard_only: it is the
+rate the two backend bugs on this branch were actually found at
+("2 runs in 10 with nothing but debug_discard_caches_probability set"),
+and eight passes of it here were clean rather than starved.  Keep
+discard_hard for a scenario or two at a time, where the starvation is
+visible for what it is.

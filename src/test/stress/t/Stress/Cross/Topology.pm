@@ -325,6 +325,7 @@ topology subscription => {
 
 			my $deadline = time() + $ctx->{duration};
 			my $resync = 0;
+			my $resync_tried = 0;
 			while (time() < $deadline)
 			{
 				my $pick =
@@ -363,6 +364,8 @@ topology subscription => {
 				}
 				else
 				{
+					$resync_tried++;
+
 					# Taking a table out of the publication and adding it
 					# back makes the next refresh copy it from scratch,
 					# which restarts the table synchronization worker.
@@ -426,7 +429,30 @@ topology subscription => {
 
 			_pgbench_ok($po, $pe, $ctx, 'publisher workload');
 			_pgbench_ok($so, $se, $ctx, 'subscriber workload') if $sh;
-			Test::More::note("$resync table resynchronizations");
+			Test::More::note(
+				"$resync table resynchronizations, $resync_tried attempted");
+
+			# The resynchronization is one of the two things this
+			# topology exists to drive, and a run where it never
+			# happened tested the other one alone -- so say so rather
+			# than pass quietly.  Only where there was room for it: the
+			# loop picks this branch one time in five, and each cycle
+			# now waits for the copy it asked for -- which costs a
+			# second or two, and took an eighteen-second run from twelve
+			# cycles to two -- so a short run under load can
+			# legitimately reach it once or not at all.  Same shape as
+			# the cancellation disruptor's own check.
+			if ($resync_tried < 2)
+			{
+				Test::More::note(
+					"only $resync_tried resynchronizations were attempted; "
+					  . "too few to conclude anything about them");
+			}
+			else
+			{
+				Test::More::cmp_ok($resync, '>', 0,
+					'at least one table was resynchronized from scratch');
+			}
 			return;
 		},
 		final => sub {
