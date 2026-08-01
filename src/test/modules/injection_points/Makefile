@@ -9,6 +9,10 @@ EXTENSION = injection_points
 DATA = injection_points--1.0.sql
 PGFILEDESC = "injection_points - facility for injection points"
 
+# The generated catalogue lands in the build directory.
+PG_CPPFLAGS = -I.
+EXTRA_CLEAN = injection_point_defs.h
+
 REGRESS = injection_points hashagg reindex_conc vacuum
 REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
@@ -35,6 +39,12 @@ ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# A PGXS build has no backend sources to scan; an empty catalogue keeps
+# injection_points_defined() honest about what it can promise.
+injection_points.o: injection_point_defs.h
+injection_point_defs.h: generate-injection-points.pl
+	$(PERL) $(srcdir)/generate-injection-points.pl --stub --outfile $@
 else
 subdir = src/test/modules/injection_points
 top_builddir = ../../../..
@@ -51,5 +61,14 @@ else
 check:
 	@echo "injection points are disabled in this build"
 endif
+
+# Rescanned on every build: make cannot depend on "every backend source"
+# any more than meson can, the scan is sub-second, and the script rewrites
+# its output only when the content changes, so nothing relinks for it.
+.PHONY: injection-point-defs-scan
+injection_points.o: injection_point_defs.h
+injection_point_defs.h: injection-point-defs-scan
+	$(PERL) $(srcdir)/generate-injection-points.pl \
+		--srcdir $(top_srcdir) --outfile $@
 
 endif

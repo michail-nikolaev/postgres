@@ -31,6 +31,23 @@ typedef struct InjectionPointCondition
 } InjectionPointCondition;
 
 /*
+ * A row of the generated catalogue of injection point call sites, built at
+ * compile time by generate-injection-points.pl from the backend sources.
+ * "kind" records which macro the site uses -- run, cached, load or attached
+ * -- because that is what a consumer has to know: LOAD and CACHED mark a
+ * point reached from inside a critical section, and an ATTACHED site changes
+ * the server's behavior on mere attachment, so a callback that only means to
+ * add delay must stay away from that name.
+ */
+typedef struct InjectionPointDef
+{
+	const char *name;
+	const char *file;			/* relative to src/backend */
+	int			line;
+	const char *kind;
+} InjectionPointDef;
+
+/*
  * Private data of the "jitter" callback, which sleeps for a random time with
  * a given probability.  Unlike the other callbacks this one is meant to be
  * left attached while an ordinary workload runs: it widens the window a race

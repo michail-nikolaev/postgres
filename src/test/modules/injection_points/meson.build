@@ -9,6 +9,19 @@ injection_points_sources = files(
   'regress_injection.c',
 )
 
+# The catalogue of injection point call sites, scanned out of the backend
+# sources.  meson cannot express a dependency on "every backend source", so
+# the sub-second scan runs on every build; the script rewrites its output
+# only when the content changes, so nothing recompiles or relinks for it.
+injection_point_defs = custom_target('injection_point_defs',
+  output: 'injection_point_defs.h',
+  command: [perl, files('generate-injection-points.pl'),
+            '--srcdir', meson.project_source_root(),
+            '--outfile', '@OUTPUT@'],
+  build_always_stale: true,
+)
+injection_points_sources += injection_point_defs
+
 if host_system == 'windows'
   injection_points_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'injection_points',
@@ -17,7 +30,11 @@ endif
 
 injection_points = shared_module('injection_points',
   injection_points_sources,
-  kwargs: pg_test_mod_args,
+  # '.' so that the generated injection_point_defs.h, which lands in the
+  # build directory, is found from the C file that includes it.
+  kwargs: pg_test_mod_args + {
+    'include_directories': include_directories('.'),
+  },
 )
 test_install_libs += injection_points
 

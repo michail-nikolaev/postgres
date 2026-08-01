@@ -138,9 +138,41 @@ AS 'MODULE_PATHNAME', 'injection_points_stats_jitter'
 LANGUAGE C STRICT PARALLEL UNSAFE;
 
 --
+-- injection_points_stats_jitter_by_point()
+--
+-- The same numbers, per point: which points slept, how often and for how
+-- long.  A point that never slept widened nothing, however busy the rest
+-- of the profile was.
+--
+CREATE FUNCTION injection_points_stats_jitter_by_point(OUT point_name text,
+    OUT sleep_count int8,
+    OUT sleep_us int8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'injection_points_stats_jitter_by_point'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+--
 -- injection_points_stats_reset_jitter()
 --
 CREATE FUNCTION injection_points_stats_reset_jitter()
 RETURNS void
 AS 'MODULE_PATHNAME', 'injection_points_stats_reset_jitter'
 LANGUAGE C STRICT PARALLEL UNSAFE;
+
+--
+-- injection_points_defined()
+--
+-- Every injection point call site the backend sources of this build
+-- define, from a table generated at compile time.  Attaching validates
+-- nothing, so this list is the only way to tell a stale name from a live
+-- one.  "kind" is the macro at the call site: run, cached, load, or
+-- attached -- the last one marking a point whose mere attachment changes
+-- what the server decides.
+--
+CREATE FUNCTION injection_points_defined(OUT name text,
+    OUT file text,
+    OUT line int4,
+    OUT kind text)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'injection_points_defined'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;

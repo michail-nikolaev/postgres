@@ -110,5 +110,32 @@ SELECT injection_points_detach('TestInjectionNoticeFunc');
 SELECT point_name, library, function FROM injection_points_list()
   ORDER BY point_name COLLATE "C";
 
+-- Jitter: sleeps are counted globally and per point.  One run at
+-- probability 1.0 with a fixed 10us sleep is exactly one sleep of 10us,
+-- so the numbers can be asserted rather than ranged.
+SELECT injection_points_stats_reset_jitter();
+SELECT injection_points_attach_jitter('TestJitter', 1.0, 10, 10, 42);
+SELECT injection_points_run('TestJitter');
+SELECT sleep_count, sleep_us FROM injection_points_stats_jitter();
+SELECT point_name, sleep_count, sleep_us
+  FROM injection_points_stats_jitter_by_point()
+  WHERE point_name = 'TestJitter';
+SELECT injection_points_detach('TestJitter');
+-- Reset zeroes the numbers; the per-point slot keeps its name, because
+-- a backend that resolved it goes on using it.
+SELECT injection_points_stats_reset_jitter();
+SELECT sleep_count, sleep_us FROM injection_points_stats_jitter();
+SELECT point_name, sleep_count, sleep_us
+  FROM injection_points_stats_jitter_by_point()
+  WHERE point_name = 'TestJitter';
+
+-- The generated catalogue of defined call sites.  The rows come from
+-- scanning the backend sources, so their exact content is the tree's
+-- business; what must hold is that the scan found something and that
+-- every row names one of the four macros.
+SELECT count(*) > 0 AS has_rows FROM injection_points_defined();
+SELECT count(*) = 0 AS kinds_ok FROM injection_points_defined()
+  WHERE kind NOT IN ('run', 'cached', 'load', 'attached');
+
 DROP EXTENSION injection_points;
 DROP FUNCTION wait_pid;

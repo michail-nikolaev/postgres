@@ -43,6 +43,16 @@ PG_MODULE_MAGIC;
 #define INJ_MAX_WAIT	8
 #define INJ_NAME_MAXLEN	64
 
+/*
+ * Maximum number of points whose jitter is counted separately.  Sized to
+ * MAX_INJECTION_POINTS: more points than that cannot be attached at once
+ * anyway.
+ */
+#define INJ_MAX_JITTER	128
+
+/* The call sites the backend sources define, generated at build time. */
+#include "injection_point_defs.h"
+
 /* Thresholds of waits */
 #define INJ_WAIT_INITIAL_US		10	/* 10us */
 #define INJ_WAIT_MAX_US			100000	/* 100ms */
@@ -52,6 +62,20 @@ PG_MODULE_MAGIC;
  * locally to this process.
  */
 static List *inj_list_local = NIL;
+
+/*
+ * Per-point jitter counters.  A slot is claimed for a name the first time
+ * that point sleeps and keeps it from then on: slots are never re-dealt
+ * while the server runs, so a backend may cache the pointer it resolved.
+ */
+typedef struct InjectionJitterStat
+{
+	/* Point name; claimed under the lock, then immutable */
+	char		name[INJ_NAME_MAXLEN];
+
+	pg_atomic_uint64 count;
+	pg_atomic_uint64 sleep_us;
+} InjectionJitterStat;
 
 /*
  * Shared state information for injection points.
@@ -73,6 +97,9 @@ typedef struct InjectionPointSharedState
 	/* Number of jitter sleeps performed, and their total duration */
 	pg_atomic_uint64 jitter_count;
 	pg_atomic_uint64 jitter_sleep_us;
+
+	/* The same, counted per point */
+	InjectionJitterStat jitter_stats[INJ_MAX_JITTER];
 } InjectionPointSharedState;
 
 /* Pointer to shared-memory state. */
@@ -117,6 +144,12 @@ injection_point_init_state(void *ptr, void *arg)
 		pg_atomic_init_u32(&state->wait_counts[i], 0);
 	pg_atomic_init_u64(&state->jitter_count, 0);
 	pg_atomic_init_u64(&state->jitter_sleep_us, 0);
+	for (int i = 0; i < INJ_MAX_JITTER; i++)
+	{
+		state->jitter_stats[i].name[0] = '\0';
+		pg_atomic_init_u64(&state->jitter_stats[i].count, 0);
+		pg_atomic_init_u64(&state->jitter_stats[i].sleep_us, 0);
+	}
 }
 
 static void
@@ -235,6 +268,67 @@ injection_notice(const char *name, const void *private_data, void *arg)
 }
 
 /*
+ * Map a point name to its per-point counter slot, claiming one on first
+ * use.
+ *
+ * This runs on every sleep and may run inside a critical section, where
+ * nothing can allocate, so the resolved slot is cached backend-locally in a
+ * small fixed array and the spinlock is taken once per (backend, point)
+ * pair.  Caching the pointer is safe because a claimed slot never changes
+ * its name: even the stats reset only zeroes the counters.
+ */
+#define INJ_JITTER_LOCAL_CACHE	16
+
+static InjectionJitterStat *
+injection_jitter_stat(const char *name)
+{
+	static struct
+	{
+		char		name[INJ_NAME_MAXLEN];
+		InjectionJitterStat *stat;
+	}			cache[INJ_JITTER_LOCAL_CACHE];
+	static int	cache_used = 0;
+	InjectionJitterStat *found = NULL;
+
+	for (int i = 0; i < cache_used; i++)
+	{
+		if (strcmp(cache[i].name, name) == 0)
+			return cache[i].stat;
+	}
+
+	SpinLockAcquire(&inj_state->lock);
+	for (int i = 0; i < INJ_MAX_JITTER; i++)
+	{
+		InjectionJitterStat *stat = &inj_state->jitter_stats[i];
+
+		if (stat->name[0] == '\0')
+		{
+			strlcpy(stat->name, name, INJ_NAME_MAXLEN);
+			found = stat;
+			break;
+		}
+		if (strcmp(stat->name, name) == 0)
+		{
+			found = stat;
+			break;
+		}
+	}
+	SpinLockRelease(&inj_state->lock);
+
+	/* Table full: this point is counted in the aggregate alone. */
+	if (found == NULL)
+		return NULL;
+
+	if (cache_used < INJ_JITTER_LOCAL_CACHE)
+	{
+		strlcpy(cache[cache_used].name, name, INJ_NAME_MAXLEN);
+		cache[cache_used].stat = found;
+		cache_used++;
+	}
+	return found;
+}
+
+/*
  * Sleep for a random time, with a given probability.
  *
  * This is the callback that makes a race reachable: most of the windows this
@@ -284,8 +378,15 @@ injection_jitter(const char *name, const void *private_data, void *arg)
 
 	if (inj_state != NULL)
 	{
+		InjectionJitterStat *stat = injection_jitter_stat(name);
+
 		pg_atomic_fetch_add_u64(&inj_state->jitter_count, 1);
 		pg_atomic_fetch_add_u64(&inj_state->jitter_sleep_us, (uint64) us);
+		if (stat != NULL)
+		{
+			pg_atomic_fetch_add_u64(&stat->count, 1);
+			pg_atomic_fetch_add_u64(&stat->sleep_us, (uint64) us);
+		}
 	}
 
 	pg_usleep(us);
@@ -526,7 +627,68 @@ injection_points_stats_jitter(PG_FUNCTION_ARGS)
 }
 
 /*
+ * SQL function reporting the same, per point.
+ *
+ * The aggregate above says whether the run slept at all; this says which
+ * points did, which is what turns "the profile fired" into "every point of
+ * the profile fired" -- a point that never slept widened nothing, however
+ * busy its neighbours were.
+ */
+PG_FUNCTION_INFO_V1(injection_points_stats_jitter_by_point);
+Datum
+injection_points_stats_jitter_by_point(PG_FUNCTION_ARGS)
+{
+#define NUM_INJECTION_POINTS_JITTER 3
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	InjectionJitterStat local[INJ_MAX_JITTER];
+	int			nstats = 0;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	injection_init_shmem();
+
+	/*
+	 * Copied out under the lock, so a slot being claimed concurrently is
+	 * either seen whole or not yet; tuples are built outside it, since
+	 * nothing may allocate while a spinlock is held.
+	 */
+	SpinLockAcquire(&inj_state->lock);
+	for (int i = 0; i < INJ_MAX_JITTER; i++)
+	{
+		InjectionJitterStat *stat = &inj_state->jitter_stats[i];
+
+		if (stat->name[0] == '\0')
+			break;
+		memcpy(local[nstats].name, stat->name, INJ_NAME_MAXLEN);
+		pg_atomic_init_u64(&local[nstats].count,
+						   pg_atomic_read_u64(&stat->count));
+		pg_atomic_init_u64(&local[nstats].sleep_us,
+						   pg_atomic_read_u64(&stat->sleep_us));
+		nstats++;
+	}
+	SpinLockRelease(&inj_state->lock);
+
+	for (int i = 0; i < nstats; i++)
+	{
+		Datum		values[NUM_INJECTION_POINTS_JITTER];
+		bool		nulls[NUM_INJECTION_POINTS_JITTER] = {0};
+
+		values[0] = PointerGetDatum(cstring_to_text(local[i].name));
+		values[1] = Int64GetDatum((int64) pg_atomic_read_u64(&local[i].count));
+		values[2] = Int64GetDatum((int64) pg_atomic_read_u64(&local[i].sleep_us));
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	return (Datum) 0;
+#undef NUM_INJECTION_POINTS_JITTER
+}
+
+/*
  * SQL function to reset the jitter counters.
+ *
+ * The per-point slots keep their names -- a backend that resolved a slot
+ * goes on using it -- and only the numbers return to zero.
  */
 PG_FUNCTION_INFO_V1(injection_points_stats_reset_jitter);
 Datum
@@ -536,6 +698,11 @@ injection_points_stats_reset_jitter(PG_FUNCTION_ARGS)
 
 	pg_atomic_write_u64(&inj_state->jitter_count, 0);
 	pg_atomic_write_u64(&inj_state->jitter_sleep_us, 0);
+	for (int i = 0; i < INJ_MAX_JITTER; i++)
+	{
+		pg_atomic_write_u64(&inj_state->jitter_stats[i].count, 0);
+		pg_atomic_write_u64(&inj_state->jitter_stats[i].sleep_us, 0);
+	}
 
 	PG_RETURN_VOID();
 }
@@ -722,6 +889,44 @@ injection_points_list(PG_FUNCTION_ARGS)
 
 	return (Datum) 0;
 #undef NUM_INJECTION_POINTS_LIST
+}
+
+/*
+ * SQL function for listing every injection point call site this build's
+ * backend sources define, from the table generated at compile time.
+ *
+ * This is the other half of injection_points_list(): that one says what is
+ * attached right now, this one says what could be.  Nothing else can answer
+ * that -- InjectionPointAttach() accepts any name without complaint, so a
+ * caller attaching to a point that no longer exists gets silence rather
+ * than an error, and only a comparison against this list can tell a stale
+ * name from a live one.
+ */
+PG_FUNCTION_INFO_V1(injection_points_defined);
+Datum
+injection_points_defined(PG_FUNCTION_ARGS)
+{
+#define NUM_INJECTION_POINTS_DEFINED 4
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	for (const InjectionPointDef *def = injection_point_defs;
+		 def->name != NULL; def++)
+	{
+		Datum		values[NUM_INJECTION_POINTS_DEFINED];
+		bool		nulls[NUM_INJECTION_POINTS_DEFINED] = {0};
+
+		values[0] = PointerGetDatum(cstring_to_text(def->name));
+		values[1] = PointerGetDatum(cstring_to_text(def->file));
+		values[2] = Int32GetDatum(def->line);
+		values[3] = PointerGetDatum(cstring_to_text(def->kind));
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	return (Datum) 0;
+#undef NUM_INJECTION_POINTS_DEFINED
 }
 
 void

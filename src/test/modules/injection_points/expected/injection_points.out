@@ -360,5 +360,85 @@ SELECT point_name, library, function FROM injection_points_list()
 ------------+---------+----------
 (0 rows)
 
+-- Jitter: sleeps are counted globally and per point.  One run at
+-- probability 1.0 with a fixed 10us sleep is exactly one sleep of 10us,
+-- so the numbers can be asserted rather than ranged.
+SELECT injection_points_stats_reset_jitter();
+ injection_points_stats_reset_jitter 
+-------------------------------------
+ 
+(1 row)
+
+SELECT injection_points_attach_jitter('TestJitter', 1.0, 10, 10, 42);
+ injection_points_attach_jitter 
+--------------------------------
+ 
+(1 row)
+
+SELECT injection_points_run('TestJitter');
+ injection_points_run 
+----------------------
+ 
+(1 row)
+
+SELECT sleep_count, sleep_us FROM injection_points_stats_jitter();
+ sleep_count | sleep_us 
+-------------+----------
+           1 |       10
+(1 row)
+
+SELECT point_name, sleep_count, sleep_us
+  FROM injection_points_stats_jitter_by_point()
+  WHERE point_name = 'TestJitter';
+ point_name | sleep_count | sleep_us 
+------------+-------------+----------
+ TestJitter |           1 |       10
+(1 row)
+
+SELECT injection_points_detach('TestJitter');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
+-- Reset zeroes the numbers; the per-point slot keeps its name, because
+-- a backend that resolved it goes on using it.
+SELECT injection_points_stats_reset_jitter();
+ injection_points_stats_reset_jitter 
+-------------------------------------
+ 
+(1 row)
+
+SELECT sleep_count, sleep_us FROM injection_points_stats_jitter();
+ sleep_count | sleep_us 
+-------------+----------
+           0 |        0
+(1 row)
+
+SELECT point_name, sleep_count, sleep_us
+  FROM injection_points_stats_jitter_by_point()
+  WHERE point_name = 'TestJitter';
+ point_name | sleep_count | sleep_us 
+------------+-------------+----------
+ TestJitter |           0 |        0
+(1 row)
+
+-- The generated catalogue of defined call sites.  The rows come from
+-- scanning the backend sources, so their exact content is the tree's
+-- business; what must hold is that the scan found something and that
+-- every row names one of the four macros.
+SELECT count(*) > 0 AS has_rows FROM injection_points_defined();
+ has_rows 
+----------
+ t
+(1 row)
+
+SELECT count(*) = 0 AS kinds_ok FROM injection_points_defined()
+  WHERE kind NOT IN ('run', 'cached', 'load', 'attached');
+ kinds_ok 
+----------
+ t
+(1 row)
+
 DROP EXTENSION injection_points;
 DROP FUNCTION wait_pid;
