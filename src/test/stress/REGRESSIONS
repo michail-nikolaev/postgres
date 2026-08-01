@@ -2425,3 +2425,46 @@ rate the two backend bugs on this branch were actually found at
 and eight passes of it here were clean rather than starved.  Keep
 discard_hard for a scenario or two at a time, where the starvation is
 visible for what it is.
+
+A subscriber left empty by a REPACK of the table being copied
+=============================================================
+(2026-08-02, worth taking to the REPACK thread)
+
+The known gap -- "REPACK (CONCURRENTLY) is not MVCC-safe yet: a
+snapshot spanning its relfilenode swap can find the table empty" -- has
+a consequence outside this suite's own checks, and this is the first
+time it has been seen there.  Logical replication's initial table
+synchronization copies under a snapshot exported from a replication
+slot, which is the second of the two places in the server where a
+snapshot derived from decoded commits is used for ordinary MVCC
+visibility.  If a REPACK of that table commits while the copy is
+running, the copy can succeed having read nothing.
+
+From one forced-chaos pass, all four lines from the same run:
+
+  01:30:34.289  tablesync worker for "pgbench_branches" has started
+  01:30:34.507  publisher: REPACK (CONCURRENTLY) pgbench_branches;
+  01:30:35.772  tablesync worker for "pgbench_branches" has finished
+  01:30:36.171  conflict detected on "public.pgbench_branches":
+                confl_update_missing
+
+and 491 such conflicts by the end of an eighteen-second run.  The
+subscriber's copy of the table stayed empty: the sync is done, so
+nothing re-copies it, and every change that follows is applied against
+a table with no rows.  The final comparison caught it -- got '0|0',
+expected '1|-71496' -- but a real subscriber has no such comparison.
+Silent, permanent, and repaired only by resynchronizing the table by
+hand.
+
+What makes it worth reporting rather than filing under the known gap:
+the other consequences of REPACK's MVCC unsafety are transient -- a
+check reads an empty table for an instant and the next read is fine.
+This one is not.  The copy is a single shot, and getting it wrong loses
+the table's contents on the subscriber for good.
+
+The suite's own exposure is closed: the subscription topology now waits
+for the initial synchronization to finish before the workload starts,
+which it should have done from the beginning -- wait_for_catchup
+follows the walsender's LSN and says nothing about tablesync, a caveat
+the topology already had written down in its final and had not applied
+to its setup.

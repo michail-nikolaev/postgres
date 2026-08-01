@@ -276,6 +276,18 @@ topology subscription => {
 			$subscriber->safe_psql('postgres',
 				"CREATE SUBSCRIPTION stress_sub CONNECTION '$connstr' "
 				  . 'PUBLICATION stress_pub');
+			# Both waits, and in this order.  wait_for_catchup follows
+			# the walsender's LSN, which says nothing about the initial
+			# copies: those are done by tablesync workers, and letting
+			# the workload start while one is still copying puts the
+			# rotation's REPACK (CONCURRENTLY) against the very table
+			# being copied.  A snapshot spanning that swap can find the
+			# table empty -- the copy then succeeds with no rows, the
+			# subscriber never syncs that table again, and every change
+			# after it is logged as conflict=update_missing.  Seen once
+			# in eight forced-chaos passes before this wait was added;
+			# REGRESSIONS records the timeline.
+			$subscriber->wait_for_subscription_sync($publisher, 'stress_sub');
 			$publisher->wait_for_catchup('stress_sub');
 
 			$ctx->{subscriber} = $subscriber;
