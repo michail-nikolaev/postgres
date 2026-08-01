@@ -177,6 +177,31 @@ chaos_point 'vacuum-cutoffs-computed' => { max_p => 1.0, max_us => 30_000 };
 chaos_point 'lock-before-acquire' => { max_p => 0.0005, max_us => 2000 };
 
 # Named so a scenario can say it wants none.
+# Points that must never be jittered, beyond the ones excluded
+# mechanically for being IS_INJECTION_POINT_ATTACHED sites.
+#
+# Both of these are plain INJECTION_POINT calls reached inside a
+# critical section, where the first arrival in a backend cannot work:
+# the lookup itself creates the local cache and dlopens the callback,
+# and allocating there trips
+#
+#   TRAP: failed Assert("CritSectionCount == 0 ||
+#                        (context)->allowInCritSection")
+#
+# taking the backend down.  The macro family has INJECTION_POINT_LOAD /
+# _CACHED for exactly this, and these sites do not use them: upstream's
+# own test_aio works only because it calls InjectionPointLoad() in every
+# backend first ("Pre-load the injection points now, so we can call them
+# in a critical section", test_aio.c).  Jitter attached from SQL has no
+# way to arrange that, so the points are out of the pool rather than
+# capped low.  Found by the first real soak over the derived pool.
+chaos_exclude 'aio-process-completion-before-shared' =>
+  'plain INJECTION_POINT in a critical section; needs a per-backend
+   InjectionPointLoad, which jitter cannot arrange';
+chaos_exclude 'aio-worker-after-reopen' =>
+  'the same, in the IO worker: test_aio pre-loads it for the same
+   reason';
+
 chaos_profile off => {};
 
 # Catalog and snapshot staleness, plus the build phase changes.  Wide

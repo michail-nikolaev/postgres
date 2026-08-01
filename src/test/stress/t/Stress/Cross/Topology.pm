@@ -65,12 +65,20 @@ load subscriber_delete_reinsert => {
 			# Without one, a delete under the advisory lock that finds
 			# anything but one row is the failure this load exists to
 			# catch.
+			# The cast is not decoration: under the extended and
+			# prepared protocols the variable arrives as a query
+			# parameter, and format()'s VARIADIC "any" gives the server
+			# nothing to infer its type from -- "could not determine
+			# data type of parameter $2", and then a cascade of
+			# "prepared statement does not exist" as pgbench goes on
+			# using a PREPARE that failed.  Every other check here casts
+			# for the same reason.
 			my $guard =
 			  $ctx->{mvcc_gap_possible}
 			  ? ''
 			  : q(
 			SELECT stress_assert(:del_n = 1,
-				format('delete under lock found %s rows', :del_n));
+				format('delete under lock found %s rows', :del_n::int));
 			);
 			return qq(
 			\\set aid random(1, :naccounts)
@@ -208,6 +216,13 @@ topology standby => {
 # A subscriber applying what the workload produces while the
 # publisher's tables are rebuilt underneath the decoding.
 topology subscription => {
+		# This topology runs REPACK (CONCURRENTLY) on the subscriber's
+		# own copy of pgbench_accounts, below, whatever the scenario's
+		# rotation does -- so a snapshot spanning that swap can find the
+		# table empty here even when the scenario itself never repacks.
+		# The checks read that flag rather than the rotation alone; see
+		# Stress::MVCC.
+		mvcc_safe => 0,
 		# Replication has to catch up before the checks mean anything.
 		min_seconds => 5,
 		init => { allows_streaming => 'logical' },

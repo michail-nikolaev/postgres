@@ -288,6 +288,16 @@ sub resolve
 		my $d = $DDL{$dname} or next;
 		$gap = 1 if defined $d->{mvcc_safe} && !$d->{mvcc_safe};
 	}
+	# An axis may run commands of its own that the rotation knows
+	# nothing about -- the subscription topology repacks the
+	# subscriber's copy of the table between workloads -- so it declares
+	# mvcc_safe for itself too.
+	foreach my $axis (sort keys %scalar_axis)
+	{
+		my $aname = $eff{$axis} // next;
+		my $adefn = $scalar_axis{$axis}->{$aname} or next;
+		$gap = 1 if defined $adefn->{mvcc_safe} && !$adefn->{mvcc_safe};
+	}
 	$gap = 0
 	  if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_strict_mvcc=1\b/;
 	$eff{_mvcc_gap} = $gap;

@@ -2265,3 +2265,69 @@ For concurrent copies of a cluster test, give each copy its own name.
 Stress::Run now claims its test directory with a sentinel file and
 fails with this explanation if it finds the claim gone or taken, so the
 next person meets a message rather than a mystery.
+
+
+Two things the first real soak over the derived chaos pool found
+================================================================
+(2026-08-02)
+
+Both are the suite's own, which is what a hunt over invented
+combinations is for: nothing here had been reachable before, because
+each needs a combination no hand-written scenario names.
+
+1.  A guard that could not be prepared, and a premise that was wrong.
+
+    subscriber_delete_reinsert asserts, in the strict-MVCC form added
+    when the tolerance became a declared property, that its delete
+    under the advisory lock found exactly one row.  Two faults, one on
+    top of the other:
+
+      ERROR:  could not determine data type of parameter $2
+      ERROR:  prepared statement "P_3" does not exist
+
+    The first is the guard itself: format() takes VARIADIC "any", so a
+    pgbench variable handed to it under the extended or prepared
+    protocol arrives as an untyped parameter.  Every other check in the
+    suite casts for this reason and carries a comment saying so; this
+    one did not.  The second is the consequence -- pgbench believes a
+    PREPARE that failed and goes on using the statement -- and is what
+    ends the run.
+
+    With the cast in place the guard fired honestly, and was still
+    wrong: "delete under lock found 0 rows".  The premise was that a
+    scenario whose rotation carries no repack has no MVCC gap, but the
+    subscription topology repacks the subscriber's own copy of
+    pgbench_accounts in its run loop, whatever the rotation does.  The
+    gap is now derived from the axes as well as from the rotation --
+    an axis declares mvcc_safe for itself -- and the subscription
+    topology declares it.
+
+    Reachable only as subscription + prepared protocol + a rotation
+    with no repack in it, which is why the catalogue never saw it: 113
+    repacks, so it always took the tolerant path.
+
+2.  Two injection points that cannot be jittered at all.
+
+    aio-process-completion-before-shared (aio.c) and
+    aio-worker-after-reopen (method_worker.c) are plain INJECTION_POINT
+    calls reached inside a critical section.  The first arrival in a
+    backend does the work the macro pair exists to avoid -- creates the
+    local cache, dlopens the callback -- and allocating there is fatal:
+
+      TRAP: failed Assert("CritSectionCount == 0 ||
+                           (context)->allowInCritSection"),
+      File: "../src/backend/utils/mmgr/mcxt.c", Line: 1240
+      LOG:  client backend was terminated by signal 6: Aborted
+
+    Not a server bug: upstream's test_aio attaches to both and then
+    calls InjectionPointLoad() in every backend, with the comment
+    "Pre-load the injection points now, so we can call them in a
+    critical section".  Jitter attached from SQL has no way to arrange
+    that, so both points are excluded from the pool rather than capped
+    low -- the first entries %CHAOS_EXCLUDED has needed, and exactly
+    the case it was built for.
+
+    Worth knowing for anyone else attaching to points generically: a
+    site inside a critical section is usable only by a callback every
+    backend pre-loads, and nothing in the catalogue marks which sites
+    those are.
