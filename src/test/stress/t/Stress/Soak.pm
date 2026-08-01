@@ -93,6 +93,8 @@ use Stress::Registry qw(:registries load_all);
 
 Stress::Registry::load_all();
 
+use Stress::Compose;
+
 our @EXPORT = qw(soak_enabled soak_run);
 
 # The catalogue of scenarios, gathered from the test files that describe
@@ -174,20 +176,15 @@ sub _pick_some
 }
 
 # Whether a modifier can be used with this environment, client count and
-# index set.  Kept in one place because soak asks it twice -- once for a
-# combination it invented, once for a catalogue scenario it is decorating.
+# index set.  Asked twice -- once for a combination soak invented, once
+# for a catalogue scenario it is decorating -- and answered by the same
+# engine that validates the result.
 sub _modifier_fits
 {
 	my ($name, $env, $clients, $indexes) = @_;
-	my $m = $MODIFIERS{$name};
 
-	return 0 if $m->{max_clients} && $clients > $m->{max_clients};
-	return 0 if grep { $_ eq $env } @{ $m->{conflicts}->{env} // [] };
-	foreach my $ci (@{ $m->{conflicts}->{indexes} // [] })
-	{
-		return 0 if grep { $_ eq $ci } @$indexes;
-	}
-	return 1;
+	return Stress::Compose::fits('modifier', $name,
+		{ env => $env, clients => $clients, indexes => $indexes });
 }
 
 # Invent a chaos profile: a few points from the pool, each with a
@@ -272,42 +269,34 @@ sub _invent
 	}
 	my @schema = ('pgbench', @decorators);
 
-	# A load, check or command that cannot work against this schema or
-	# this environment is not eligible either.
-	my $eligible = sub {
-		my ($defn) = @_;
-
-		foreach my $rname (@{ $defn->{requires}->{schema} // [] })
-		{
-			return 0 unless grep { $_ eq $rname } @schema;
-		}
-		if (my $wanted = $defn->{requires}->{env})
-		{
-			return 0 unless grep { $_ eq $env } @$wanted;
-		}
-		return 0 if grep { $_ eq $env } @{ $defn->{conflicts}->{env} // [] };
-		foreach my $cname (@{ $defn->{conflicts}->{schema} // [] })
-		{
-			return 0 if grep { $_ eq $cname } @schema;
-		}
-		return 1;
-	};
-
-	my @loads = grep { $eligible->($LOAD{$_}) } sort keys %LOAD;
-	my @checks = grep { $eligible->($CHECK{$_}) } sort keys %CHECK;
+	# What could join this combination.  fits() asks the same engine that
+	# will validate the result; schema requirements are no bar, because
+	# resolve() pulls a load's schema in with it -- picking balanced_pair
+	# is what brings the ledger along.
+	my $partial = { schema => \@schema, env => $env };
+	my @loads =
+	  grep { Stress::Compose::fits('load', $_, $partial) } sort keys %LOAD;
 	# catalogue_only entries stay in the scenarios that name them: they
 	# need a workload chosen to suit them, and inventing one around them
 	# produces failures that say nothing about the server.
-	my @ddl = grep { $eligible->($DDL{$_}) && !$DDL{$_}->{catalogue_only} }
-	  sort keys %DDL;
+	my @ddl = grep {
+		Stress::Compose::fits('ddl', $_, $partial)
+		  && !$DDL{$_}->{catalogue_only}
+	} sort keys %DDL;
 
-	# Indexes a check asks for have to be there; take them all, which is
-	# also more interesting for the rotation.  All, that is, except the
-	# ones whose table only exists when a particular decorator was
-	# picked: an index is built by name before the run starts, so one
-	# naming a table that is not there ends the combination in setup
-	# rather than in anything the suite is testing.
-	my @indexes = grep { $eligible->($INDEXES{$_}) } sort keys %INDEXES;
+	# Take every index whose schema is already here.  Indexes are the one
+	# kind that does not pull its schema in: an index is a decoration of
+	# a dimension, not a reason to add one, and letting btree_audit_aid
+	# drag the whole trigger apparatus into every combination would make
+	# soak narrower, not wider.
+	my @indexes = grep {
+		my $i = $_;
+		Stress::Compose::fits('indexes', $i, $partial)
+		  && !grep {
+			my $dep = $_;
+			!grep { $_ eq $dep } @schema
+		  } @{ $INDEXES{$i}->{requires}->{schema} // [] }
+	} sort keys %INDEXES;
 
 	# How a statement reaches the server decides what gets cached and
 	# when it is replanned, which is the subject of several of the bugs
@@ -374,7 +363,10 @@ sub _invent
 		ddl_concurrency => 1,
 		chaos => $chaos,
 		modifier => $modifier,
-		checks => [ _pick_some(1, 4, @checks) ],
+		# No checks named: the loads and commands bring their own, and
+		# the auto set joins wherever it applies.  Soak used to sample
+		# checks as a dimension, which mostly invented combinations that
+		# verified less than they ran.
 		env => $env,
 		# Ten, because the invented combinations run at scale 1 and a
 		# scale-1 pgbench has exactly one pgbench_branches row that every
@@ -432,7 +424,7 @@ sub _next_invented
 		my $spec = _invent();
 		$$genref++;
 
-		return $spec if Stress::Run::spec_is_runnable($spec);
+		return $spec if Stress::Compose::spec_is_runnable($spec);
 		$$discref++;
 	}
 	die 'invented a thousand combinations without finding a runnable one';

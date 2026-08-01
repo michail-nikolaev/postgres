@@ -15,12 +15,8 @@ use Stress::Run;
 run_scenario(
 	'plancache_and_matview',
 	{
-		schema => [ 'pgbench', 'ledger', 'matview' ],
 		load => [ 'tpcb_like', 'plancache' ],
 		ddl => [ @STANDARD_DDL, 'refresh_matview_concurrently' ],
-		ddl_concurrency => 1,
-		checks => [ 'ledger_sum', 'matview_matches', 'amcheck' ],
-		env => 'standalone',
 		conf => ['plan_cache_mode = force_generic_plan'],
 		pgbench_args => '--protocol=prepared',
 		clients => 20,

@@ -35,8 +35,6 @@ use Stress::Run;
 run_scenario(
 	'triggers',
 	{
-		schema => [ 'pgbench', 'trigger_audit' ],
-		pgbench_scale => 1,
 		indexes => [ 'btree_abalance', 'btree_audit_aid' ],
 		load => [ 'tpcb_like', 'trigger_upsert_log', 'audit_probe' ],
 		ddl => [
@@ -45,9 +43,6 @@ run_scenario(
 			'create_drop_trigger', 'create_drop_constraint_trigger',
 			'toggle_trigger', 'alter_trigger_function'
 		],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'amcheck', 'trigger_counts_agree' ],
-		env => 'standalone',
 		clients => 20,
 		tags => ['ci'],
 	});

@@ -63,7 +63,6 @@ use Stress::Run;
 run_scenario(
 	'partitions',
 	{
-		schema => [ 'pgbench', 'partitioned_side' ],
 		load => [ 'tpcb_like', 'partition_dml', 'partition_upsert',
 			'partition_upsert_contend' ],
 		ddl => [
@@ -71,9 +70,6 @@ run_scenario(
 			'detach_partition_concurrently', 'detach_drop_recreate_partition',
 			'partitionwise_index_build', 'reindex_partitioned_index'
 		],
-		ddl_concurrency => 1,
-		checks => [ 'partition_sum', 'balances' ],
-		env => 'standalone',
 		conf => ['plan_cache_mode = force_generic_plan'],
 		pgbench_args => '--protocol=prepared',
 		# DETACH ... CONCURRENTLY waits for every transaction holding the

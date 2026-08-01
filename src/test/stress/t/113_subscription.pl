@@ -43,15 +43,12 @@ use Stress::Run;
 run_scenario(
 	'subscription',
 	{
-		schema => ['pgbench'],
 		indexes => ['btree_abalance'],
 		load => [
 			'tpcb_like', 'subscriber_churn',
 			'subscriber_delete_reinsert'
 		],
 		ddl => [@STANDARD_DDL],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'amcheck' ],
 		env => 'subscription',
 		clients => 20,
 		tags => ['ci'],

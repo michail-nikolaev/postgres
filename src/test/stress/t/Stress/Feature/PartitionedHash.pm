@@ -56,6 +56,7 @@ load hash_dml => {
 # constraint to leave behind if the server gets it wrong.
 ddl detach_hash_partition => {
 		requires => { schema => ['partitioned_hash'] },
+		checks => ['no_substitute_constraints'],
 		# Names the parent while removing one of its partitions, so a
 		# command gated on that partition could find it gone.
 		solo => 1,

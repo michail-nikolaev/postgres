@@ -87,6 +87,7 @@ schema generated => {
 load generated_update => {
 		weight => 2,
 		requires => { schema => ['generated'] },
+		checks => [ 'generated_matches', 'generated_defs_intact' ],
 		script => q(
 			\set scratch random(:naccounts + 1, :naccounts + 5000)
 			\set mode random(0, 1)
@@ -149,6 +150,7 @@ check generated_matches => {
 # different expression and agree with themselves -- so compare the
 # definitions against what they were before the run.
 check generated_defs_intact => {
+		auto => 1,
 		requires => { schema => ['generated'] },
 		final => sub {
 			my ($node, $ctx) = @_;

@@ -41,12 +41,9 @@ use Stress::Run;
 run_scenario(
 	'overlapping_ddl',
 	{
-		schema => [ 'pgbench', 'ledger' ],
 		load => [ 'tpcb_like', 'balanced_pair' ],
 		ddl => [@STANDARD_DDL],
 		ddl_concurrency => 4,
-		checks => [ 'balances', 'ledger_sum', 'amcheck', 'no_slot_leak',
-			'decoding_disabled' ],
 		env => 'wal_replica',
 		clients => 30,
 		tags => ['ci'],

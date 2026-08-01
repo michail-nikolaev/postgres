@@ -13,15 +13,12 @@ use Stress::Run;
 run_scenario(
 	'lock_exhaustion',
 	{
-		schema => [ 'pgbench', 'ledger' ],
 		indexes => [
 			'btree_abalance', 'partial_abalance',
 			'expr_abalance', 'covering_aid'
 		],
 		load => [ 'tpcb_like', 'balanced_pair' ],
 		ddl => [@STANDARD_DDL],
-		ddl_concurrency => 1,
-		checks => [ 'ledger_sum', 'amcheck' ],
 		env => 'lock_exhaustion',
 		clients => 20,
 		tags => ['ci'],

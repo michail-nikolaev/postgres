@@ -38,6 +38,7 @@ schema toast => {
 load toast_rewrite => {
 		weight => 2,
 		requires => { schema => ['toast'] },
+		checks => ['toast_md5'],
 		script => q(
 			\set id random(1, :naccounts)
 			\set len random(3000, 6000)

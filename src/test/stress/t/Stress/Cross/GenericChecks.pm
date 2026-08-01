@@ -19,6 +19,7 @@ use Stress::Util qw(_retry_on_deadlock);
 
 # Every index the scenario built must still be a valid index.
 check amcheck => {
+		auto => 1,
 		final => sub {
 			my ($node, $ctx) = @_;
 
@@ -67,6 +68,7 @@ check amcheck => {
 # also how this avoids being handed a partitioned table: those are
 # not in the rotation's list, and pg_visibility refuses them.
 check visibility_map => {
+		auto => 1,
 		final => sub {
 			my ($node, $ctx) = @_;
 			$node->safe_psql('postgres',
@@ -86,6 +88,7 @@ check visibility_map => {
 # A cancelled or completed REPACK must not leave its transient slot
 # behind, and logical decoding must have been switched off again.
 check no_slot_leak => {
+		auto => 1,
 		final => sub {
 			my ($node, $ctx) = @_;
 			# A subscription owns a slot on the publisher for as long as
@@ -105,6 +108,7 @@ check no_slot_leak => {
 # suite can see it, so ask directly.  The checkpointer does the
 # lowering, so it does not happen the instant the command ends.
 check decoding_disabled => {
+		auto => 1,
 		# With wal_level = logical there is nothing to switch back to.
 		requires => { env => ['wal_replica'] },
 		final => sub {
@@ -125,6 +129,7 @@ check decoding_disabled => {
 # good.  Indexes that belong to a constraint are skipped, since DROP
 # INDEX is not how those come out.
 check invalid_indexes_droppable => {
+		auto => 1,
 		final => sub {
 			my ($node, $ctx) = @_;
 			my @left = grep { $_ ne '' } split /\n/,

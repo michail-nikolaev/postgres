@@ -49,6 +49,7 @@ schema deferrable_pk => {
 load deferred_key_swap => {
 		weight => 2,
 		requires => { schema => ['deferrable_pk'] },
+		checks => ['deferred_keys_intact'],
 		script => q(
 			\set i1 random(0, 30)
 			\set i2 random(0, 30)
@@ -70,6 +71,7 @@ load deferred_key_swap => {
 # is the only way to gate this: a server that accepts the table is
 # the bug, and it does not announce itself.
 check repack_refuses_deferrable => {
+		auto => 1,
 		requires => { schema => ['deferrable_pk'] },
 		final => sub {
 			my ($node, $ctx) = @_;

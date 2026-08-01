@@ -36,8 +36,11 @@ hand outside the harness.
   load             workload scripts, mixed by their weights
   ddl              the commands the DDL client rotates through
   ddl_concurrency  how many may be in flight: 1, N, or 'none'
-  checks           invariants, checked during and/or after the run
-  env              which cluster to run against
+  checks           extra invariants, on top of the ones the loads and
+                   commands bring with them; see Stress::Compose for
+                   how the effective set is composed
+  no_checks        checks to take back out of the effective set, by name
+  env              which cluster to run against (default standalone)
   conf             extra postgresql.conf lines for this scenario
   chaos            a named chaos profile from %CHAOS, or a profile soak
                    invented; widens race windows with injection-point
@@ -54,9 +57,13 @@ hand outside the harness.
   duration         seconds at stressval 1 (default 6)
   tags             'ci' for the default run; everything runs in soak mode
 
-The names come from the registries in C<Stress::Registry>; _validate()
-rejects a combination whose pieces do not fit, so a typo fails the test
-rather than quietly running something smaller than intended.
+The names come from the registries in C<Stress::Registry>.  The written
+scenario is only part of the effective one: C<Stress::Compose::resolve()>
+pulls in the schemas the named pieces require and the checks they
+declare, and C<Stress::Compose::validate()> rejects a combination whose
+pieces do not fit, so a typo fails the test rather than quietly running
+something smaller than intended.  What was composed is noted at the top
+of every run.
 
 =cut
 
@@ -77,8 +84,11 @@ use Stress::Util qw(stress_rollback_prepared);
 # does not matter whether Run or Soak gets here first.
 Stress::Registry::load_all();
 
+use Stress::Compose;
+
 our @EXPORT =
-  qw(run_scenario run_one stress_seed stress_assert_defn @STANDARD_DDL);
+  qw(run_scenario run_template run_one stress_seed stress_assert_defn
+  @STANDARD_DDL);
 
 # The rotation almost every scenario uses.  Exported rather than spelled
 # out in each test file, because a scenario that means "the usual
@@ -172,231 +182,10 @@ sub _dedent
 	  . "\n";
 }
 
-# Check that every entry a scenario names exists, and that the
-# requires/conflicts they declare are satisfied, before anything is
-# created.
-=pod
-
-=item spec_is_runnable($spec)
-
-Whether the pieces of $spec fit together, without building anything.
-Soak mode uses this to tell a combination worth running from one that
-could never work, so that the two are not confused in the numbering.
-
-=cut
-
-# Schema decorators in an order where each one's requirements have
-# already been applied.
-#
-# Validation only asks whether a decorator a scenario depends on is
-# present, not whether it comes first, and applying them in the order
-# they happen to be listed is fine until something lists them the other
-# way round: partitioned_2_levels detaches a partition that partitioned
-# is the one to create, and gets "ALTER action DETACH PARTITION cannot
-# be performed" if it runs first.  The hand-written scenarios all happen
-# to be in a workable order, which is why this went unnoticed until soak
-# invented one that was not.
-sub _order_schema
-{
-	my ($names) = @_;
-
-	my (@ordered, %placed);
-	my $place;
-	$place = sub {
-		my ($name, $seen) = @_;
-
-		return if $placed{$name};
-		die "schema '$name' requires itself" if $seen->{$name};
-		$seen->{$name} = 1;
-
-		foreach my $dep (@{ $SCHEMA{$name}->{requires}->{schema} // [] })
-		{
-			$place->($dep, $seen) if grep { $_ eq $dep } @$names;
-		}
-
-		delete $seen->{$name};
-		$placed{$name} = 1;
-		push @ordered, $name;
-	};
-
-	# Walked in the order given, so the loader -- which every decorator
-	# needs and none declares -- keeps its place at the front.
-	$place->($_, {}) for @$names;
-	return @ordered;
-}
-
 sub _max
 {
 	my ($a, $b) = @_;
 	return $a > $b ? $a : $b;
-}
-
-sub spec_is_runnable
-{
-	my ($spec) = @_;
-
-	return eval { _validate($spec); 1 } ? 1 : 0;
-}
-
-sub _validate
-{
-	my ($spec) = @_;
-
-	# An unknown key is a typo, and a typo'd key is worse than a typo'd
-	# name: 'check' for 'checks' does not fail anything, it silently runs
-	# a scenario with no checks at all.
-	my %known = map { $_ => 1 }
-	  qw(schema pgbench_scale indexes load ddl ddl_concurrency checks env
-	  conf chaos modifier no_forced_chaos no_forced_modifier pgbench_args
-	  clients duration tags);
-	foreach my $key (sort keys %$spec)
-	{
-		die "scenario has unknown field '$key'" unless $known{$key};
-	}
-
-	my %registry = (
-		schema => \%SCHEMA,
-		indexes => \%INDEXES,
-		load => \%LOAD,
-		ddl => \%DDL,
-		checks => \%CHECK,
-	);
-
-	foreach my $kind (sort keys %registry)
-	{
-		foreach my $name (@{ $spec->{$kind} // [] })
-		{
-			die "scenario names unknown $kind plugin '$name'"
-			  unless exists $registry{$kind}->{$name};
-		}
-	}
-	die "scenario names unknown env '$spec->{env}'"
-	  unless exists $ENVS{ $spec->{env} };
-
-	die "scenario names unknown modifier '$spec->{modifier}'"
-	  if defined $spec->{modifier} && !exists $MODIFIERS{ $spec->{modifier} };
-
-	if (defined $spec->{modifier})
-	{
-		my $m = $MODIFIERS{ $spec->{modifier} };
-
-		foreach my $cenv (@{ $m->{conflicts}->{env} // [] })
-		{
-			die "modifier '$spec->{modifier}' conflicts with env '$cenv'"
-			  if ($spec->{env} // '') eq $cenv;
-		}
-
-		die "modifier '$spec->{modifier}' cannot be combined with "
-		  . "clients '$spec->{clients}'"
-		  if $m->{max_clients} && ($spec->{clients} // 0) > $m->{max_clients};
-
-		foreach my $kind (sort keys %{ $m->{conflicts} // {} })
-		{
-			next if $kind eq 'env';
-			die "modifier '$spec->{modifier}' conflicts with unknown kind "
-			  . "'$kind'"
-			  unless exists $registry{$kind};
-			foreach my $cname (@{ $m->{conflicts}->{$kind} })
-			{
-				die "modifier '$spec->{modifier}' conflicts with "
-				  . "$kind '$cname'"
-				  if grep { $_ eq $cname } @{ $spec->{$kind} // [] };
-			}
-		}
-	}
-
-	if (defined $spec->{chaos} && !ref $spec->{chaos})
-	{
-		die "scenario names unknown chaos profile '$spec->{chaos}'"
-		  unless exists $CHAOS{ $spec->{chaos} };
-	}
-	elsif (ref $spec->{chaos} eq 'HASH')
-	{
-		# Invented rather than named -- soak does this.  The points still
-		# have to exist, and to stay inside the bounds declared for them:
-		# those are what keep a sleep from turning into a lock cascade.
-		foreach my $point (sort keys %{ $spec->{chaos}->{points} // {} })
-		{
-			my $caps = $CHAOS_POINTS{$point};
-			my ($probability, undef, $max_us) =
-			  @{ $spec->{chaos}->{points}->{$point} };
-
-			die "chaos names unknown injection point '$point'" unless $caps;
-			die "chaos probability for '$point' above its cap"
-			  if $probability > $caps->{max_p};
-			die "chaos sleep for '$point' above its cap"
-			  if $max_us > $caps->{max_us};
-		}
-	}
-
-	# requires/conflicts, declared as { kind => [ names ] }
-	foreach my $kind (sort keys %registry)
-	{
-		foreach my $name (@{ $spec->{$kind} // [] })
-		{
-			my $defn = $registry{$kind}->{$name};
-
-			foreach my $rkind (sort keys %{ $defn->{requires} // {} })
-			{
-				# A requirement naming a kind that does not exist is a
-				# typo that would otherwise be silently true: the lookup
-				# below would find nothing to compare against.  The same
-				# goes for conflicts, which is worse -- a conflict that
-				# never fires lets soak build a combination the plugin
-				# said it could not be part of.
-				die "$kind '$name' requires unknown kind '$rkind'"
-				  unless $rkind eq 'env' || exists $registry{$rkind};
-
-				# 'env' is a single value rather than a list, and a
-				# requirement on it means "any one of these".
-				if ($rkind eq 'env')
-				{
-					my @want = @{ $defn->{requires}->{env} };
-					die "$kind '$name' requires env "
-					  . join(' or ', map { "'$_'" } @want)
-					  unless grep { $_ eq ($spec->{env} // '') } @want;
-					next;
-				}
-
-				foreach my $rname (@{ $defn->{requires}->{$rkind} })
-				{
-					die "$kind '$name' requires $rkind '$rname', "
-					  . 'which the scenario does not use'
-					  unless grep { $_ eq $rname } @{ $spec->{$rkind} // [] };
-				}
-			}
-			# A script that puts a variable inside a quoted literal only
-			# works when pgbench substitutes textually.
-			die "$kind '$name' cannot be combined with "
-			  . "pgbench_args '$spec->{pgbench_args}'"
-			  if $defn->{simple_protocol_only}
-			  && ($spec->{pgbench_args} // '') =~ /--protocol=(?:extended|prepared)/;
-
-			# A variant that destroys relations other variants are gated
-			# on can only run when nothing else is in flight.
-			die "$kind '$name' cannot be combined with "
-			  . "ddl_concurrency '"
-			  . ($spec->{ddl_concurrency} // 1) . "'"
-			  if $defn->{solo} && ($spec->{ddl_concurrency} // 1) ne '1';
-
-			foreach my $ckind (sort keys %{ $defn->{conflicts} // {} })
-			{
-				die "$kind '$name' conflicts with unknown kind '$ckind'"
-				  unless $ckind eq 'env' || exists $registry{$ckind};
-
-				foreach my $cname (@{ $defn->{conflicts}->{$ckind} })
-				{
-					# 'env' is a single value rather than a list.
-					die "$kind '$name' cannot be combined with "
-					  . "$ckind '$cname'"
-					  if $ckind eq 'env'
-					  ? $spec->{env} eq $cname
-					  : grep { $_ eq $cname } @{ $spec->{$ckind} // [] };
-				}
-			}
-		}
-	}
-	return;
 }
 
 # The DDL client picks one of the rotation's variants per invocation.
@@ -508,6 +297,29 @@ sub run_scenario
 
 =pod
 
+=item run_template($name, $template, %overrides)
+
+Run a scenario a bundle declared as a template, with this file's
+overrides on top.  For the scenarios that exist in several variants --
+the same combination against a standby, under a crash loop -- so that
+the shared part lives once in the bundle and a variant file is the
+overrides and nothing else.
+
+=cut
+
+sub run_template
+{
+	my ($name, $template, %overrides) = @_;
+
+	my $t = $TEMPLATES{$template}
+	  or die "unknown scenario template '$template'";
+
+	run_scenario($name, { %$t, %overrides });
+	return;
+}
+
+=pod
+
 =item run_one($name, $spec)
 
 Run one combination, given directly rather than looked up.  Used by
@@ -524,7 +336,12 @@ sub run_one
 	note "running scenario $name at stressval $scale";
 	my $seed = stress_seed();
 
-	_validate($spec);
+	$spec = Stress::Compose::resolve($spec);
+	Stress::Compose::validate($spec);
+	# What was composed, with the provenance of every piece that was not
+	# written down in the scenario: the log is where "what did this run
+	# actually verify" has to be answerable.
+	note "effective $name: " . Stress::Compose::describe_effective($spec);
 
 	# stress_seconds=N overrides how long the workload runs, ignoring both
 	# the scenario's own figure and the stressval multiplier.  It is for
@@ -546,7 +363,9 @@ sub run_one
 	# and survey mode respects it.
 	$duration = $env->{min_seconds}
 	  if $env->{min_seconds} && $duration < $env->{min_seconds};
-	my @schema = map { $SCHEMA{$_} } _order_schema($spec->{schema});
+	# Already ordered by resolve(): every decorator follows the ones it
+	# requires.
+	my @schema = map { $SCHEMA{$_} } @{ $spec->{schema} };
 	my $loader = $schema[0];
 	my $pgbench_scale = $spec->{pgbench_scale} // 1;
 

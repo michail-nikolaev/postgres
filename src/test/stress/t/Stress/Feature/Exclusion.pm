@@ -49,6 +49,7 @@ schema exclusion_slot => {
 load exclusion_churn => {
 		weight => 2,
 		requires => { schema => ['exclusion_slot'] },
+		checks => ['distinct_slots'],
 		script => q(
 			\set slot random(1, :nslots)
 			\set aid random(1, :naccounts)

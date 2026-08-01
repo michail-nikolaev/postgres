@@ -37,6 +37,7 @@ schema ledger => {
 load balanced_pair => {
 		weight => 3,
 		requires => { schema => ['ledger'] },
+		checks => ['ledger_sum'],
 		script => q(
 			\set a random(1, :naccounts)
 			\set b random(1, :naccounts)
@@ -74,7 +75,10 @@ check ledger_sum => {
 # fresh snapshot, so it would see any concurrent commit.
 check row_lock_durability => {
 		weight => 1,
-		requires => { schema => ['ledger'] },
+		auto => 1,
+		# Joins wherever both halves are present: the column it sums
+		# and the load whose held locks it is checking under.
+		requires => { schema => ['ledger'], load => ['row_lock'] },
 		# Takes row locks, so it cannot run on a standby.
 		writes => 1,
 		script => q(

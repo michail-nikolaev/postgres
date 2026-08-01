@@ -29,12 +29,7 @@ use Stress::Run;
 run_scenario(
 	'bitmap_skip_fetch',
 	{
-		schema => [ 'pgbench', 'bitmap_skip_fetch' ],
-		pgbench_scale => 1,
 		load => [ 'tpcb_like', 'bmskip_check', 'bmskip_churn' ],
 		ddl => ['vacuum_bmskip'],
-		ddl_concurrency => 1,
-		checks => ['balances'],
-		env => 'standalone',
 		clients => 20,
 	});

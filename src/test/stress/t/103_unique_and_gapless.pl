@@ -39,7 +39,6 @@ use Stress::Run;
 run_scenario(
 	'unique_and_gapless',
 	{
-		schema => [ 'pgbench', 'upsert_keys', 'gapless' ],
 		load => [ 'tpcb_like', 'upsert_merge', 'upsert_contend',
 			'serial_insert' ],
 		# The arbiter every upsert here resolves to is
@@ -48,9 +47,6 @@ run_scenario(
 		# swaps a primary key at any rate: only reindex_table_concurrently
 		# reaches one, and then as one index among all of the table's.
 		ddl => [ @STANDARD_DDL, 'reindex_pkey_concurrently' ],
-		ddl_concurrency => 1,
-		checks => [ 'distinct_keys', 'gapless_count', 'amcheck' ],
-		env => 'standalone',
 		clients => 30,
 		tags => ['ci'],
 	});

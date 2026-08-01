@@ -30,15 +30,10 @@ use Stress::Run;
 run_scenario(
 	'index_build_churn',
 	{
-		schema => ['pgbench'],
-		pgbench_scale => 1,
 		indexes => ['btree_history_delta'],
 		load => ['history_insert'],
 		# Only the concurrent build, so every turn of the rotation is one.
 		ddl => ['drop_create_index'],
-		ddl_concurrency => 1,
-		checks => ['amcheck'],
-		env => 'standalone',
 		chaos => 'relcache_probe',
 		clients => 30,
 		tags => ['ci'],

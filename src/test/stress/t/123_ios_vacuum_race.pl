@@ -41,12 +41,8 @@ use Stress::Run;
 run_scenario(
 	'ios_vacuum_race',
 	{
-		schema => [ 'pgbench', 'ios_vacuum_race' ],
-		pgbench_scale => 1,
 		load => [ 'tpcb_like', 'ios_cursor_check', 'ios_churn' ],
 		ddl => [ 'vacuum_ios_tables', 'reindex_index_concurrently' ],
 		ddl_concurrency => 2,
-		checks => ['balances'],
-		env => 'standalone',
 		clients => 20,
 	});

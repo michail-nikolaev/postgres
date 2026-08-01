@@ -42,6 +42,7 @@ schema quiet_index => {
 # so this is enough to make the planner touch one that replay may
 # have just removed -- no index scan need be chosen.
 check quiet_index_scan => {
+		auto => 1,
 		weight => 6,
 		requires => { schema => ['quiet_index'] },
 		script => q(

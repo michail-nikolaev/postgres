@@ -21,6 +21,7 @@ use Stress::Registry ':declare';
 load twophase => {
 		weight => 1,
 		requires => { schema => ['ledger'] },
+		checks => ['ledger_sum'],
 		conf => ['max_prepared_transactions = 100'],
 		# The transaction identifier has to be a literal, and the only
 		# way to make one per client is to put the variable inside the

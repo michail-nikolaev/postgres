@@ -9,6 +9,7 @@ tests += {
        'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
     },
     'tests': [
+      't/001_meta.pl',
       't/100_repack_dml_s1.pl',
       't/101_repack_dml_s50.pl',
       't/102_locks_and_subxacts.pl',

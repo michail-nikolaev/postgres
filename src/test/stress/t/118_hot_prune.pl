@@ -37,7 +37,7 @@ use Stress::Run;
 run_scenario(
 	'hot_prune',
 	{
-		schema => [ 'pgbench', 'low_fillfactor' ],
+		schema => ['low_fillfactor'],
 		pgbench_scale => 30,
 		indexes => ['btree_bid'],
 		load => ['hot_churn'],
@@ -45,12 +45,10 @@ run_scenario(
 		# load leaves alone: the declared one through DROP/CREATE, and
 		# the primary key through REINDEX.
 		ddl => [ 'drop_create_index', 'reindex_pkey_concurrently' ],
-		ddl_concurrency => 1,
-		# hot_churn moves no money between tables, so there is no
-		# balance invariant here; what this scenario asserts is that the
-		# indexes it rebuilt still contain every live row.
-		checks => ['amcheck'],
-		env => 'standalone',
+		# hot_churn moves no money between tables, so there is no balance
+		# invariant here -- it declares as much, which is what keeps the
+		# balances check from joining.  What this scenario asserts is that
+		# the indexes it rebuilt still contain every live row.
 		clients => 20,
 		tags => ['ci'],
 	});

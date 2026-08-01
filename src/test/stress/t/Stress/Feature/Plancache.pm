@@ -20,6 +20,7 @@ use Stress::Registry ':declare';
 load subxact_churn => {
 		weight => 2,
 		requires => { schema => ['ledger'] },
+		checks => ['ledger_sum'],
 		setup => q(
 			CREATE FUNCTION pgb_subxact_churn(lo int, hi int, diff int, n int)
 			RETURNS void LANGUAGE plpgsql AS $$
@@ -68,6 +69,7 @@ load subxact_churn => {
 load cursor_hold => {
 		weight => 1,
 		requires => { schema => ['ledger'] },
+		checks => ['ledger_sum'],
 		setup => q(
 			CREATE FUNCTION pgb_cursor_sum(expected bigint) RETURNS void
 			LANGUAGE plpgsql AS $$
@@ -110,6 +112,7 @@ load cursor_hold => {
 load plancache => {
 		weight => 2,
 		requires => { schema => ['ledger'] },
+		checks => ['ledger_sum'],
 		setup => q(
 			CREATE FUNCTION pgb_cached_sum() RETURNS bigint
 			LANGUAGE plpgsql AS $$

@@ -26,7 +26,6 @@ use Stress::Run;
 run_scenario(
 	'partitioned_pgbench',
 	{
-		schema => [ 'pgbench', 'partitioned', 'partitioned_2_levels' ],
 		# Scale 1 gives one branch row and ten teller rows, and every
 		# transaction updates both, so the clients serialise on them.
 		# Any DDL that briefly parks a lock request then has a queue
@@ -40,9 +39,6 @@ run_scenario(
 			'reindex_index_concurrently', 'drop_create_index',
 			'detach_overflow_partition', 'detach_subpartition'
 		],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'amcheck' ],
-		env => 'standalone',
 		pgbench_args => '--protocol=prepared',
 		# Ten, not twenty.  At this scale there is one pgbench_branches
 		# row and every transaction updates it, so the clients queue on

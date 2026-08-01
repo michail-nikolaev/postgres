@@ -84,6 +84,7 @@ schema partitioned_side => {
 load partition_upsert_contend => {
 		weight => 3,
 		requires => { schema => ['partitioned_side'] },
+		checks => ['partition_sum'],
 		script => q(
 			\set id random(1, 16)
 			\set mode random(0, 3)
@@ -112,6 +113,7 @@ load partition_upsert_contend => {
 load partition_dml => {
 		weight => 3,
 		requires => { schema => ['partitioned_side'] },
+		checks => ['partition_sum'],
 		script => q(
 			\set part random(0, 3)
 			\set a random(17, 2500)
@@ -140,6 +142,7 @@ load partition_dml => {
 load partition_upsert => {
 		weight => 3,
 		requires => { schema => ['partitioned_side'] },
+		checks => ['partition_sum'],
 		script => q(
 			\set id random(17, :part_rows)
 			SELECT pgb_part_upsert(:id);

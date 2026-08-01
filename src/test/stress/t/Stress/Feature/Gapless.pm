@@ -33,6 +33,7 @@ schema gapless => {
 load serial_insert => {
 		weight => 3,
 		requires => { schema => ['gapless'] },
+		checks => ['gapless_count'],
 		script => q(
 			BEGIN;
 			SELECT pg_advisory_xact_lock(7);

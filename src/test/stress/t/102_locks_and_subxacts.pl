@@ -13,14 +13,9 @@ use Stress::Run;
 run_scenario(
 	'locks_and_subxacts',
 	{
-		schema => [ 'pgbench', 'ledger', 'replica_role' ],
 		load => [ 'tpcb_like', 'row_lock', 'subxact_churn', 'cursor_hold',
 			'replica_role_apply' ],
 		ddl => [@STANDARD_DDL],
-		ddl_concurrency => 1,
-		checks =>
-		  [ 'balances', 'ledger_sum', 'row_lock_durability', 'amcheck' ],
-		env => 'standalone',
 		clients => 30,
 		tags => ['ci'],
 	});

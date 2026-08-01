@@ -181,6 +181,7 @@ index_def toasted_predicate => {
 # is what the 'balances' check relies on.
 load tpcb_like => {
 		weight => 4,
+		checks => ['balances'],
 		script => q(
 			\set aid random(1, :naccounts)
 			\set bid random(1, :nbranches)
@@ -341,6 +342,7 @@ check balances => {
 # An index scan and a sequential scan of the same predicate, in one
 # snapshot, must return the same thing.
 check index_vs_seq => {
+		auto => 1,
 		weight => 1,
 		requires => { indexes => ['btree_abalance'] },
 		script => q(
@@ -368,6 +370,7 @@ check index_vs_seq => {
 # a silent wrong answer rather than an error.  Compare it against a
 # sequential scan in one snapshot.
 check ios_vs_seq => {
+		auto => 1,
 		weight => 1,
 		requires => { indexes => ['covering_aid'] },
 		script => q(

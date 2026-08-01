@@ -32,6 +32,7 @@ schema matview => {
 
 ddl refresh_matview_concurrently => {
 		requires => { schema => ['matview'] },
+		checks => ['matview_matches'],
 		variants => sub {
 			return ({
 				table => 'pgb_mv',

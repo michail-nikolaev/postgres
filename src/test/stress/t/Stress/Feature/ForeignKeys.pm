@@ -72,6 +72,7 @@ schema fk_child => {
 load fk_churn => {
 		weight => 4,
 		requires => { schema => ['fk_child'] },
+		checks => ['no_orphans'],
 		script => q(
 			\set pid_a random(1, :nparents)
 			\set pid_b random(1, :nparents)

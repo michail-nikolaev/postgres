@@ -13,7 +13,6 @@ use Stress::Run;
 run_scenario(
 	'cancellation',
 	{
-		schema => [ 'pgbench', 'ledger' ],
 		indexes => ['btree_abalance'],
 		load => [ 'tpcb_like', 'balanced_pair' ],
 		ddl => [@STANDARD_DDL],
@@ -22,8 +21,6 @@ run_scenario(
 		# same moment -- and one of those activations then gets
 		# cancelled, which is the race this scenario is here for.
 		ddl_concurrency => 4,
-		checks => [ 'balances', 'ledger_sum', 'amcheck', 'no_slot_leak',
-			'invalid_indexes_droppable' ],
 		env => 'cancellation',
 		clients => 20,
 		tags => ['ci'],

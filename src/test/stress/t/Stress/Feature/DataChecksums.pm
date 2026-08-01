@@ -114,6 +114,7 @@ schema data_checksum_helper => {
 # per-table the way the rest of the rotation is.
 ddl toggle_data_checksums => {
 		requires => { schema => ['data_checksum_helper'] },
+		checks => ['no_checksum_failures'],
 		solo => 1,
 		variants => sub {
 			return ({
@@ -278,6 +279,46 @@ chaos_profile checksums_heavy => {
 			'transaction-snapshot-taken' => [ 0.01, 500, 8000 ],
 		},
 		discard_probability => 0.002,
+};
+
+# Turning data checksums on and off while the relations are being
+# rewritten underneath.
+#
+# Enabling checksums is not a switch.  A background worker walks every
+# page of every relation, reads it, dirties it, logs a full page image
+# and moves on, and the cluster reports "inprogress-on" until it has
+# finished.  What it walks is the block count taken when it opened the
+# relation -- and REPACK, CLUSTER and VACUUM FULL all swap a relation's
+# relfilenode while it is open, while CREATE INDEX CONCURRENTLY adds
+# relations it never enumerated.
+#
+# So this crosses the newest whole-database rewrite with the rewrites
+# this suite already drives, and asks the only question that matters
+# afterwards: with checksums on, does every page still verify?  The
+# detector is the server's own counter -- pg_stat_database's
+# checksum_failures, which nothing but a mismatch increments -- read
+# after every page has been pulled through shared buffers, since a page
+# is only verified when it is read.
+#
+# The chaos profile widens the gap between counting a relation's blocks
+# and writing each of them, which is the window a concurrent swap has to
+# land in.
+#
+# One template, three test files: standalone, against a standby, and
+# under the crash loop.  They were three byte-identical scenario files
+# before this existed, and had started to drift.
+scenario_template data_checksums => {
+	indexes => [ 'btree_abalance', 'btree_history_delta' ],
+	load => ['tpcb_like'],
+	ddl => [
+		'repack_concurrently', 'reindex_table_concurrently',
+		'drop_create_index', 'vacuum', 'toggle_data_checksums'
+	],
+	clients => 20,
+	chaos => 'checksums_heavy',
+	# The cluster has to start without checksums for the enabling
+	# worker to have anything to do on the first turn.
+	modifier => 'no_checksums',
 };
 
 1;

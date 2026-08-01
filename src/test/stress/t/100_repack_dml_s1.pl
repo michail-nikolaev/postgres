@@ -27,8 +27,6 @@ use Stress::Run;
 run_scenario(
 	'repack_dml_s1',
 	{
-		schema => ['pgbench'],
-		pgbench_scale => 1,
 		# expr_xid belongs at this scale rather than 101's: the expression
 		# takes a transaction id every time it is evaluated, which over
 		# five million rows costs more than the coverage is worth.
@@ -36,9 +34,6 @@ run_scenario(
 			'toasted_predicate', 'expr_xid' ],
 		load => [ 'tpcb_like', 'row_lock' ],
 		ddl => [ @STANDARD_DDL, 'reindex_pkey_concurrently' ],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'index_vs_seq', 'amcheck', 'no_slot_leak' ],
-		env => 'standalone',
 		# expr_xid's expression assigns a transaction id every time it
 		# is evaluated, and that is not allowed in parallel mode: a
 		# parallel index build, or a parallel scan under amcheck's

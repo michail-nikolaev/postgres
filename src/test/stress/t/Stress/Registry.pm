@@ -176,23 +176,23 @@ use Exporter 'import';
 use File::Basename qw(dirname);
 
 our (%SCHEMA, %INDEXES, %LOAD, %DDL, %CHECK, %ENVS);
-our (%MODIFIERS, %CHAOS_POINTS, %CHAOS);
+our (%MODIFIERS, %CHAOS_POINTS, %CHAOS, %TEMPLATES);
 
 our @EXPORT_OK = (
 	qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS
-	  %MODIFIERS %CHAOS_POINTS %CHAOS),
+	  %MODIFIERS %CHAOS_POINTS %CHAOS %TEMPLATES),
 	qw(schema index_def load ddl check env
-	  modifier chaos_point chaos_profile),
+	  modifier chaos_point chaos_profile scenario_template),
 	qw(load_all));
 
 our %EXPORT_TAGS = (
 	registries => [
 		qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS
-		  %MODIFIERS %CHAOS_POINTS %CHAOS)
+		  %MODIFIERS %CHAOS_POINTS %CHAOS %TEMPLATES)
 	],
 	declare => [
 		qw(schema index_def load ddl check env
-		  modifier chaos_point chaos_profile)
+		  modifier chaos_point chaos_profile scenario_template)
 	],
 );
 
@@ -209,6 +209,7 @@ my %registry_of = (
 	modifier => \%MODIFIERS,
 	chaos_point => \%CHAOS_POINTS,
 	chaos_profile => \%CHAOS,
+	scenario_template => \%TEMPLATES,
 );
 
 my %declared_at;
@@ -237,6 +238,12 @@ sub env           { _register('env', @_); return }
 sub modifier      { _register('modifier', @_); return }
 sub chaos_point   { _register('chaos_point', @_); return }
 sub chaos_profile { _register('chaos_profile', @_); return }
+
+# A scenario shared by several test files that differ in one axis: the
+# bundle declares the spec once, and each stub file runs it through
+# run_template() with its own overrides.  Byte-identical scenario files
+# were how the checksum triple drifted apart before this existed.
+sub scenario_template { _register('scenario_template', @_); return }
 
 =pod
 
@@ -322,6 +329,23 @@ sub _post_load_checks
 			push @errors,
 			  "chaos profile '$pname' jitters undeclared point '$point'"
 			  unless exists $CHAOS_POINTS{$point};
+		}
+	}
+
+	# The checks a load or a command declares are what joins a scenario
+	# implicitly, so a typo here would silently verify nothing.
+	foreach my $kind (qw(load ddl))
+	{
+		my $reg = $registry_of{$kind};
+		foreach my $name (sort keys %$reg)
+		{
+			foreach my $cname (@{ $reg->{$name}->{checks} // [] })
+			{
+				push @errors,
+				  "$kind '$name' ($declared_at{\"$kind:$name\"}) declares "
+				  . "check '$cname', which is not declared"
+				  unless exists $CHECK{$cname};
+			}
 		}
 	}
 

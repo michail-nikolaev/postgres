@@ -50,6 +50,7 @@ schema replica_role => {
 load replica_role_apply => {
 		weight => 2,
 		requires => { schema => [ 'replica_role', 'ledger' ] },
+		checks => ['ledger_sum'],
 		script => q(
 			\set a random(1, :naccounts)
 			\set b random(1, :naccounts)

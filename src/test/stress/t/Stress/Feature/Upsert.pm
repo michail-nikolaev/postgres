@@ -61,6 +61,7 @@ schema upsert_keys => {
 load upsert_contend => {
 		weight => 3,
 		requires => { schema => ['upsert_keys'] },
+		checks => ['distinct_keys'],
 		script => q(
 			\set k random(:naccounts + 1, :naccounts + 16)
 			\set v random(1, 100000)
@@ -115,6 +116,7 @@ load nnd_upsert => {
 load upsert_merge => {
 		weight => 3,
 		requires => { schema => ['upsert_keys'] },
+		checks => ['distinct_keys'],
 		script => q(
 			\set k random(1, :naccounts)
 			\set v random(1, 100000)

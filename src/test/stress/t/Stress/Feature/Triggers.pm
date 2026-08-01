@@ -138,6 +138,7 @@ index_def btree_audit_aid => {
 load trigger_upsert_log => {
 		weight => 3,
 		requires => { schema => ['trigger_audit'] },
+		checks => ['trigger_counts_agree'],
 		script => q(
 			INSERT INTO pgb_call_log(client) VALUES (:client_id);
 		),

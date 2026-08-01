@@ -19,13 +19,9 @@ use Stress::Run;
 run_scenario(
 	'bulk_and_rewrite',
 	{
-		schema => [ 'pgbench', 'ledger' ],
 		indexes => ['btree_abalance'],
 		load => [ 'tpcb_like', 'bulk_copy', 'twophase' ],
 		ddl => [ @STANDARD_DDL, 'alter_table_rewrite' ],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'ledger_sum', 'index_vs_seq', 'amcheck' ],
-		env => 'standalone',
 		clients => 20,
 		tags => ['ci'],
 	});

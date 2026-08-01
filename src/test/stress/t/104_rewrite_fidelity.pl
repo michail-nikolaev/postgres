@@ -37,7 +37,6 @@ use Stress::Run;
 run_scenario(
 	'rewrite_fidelity',
 	{
-		schema => [ 'pgbench', 'toast', 'generated', 'exclusion_slot' ],
 		load => [
 			'tpcb_like', 'toast_rewrite',
 			'generated_update', 'exclusion_churn'
@@ -49,13 +48,6 @@ run_scenario(
 			'repack_concurrently', 'reindex_table_concurrently',
 			'drop_create_index'
 		],
-		ddl_concurrency => 1,
-		checks => [
-			'toast_md5', 'generated_matches',
-			'generated_defs_intact', 'distinct_slots',
-			'amcheck'
-		],
-		env => 'standalone',
 		clients => 20,
 		tags => ['ci'],
 	});

@@ -51,9 +51,6 @@ use Stress::Run;
 run_scenario(
 	'hash_and_constraints',
 	{
-		schema => [ 'pgbench', 'partitioned_hash', 'nulls_not_distinct',
-			'deferrable_pk', 'bare_table_event_trigger' ],
-		pgbench_scale => 1,
 		load => [ 'tpcb_like', 'hash_dml', 'nnd_upsert',
 			'deferred_key_swap' ],
 		ddl => [
@@ -62,12 +59,7 @@ run_scenario(
 			'add_validate_constraint', 'reindex_schema_concurrently',
 			'reindex_bare_table'
 		],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'amcheck', 'no_substitute_constraints',
-			'deferred_keys_intact', 'repack_refuses_deferrable',
-			'pgstat_rejects_invalid_index', 'dic_clears_replident',
-			'refresh_survives_dropped_index' ],
-		env => 'standalone',
+		checks => [ 'dic_clears_replident', 'refresh_survives_dropped_index' ],
 		clients => 20,
 		tags => ['ci'],
 	});

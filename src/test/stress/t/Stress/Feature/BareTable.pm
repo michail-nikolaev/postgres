@@ -73,6 +73,7 @@ ddl reindex_bare_table => {
 # than waited for: a unique build over duplicate values fails and
 # leaves exactly one.
 check pgstat_rejects_invalid_index => {
+		auto => 1,
 		# Makes its invalid index on pgb_bare, which that schema supplies.
 		requires => { schema => ['bare_table_event_trigger'] },
 		final => sub {

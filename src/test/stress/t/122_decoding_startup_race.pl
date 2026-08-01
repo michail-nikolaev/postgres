@@ -46,7 +46,6 @@ use Stress::Run;
 run_scenario(
 	'decoding_startup_race',
 	{
-		schema => ['pgbench'],
 		# Enough branches and tellers that the workload is not serialized
 		# on one row: what this needs is many backends committing at
 		# once, not many backends queued behind the same tuple.
@@ -54,8 +53,6 @@ run_scenario(
 		load => ['tpcb_like'],
 		ddl => ['repack_hot_small'],
 		ddl_concurrency => 2,
-		checks => [ 'balances', 'amcheck' ],
-		env => 'standalone',
 		# The whole scenario turns on this: the window between the flush
 		# that lets a decoder see a commit and the CLOG update that lets
 		# an ordinary snapshot see it is under 50us in nature, and REPACK

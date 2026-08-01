@@ -40,7 +40,6 @@ use Stress::Run;
 run_scenario(
 	'access_methods',
 	{
-		schema => [ 'pgbench', 'am_columns' ],
 		load => [ 'tpcb_like', 'am_churn', 'temp_table_cic' ],
 		# REPACK orders a table by an index, which only btree can do, so
 		# the index-ordered variant is left out here.
@@ -49,9 +48,6 @@ run_scenario(
 			'reindex_index_concurrently', 'drop_create_index',
 			'vacuum'
 		],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'amcheck' ],
-		env => 'standalone',
 		clients => 20,
 		tags => ['ci'],
 	});

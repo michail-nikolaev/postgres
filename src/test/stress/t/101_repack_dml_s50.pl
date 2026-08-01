@@ -13,14 +13,10 @@ use Stress::Run;
 run_scenario(
 	'repack_dml_s50',
 	{
-		schema => ['pgbench'],
 		pgbench_scale => 50,
 		indexes => [ 'btree_abalance', 'partial_abalance', 'expr_abalance' ],
 		load => ['tpcb_like'],
 		ddl => [@STANDARD_DDL],
-		ddl_concurrency => 1,
-		checks => [ 'balances', 'index_vs_seq', 'amcheck' ],
-		env => 'standalone',
 		clients => 30,
 		tags => ['ci'],
 	});
