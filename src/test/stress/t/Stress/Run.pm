@@ -54,7 +54,7 @@ hand outside the harness.
   duration         seconds at stressval 1 (default 6)
   tags             'ci' for the default run; everything runs in soak mode
 
-The names come from the registries in C<Stress::Plugins>; _validate()
+The names come from the registries in C<Stress::Registry>; _validate()
 rejects a combination whose pieces do not fit, so a typo fails the test
 rather than quietly running something smaller than intended.
 
@@ -70,8 +70,12 @@ use Test::More;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS %MODIFIERS
-  stress_rollback_prepared);
+use Stress::Registry qw(:registries load_all);
+use Stress::Util qw(stress_rollback_prepared);
+
+# Populate the registries before anything reads them; idempotent, so it
+# does not matter whether Run or Soak gets here first.
+Stress::Registry::load_all();
 
 our @EXPORT =
   qw(run_scenario run_one stress_seed stress_assert_defn @STANDARD_DDL);

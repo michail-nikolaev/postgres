@@ -89,7 +89,9 @@ use FindBin;
 use Test::More;
 use PostgreSQL::Test::Utils;
 
-use Stress::Plugins qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS %CHAOS %CHAOS_POINTS %MODIFIERS);
+use Stress::Registry qw(:registries load_all);
+
+Stress::Registry::load_all();
 
 our @EXPORT = qw(soak_enabled soak_run);
 
