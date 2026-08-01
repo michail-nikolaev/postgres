@@ -48,6 +48,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -2823,6 +2824,12 @@ ri_FastPathCheck(RI_ConstraintInfo *riinfo,
 	CommandCounterIncrement();
 	snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
+	/*
+	 * conindid has been read but the referenced table is not locked yet,
+	 * which is the window a concurrent rebuild of that index gets into.
+	 */
+	INJECTION_POINT("ri-before-pk-lock", NULL);
+
 	pk_rel = table_open(riinfo->pk_relid, RowShareLock);
 	idx_rel = index_open(riinfo->conindid, AccessShareLock);
 
@@ -4385,6 +4392,12 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
 		 * We don't release these locks until end of transaction, matching SPI
 		 * behavior.
 		 */
+		/*
+		 * conindid has been read but the referenced table is not locked yet,
+		 * which is the window a concurrent rebuild of that index gets into.
+		 */
+		INJECTION_POINT("ri-before-pk-lock", NULL);
+
 		entry->pk_rel = table_open(riinfo->pk_relid, RowShareLock);
 		entry->idx_rel = index_open(riinfo->conindid, AccessShareLock);
 		entry->pk_slot = table_slot_create(entry->pk_rel, NULL);
