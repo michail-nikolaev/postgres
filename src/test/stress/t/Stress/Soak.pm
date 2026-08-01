@@ -87,6 +87,7 @@ use warnings FATAL => 'all';
 use Exporter 'import';
 use FindBin;
 use Test::More;
+use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 
 use Stress::Registry qw(:registries load_all);
@@ -94,6 +95,7 @@ use Stress::Registry qw(:registries load_all);
 Stress::Registry::load_all();
 
 use Stress::Compose;
+use Stress::Chaos qw(chaos_fetch_defined chaos_pool);
 
 our @EXPORT = qw(soak_enabled soak_run);
 
@@ -106,7 +108,10 @@ sub _catalogue
 	my %found;
 
 	local $Stress::Run::COLLECT = \%found;
-	foreach my $file (sort glob("$FindBin::RealBin/[0-9]*.pl"))
+	# Scenario files only: three digits and up.  The low numbers are the
+	# framework's own tests -- 001_meta runs a whole test plan of its
+	# own if loaded, which is not a scenario collection anyone wants.
+	foreach my $file (sort glob("$FindBin::RealBin/[1-9][0-9][0-9]_*.pl"))
 	{
 		# Skip ourselves; loading it would recurse.
 		next if $file eq $0;
@@ -217,9 +222,14 @@ sub _invent_chaos
 
 	return 'off' if rand() >= $wanted;
 
-	foreach my $point (_pick_some(1, 3, sort keys %CHAOS_POINTS))
+	# The pool, not the cap table: on a build whose defined points have
+	# been fetched this is every jitterable point in the tree, the
+	# uncurated ones at conservative default caps, so a point added
+	# upstream is hunted by the next soak without anyone editing a list.
+	my $pool = chaos_pool();
+	foreach my $point (_pick_some(1, 3, sort keys %$pool))
 	{
-		my $caps = $CHAOS_POINTS{$point};
+		my $caps = $pool->{$point};
 		my $probability = $caps->{max_p} * (0.1 + 0.9 * rand());
 		my $min_us = int(100 + rand(1000));
 		my $max_us = $min_us + int(rand($caps->{max_us} - $min_us + 1));
@@ -490,6 +500,25 @@ sub soak_run
 	$skip = $1 if $extra =~ /\bstress_soak_skip=(\d+)\b/;
 	my $count;
 	$count = $1 if $extra =~ /\bstress_soak_count=(\d+)\b/;
+
+	# What this build defines is what invented profiles may jitter.
+	# Fetched once through a throwaway node, before the seed feeds
+	# anything, and skipped on a build without injection points -- where
+	# chaos is skipped too, so the curated caps are all the pool needs.
+	if (($ENV{enable_injection_points} // '') eq 'yes')
+	{
+		my $probe = PostgreSQL::Test::Cluster->new('soak_points');
+		$probe->init;
+		$probe->start;
+		chaos_fetch_defined($probe);
+		$probe->stop;
+		my $pool = chaos_pool();
+		note 'soak: chaos pool has '
+		  . scalar(keys %$pool)
+		  . ' points ('
+		  . scalar(grep { $_->{curated} } values %$pool)
+		  . ' curated)';
+	}
 
 	my $seed = Stress::Run::stress_seed();
 	my $deadline = time() + $minutes * 60;

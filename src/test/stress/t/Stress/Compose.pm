@@ -51,6 +51,7 @@ use strict;
 use warnings FATAL => 'all';
 
 use Exporter 'import';
+use Stress::Chaos ();
 use Stress::Registry qw(:registries);
 
 our @EXPORT_OK = qw(resolve validate fits spec_is_runnable describe_effective);
@@ -123,7 +124,9 @@ sub _conflicts_fire
 		}
 	}
 
-	# The other direction: anything present that conflicts with $name.
+	# The other direction: anything present that conflicts with $name --
+	# including the single-valued axes, whose entries declare conflicts
+	# of their own (crash_loop against the standby topology, say).
 	foreach my $okind (sort keys %registry)
 	{
 		foreach my $oname (@{ $spec->{$okind} // [] })
@@ -133,6 +136,14 @@ sub _conflicts_fire
 			  if grep { $_ eq $name }
 			  @{ $odefn->{conflicts}->{$kind} // [] };
 		}
+	}
+	foreach my $axis (sort keys %scalar_axis)
+	{
+		my $aname = $spec->{$axis};
+		next unless defined $aname;
+		my $adefn = $scalar_axis{$axis}->{$aname} or next;
+		return 1
+		  if grep { $_ eq $name } @{ $adefn->{conflicts}->{$kind} // [] };
 	}
 	return 0;
 }
@@ -377,7 +388,10 @@ sub fits
 {
 	my ($kind, $name, $partial) = @_;
 	my $defn =
-	  $kind eq 'modifier' ? $MODIFIERS{$name} : $registry{$kind}->{$name};
+	    $kind eq 'modifier' ? $MODIFIERS{$name}
+	  : $scalar_axis{$kind} ? $scalar_axis{$kind}->{$name}
+	  : exists $registry{$kind} ? $registry{$kind}->{$name}
+	  : undef;
 
 	return 0 unless $defn;
 
@@ -467,6 +481,46 @@ sub validate
 		}
 	}
 
+	# The axes' own constraints: a disruptor that cannot run against
+	# this topology, a profile that cannot share the cluster with it.
+	# These entries are single-valued, so the generic per-entry loop
+	# below never walks them.
+	foreach my $axis (sort keys %scalar_axis)
+	{
+		my $aname = $spec->{$axis};
+		next unless defined $aname;
+		my $adefn = $scalar_axis{$axis}->{$aname} // next;
+
+		foreach my $rkind (sort keys %{ $adefn->{requires} // {} })
+		{
+			my @want = @{ $adefn->{requires}->{$rkind} };
+			if ($scalar_axis{$rkind})
+			{
+				die "$axis '$aname' requires $rkind "
+				  . join(' or ', map { "'$_'" } @want)
+				  unless grep { $_ eq ($spec->{$rkind} // '') } @want;
+				next;
+			}
+			foreach my $rname (@want)
+			{
+				die "$axis '$aname' requires $rkind '$rname', "
+				  . 'which the scenario does not use'
+				  unless grep { $_ eq $rname } @{ $spec->{$rkind} // [] };
+			}
+		}
+		foreach my $ckind (sort keys %{ $adefn->{conflicts} // {} })
+		{
+			foreach my $cname (@{ $adefn->{conflicts}->{$ckind} })
+			{
+				die "$axis '$aname' cannot be combined with "
+				  . "$ckind '$cname'"
+				  if $scalar_axis{$ckind}
+				  ? ($spec->{$ckind} // '') eq $cname
+				  : grep { $_ eq $cname } @{ $spec->{$ckind} // [] };
+			}
+		}
+	}
+
 	if (defined $spec->{chaos} && !ref $spec->{chaos})
 	{
 		die "scenario names unknown chaos profile '$spec->{chaos}'"
@@ -479,11 +533,15 @@ sub validate
 		# those are what keep a sleep from turning into a lock cascade.
 		foreach my $point (sort keys %{ $spec->{chaos}->{points} // {} })
 		{
-			my $caps = $CHAOS_POINTS{$point};
 			my ($probability, undef, $max_us) =
 			  @{ $spec->{chaos}->{points}->{$point} };
 
-			die "chaos names unknown injection point '$point'" unless $caps;
+			# Known means curated, or defined by this build and not
+			# excluded; the caps are the curated ones or the pool's
+			# conservative defaults.
+			die "chaos names unknown injection point '$point'"
+			  unless Stress::Chaos::chaos_point_known($point);
+			my $caps = Stress::Chaos::chaos_caps($point);
 			die "chaos probability for '$point' above its cap"
 			  if $probability > $caps->{max_p};
 			die "chaos sleep for '$point' above its cap"

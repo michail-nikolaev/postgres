@@ -1011,6 +1011,7 @@ sub _chaos_setup
 			"SELECT injection_points_attach_jitter('$point', "
 			  . "$probability, $min_us, $max_us, $seed)");
 	}
+	$ctx->{chaos_attached} = [ sort keys %{ $profile->{points} } ];
 
 	Test::More::note("chaos '$name': "
 		  . scalar(keys %{ $profile->{points} })
@@ -1036,6 +1037,39 @@ sub _chaos_report
 		"chaos '$ctx->{chaos}': $count sleeps totalling ${us}us");
 	Test::More::diag("chaos '$ctx->{chaos}' never fired")
 	  if defined $count && $count eq '0';
+
+	# Per point, where the module can answer.  A slot exists only once a
+	# point has slept, so an attached point with no row is one that never
+	# fired -- a profile of five points that fired four times zero is
+	# testing one point while claiming five, and only this makes that
+	# visible.
+	if ($node->safe_psql(
+			'postgres', q{SELECT to_regprocedure(
+				'injection_points_stats_jitter_by_point()') IS NULL}) eq 'f')
+	{
+		my %slept;
+		foreach my $row (
+			split /\n/,
+			$node->safe_psql(
+				'postgres',
+				'SELECT point_name, sleep_count, sleep_us '
+				  . 'FROM injection_points_stats_jitter_by_point() '
+				  . 'ORDER BY point_name'))
+		{
+			my ($point, $pcount, $pus) = split /\|/, $row;
+			next unless defined $pus;
+			$slept{$point} = 1;
+			Test::More::note(
+				"chaos '$ctx->{chaos}': $point: "
+				  . "$pcount sleeps totalling ${pus}us");
+		}
+		foreach my $point (@{ $ctx->{chaos_attached} // [] })
+		{
+			Test::More::diag(
+				"chaos '$ctx->{chaos}': point $point never fired")
+			  unless $slept{$point};
+		}
+	}
 	return;
 }
 

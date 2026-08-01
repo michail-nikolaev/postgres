@@ -184,27 +184,27 @@ use File::Basename qw(dirname);
 
 our (%SCHEMA, %INDEXES, %LOAD, %DDL, %CHECK);
 our (%TOPOLOGIES, %DISRUPTORS, %PROFILES);
-our (%MODIFIERS, %CHAOS_POINTS, %CHAOS, %TEMPLATES);
+our (%MODIFIERS, %CHAOS_POINTS, %CHAOS_EXCLUDED, %CHAOS, %TEMPLATES);
 
 our @EXPORT_OK = (
 	qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK
 	  %TOPOLOGIES %DISRUPTORS %PROFILES
-	  %MODIFIERS %CHAOS_POINTS %CHAOS %TEMPLATES),
+	  %MODIFIERS %CHAOS_POINTS %CHAOS_EXCLUDED %CHAOS %TEMPLATES),
 	qw(schema index_def load ddl check
 	  topology disruptor settings_profile
-	  modifier chaos_point chaos_profile scenario_template),
+	  modifier chaos_point chaos_exclude chaos_profile scenario_template),
 	qw(load_all));
 
 our %EXPORT_TAGS = (
 	registries => [
 		qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK
 		  %TOPOLOGIES %DISRUPTORS %PROFILES
-		  %MODIFIERS %CHAOS_POINTS %CHAOS %TEMPLATES)
+		  %MODIFIERS %CHAOS_POINTS %CHAOS_EXCLUDED %CHAOS %TEMPLATES)
 	],
 	declare => [
 		qw(schema index_def load ddl check
 		  topology disruptor settings_profile
-		  modifier chaos_point chaos_profile scenario_template)
+		  modifier chaos_point chaos_exclude chaos_profile scenario_template)
 	],
 );
 
@@ -222,6 +222,7 @@ my %registry_of = (
 	profile => \%PROFILES,
 	modifier => \%MODIFIERS,
 	chaos_point => \%CHAOS_POINTS,
+	chaos_exclude => \%CHAOS_EXCLUDED,
 	chaos_profile => \%CHAOS,
 	scenario_template => \%TEMPLATES,
 );
@@ -254,6 +255,12 @@ sub settings_profile { _register('profile', @_); return }
 sub modifier      { _register('modifier', @_); return }
 sub chaos_point   { _register('chaos_point', @_); return }
 sub chaos_profile { _register('chaos_profile', @_); return }
+
+# A point that must never be jittered, with the reason it must not.
+# The IS_INJECTION_POINT_ATTACHED sites are excluded mechanically --
+# attachment alone changes what the server decides there -- so an entry
+# here is for the judged cases beyond that.
+sub chaos_exclude { _register('chaos_exclude', @_); return }
 
 # A scenario shared by several test files that differ in one axis: the
 # bundle declares the spec once, and each stub file runs it through
@@ -345,7 +352,18 @@ sub _post_load_checks
 			push @errors,
 			  "chaos profile '$pname' jitters undeclared point '$point'"
 			  unless exists $CHAOS_POINTS{$point};
+			push @errors,
+			  "chaos profile '$pname' jitters excluded point '$point'"
+			  if exists $CHAOS_EXCLUDED{$point};
 		}
+	}
+
+	# A point cannot be both worth jittering and forbidden to jitter.
+	foreach my $point (sort keys %CHAOS_EXCLUDED)
+	{
+		push @errors,
+		  "chaos point '$point' is both capped and excluded"
+		  if exists $CHAOS_POINTS{$point};
 	}
 
 	# The checks a load or a command declares are what joins a scenario

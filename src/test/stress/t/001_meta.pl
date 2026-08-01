@@ -33,9 +33,8 @@ ok(1, 'the registries load and their cross-references resolve');
 my %catalogue;
 {
 	local $Stress::Run::COLLECT = \%catalogue;
-	foreach my $file (sort glob("$FindBin::RealBin/[0-9]*.pl"))
+	foreach my $file (sort glob("$FindBin::RealBin/[1-9][0-9][0-9]_*.pl"))
 	{
-		next if $file eq abs_path(__FILE__);
 		next if $file =~ /999_soak/;
 		my $abs = abs_path($file);
 		do $abs;
@@ -142,6 +141,102 @@ foreach my $name (sort keys %catalogue)
 		1;
 	};
 	ok($died, 'an unknown scenario field fails validation');
+}
+
+{
+	# The axes carry their own constraints: a disruptor whose victim
+	# picker or restart loop is written for one node refuses the
+	# topologies it has not been built for.
+	my $died = !eval {
+		Stress::Compose::validate(
+			Stress::Compose::resolve(
+				{
+					load => ['tpcb_like'],
+					ddl => ['vacuum'],
+					topology => 'standby',
+					disruptor => 'crash_loop'
+				}));
+		1;
+	};
+	ok($died, 'an axis conflict fails validation');
+	ok( !Stress::Compose::fits(
+			'disruptor', 'crash_loop', { topology => 'standby' }),
+		'and the prefilter refuses it too');
+}
+
+#
+# The chaos catalogue against the build's own defined points.  This is
+# the one section that needs a server: the list of defined points is
+# compiled into the injection_points module, and asking it is the only
+# way to catch a curated name the tree has renamed out from under us --
+# attaching to a stale name is silent by design.
+#
+SKIP:
+{
+	skip 'this build has no injection points', 1
+	  unless ($ENV{enable_injection_points} // '') eq 'yes';
+
+	require Stress::Chaos;
+
+	my $node = PostgreSQL::Test::Cluster->new('meta_points');
+	$node->init;
+	$node->start;
+	my $defined = Stress::Chaos::chaos_fetch_defined($node);
+	$node->stop;
+
+	skip 'the installed injection_points module cannot list defined points',
+	  1
+	  unless $defined;
+
+	cmp_ok(scalar keys %$defined, '<=', 128,
+		'the defined points fit the shmem slot table');
+	is(scalar(grep { length($_) >= 64 } keys %$defined),
+		0, 'every defined point name fits INJ_NAME_MAXLEN');
+
+	# Stale names rot silently everywhere else; here they fail.
+	foreach my $point (sort keys %CHAOS_POINTS)
+	{
+		ok(exists $defined->{$point},
+			"capped point '$point' still exists in the tree");
+	}
+	foreach my $point (sort keys %CHAOS_EXCLUDED)
+	{
+		ok(exists $defined->{$point},
+			"excluded point '$point' still exists in the tree");
+	}
+
+	# Jitter only ever delays; on an attached-kind site the attachment
+	# itself decides something, so neither the cap table nor a profile
+	# may name one.
+	my @attached =
+	  sort grep { $defined->{$_}{kinds}{attached} } keys %$defined;
+	foreach my $point (@attached)
+	{
+		ok(!exists $CHAOS_POINTS{$point},
+			"attached-kind point '$point' is not capped for jitter");
+	}
+	foreach my $pname (sort keys %CHAOS)
+	{
+		foreach my $point (sort keys %{ $CHAOS{$pname}->{points} // {} })
+		{
+			ok(exists $defined->{$point},
+				"profile '$pname' point '$point' still exists in the tree");
+		}
+	}
+
+	# What the pool amounts to on this build, for the log: the uncurated
+	# names are covered at the default caps, and the note is how a new
+	# point's arrival shows up before any soak hunts it.
+	my $pool = Stress::Chaos::chaos_pool();
+	my @uncurated = sort grep { !$pool->{$_}{curated} } keys %$pool;
+	note 'chaos pool: '
+	  . scalar(keys %$pool)
+	  . ' points, '
+	  . scalar(@uncurated)
+	  . ' of them uncurated, at default caps: '
+	  . join(', ', @uncurated);
+	cmp_ok(scalar keys %$pool, '>', scalar keys %CHAOS_POINTS,
+		'the pool is wider than the curated table');
 }
 
 done_testing();
