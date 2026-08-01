@@ -403,6 +403,20 @@ topology subscription => {
 						'ALTER PUBLICATION stress_pub ADD TABLE pgbench_tellers');
 					$subscriber->safe_psql('postgres',
 						'ALTER SUBSCRIPTION stress_sub REFRESH PUBLICATION');
+
+					# Wait for the copy this refresh asks for before
+					# going round again.  Without this the next cycle's
+					# TRUNCATE can land on a table synchronization still
+					# in flight: the copy puts rows in, the truncate
+					# takes them out, and the updates that follow arrive
+					# for rows the subscriber no longer has --
+					# conflict=update_missing in its log, and the data
+					# repaired by the cycle after that, so only the log
+					# remembers.  Found by a soak combination whose
+					# workload was light enough for the cycles to
+					# overlap.
+					$subscriber->wait_for_subscription_sync($publisher,
+						'stress_sub');
 					$resync++;
 				}
 			}

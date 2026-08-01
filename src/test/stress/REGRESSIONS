@@ -2374,3 +2374,26 @@ each needs a combination no hand-written scenario names.
     Newly reachable because a command pulls its own schema in: before
     that, naming alter_trigger_function meant naming trigger_audit, and
     soak only offered commands whose schema was already chosen.
+
+5.  A resync that could overrun the one before it.
+
+    The subscription topology takes pgbench_tellers out of the
+    publication, truncates it on the subscriber and puts it back, so
+    that a table synchronization runs from scratch against a live
+    workload.  It returned as soon as the refresh was issued, without
+    waiting for the copy that refresh asks for -- so with a workload
+    light enough for the cycles to come round quickly, the next cycle's
+    TRUNCATE landed on a synchronization still in flight.  The copy put
+    rows in, the truncate took them out, and the updates that followed
+    arrived for rows the subscriber no longer had:
+
+      not ok - no update_missing conflict was logged
+
+    while all three table comparisons passed, because the cycle after
+    that repaired the data.  Only the log remembered, which is why the
+    check reads it.
+
+    The cycle now waits for the subscription to finish syncing before
+    going round again.  Worth noting what this says about the check:
+    comparing the tables at the end would never have caught it, and the
+    log line was the whole evidence.
