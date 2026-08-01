@@ -11,6 +11,21 @@
 # is not MVCC-safe: a snapshot that spans its relfilenode swap can find
 # the table empty.
 #
+# The path, on both sides:
+#
+#   subscriber  LogicalRepSyncTableStart() creates the slot with
+#               CRS_USE_SNAPSHOT (tablesync.c), then advances the
+#               replication origin, opens the relation and checks
+#               privileges, and only then calls copy_table()
+#   publisher   the walsender answering CREATE_REPLICATION_SLOT ...
+#               USE_SNAPSHOT builds that snapshot with
+#               SnapBuildInitialSnapshot() and installs it with
+#               RestoreTransactionSnapshot() (walsender.c), and holds
+#               it for the COPY that follows
+#
+# so the window is everything between those two, and a REPACK that
+# swaps the relfilenode inside it is read as an empty table.
+#
 # So a REPACK that commits in the window between the tablesync's
 # snapshot and its COPY makes the copy succeed having read nothing.
 # What follows is silent and permanent: the table is marked
