@@ -270,7 +270,15 @@ stopped testing anything.  To confirm it still catches what it used to:
   meson test -C buildDir --suite stress <scenario>
 
 and it must fail, with the message the revert commit's own message
-quotes; then git reset --hard and rebuild.  Rebuilding after the reset
+quotes; then git reset --hard and rebuild.
+
+Run copies of a scenario one at a time, or as differently named tests.
+Never with "meson test --repeat N": a test's directory is named for the
+test and testwrap deletes it at every start, so N concurrent repeats
+remove each other's clusters mid-run and produce wrong data rather than
+an error.  A run now claims its directory and fails with an explanation
+if the claim goes, but the cheapest defence is not to arrange the
+collision.  REGRESSIONS records the evening that cost.  Rebuilding after the reset
 is not optional: a tmp_install left holding the reverted binaries makes
 every later run test the bug instead of the tree, which has burned this
 suite once already.  Each revert commit names its scenario, the failure

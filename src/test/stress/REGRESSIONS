@@ -2224,47 +2224,44 @@ developed.  Overlap is not duplication when the narrower test is the one
 that will say what broke.
 
 
-Open: lost updates in REPACK CONCURRENTLY's small-table shape under
-====================================================================
-machine-load contention (2026-08-01)
-------------------------------------
+Not a bug: "lost updates under parallel repeats" (2026-08-01)
+============================================================
 
-Found while re-verifying the framework restructure, not yet diagnosed.
-With every fix on this branch applied, 122_decoding_startup_race fails
-3 runs in 4 when four copies run concurrently on one machine
-(meson test stress/122_decoding_startup_race --repeat 4), with
+Recorded because the reasoning took an evening and the trap is easy to
+fall into again.
 
-  stress assertion failed: balances disagree:
-    accounts=-15260 tellers=-15260 branches=-20046 history=-15260
+While re-verifying the framework restructure, four concurrent copies of
+122_decoding_startup_race appeared to lose updates on the small tables
+repack_hot_small rewrites: the four-way balance broke 3 runs in 4, the
+final check failed too -- so the damage outlived the workload, which
+is the signature of the class this scenario exists for -- and it
+reproduced with the jitter switched off and on the pre-restructure
+framework alike.  It looked like a second window of the logical
+decoding CLOG race.
 
-and -- the important half -- the final check fails too: the
-disagreement survives the workload's end, so this is a lost or extra
-update on the repacked small table, not a snapshot spanning the swap.
-Both sightings diverged on one of repack_hot_small's targets
-(pgbench_branches once, pgbench_tellers once).
+It was not.  The four copies were being run as
 
-What has been ruled out:
+  meson test stress/122_decoding_startup_race --repeat 4
 
-  - The framework restructure: the same 3-in-4 failure reproduces on
-    the pre-restructure framework with an untouched injection_points
-    module, freshly built.
-  - The jitter: forcing stress_chaos=off leaves the rate at 3 in 4.
-    Four concurrent clusters' worth of CPU contention widens the
-    natural window on its own.
-  - Stale binaries (which produced a false version of this finding
-    first, and cost an evening: see README, "Replaying a catch").
+and src/tools/testwrap begins every run with
 
-What is known: sequential runs of the same scenario pass 4 of 4 and
-have passed throughout the restructure, so the window needs the
-machine loaded, not just the scenario running.  The shape is the one
-repack_hot_small was built to expose -- a whole REPACK CONCURRENTLY of
-a table small enough to copy inside one CLOG-update window -- which is
-the same neighbourhood as the decoding-CLOG fix this scenario gates,
-and that fix's clean rate was only ever measured sequentially (3 of
-3).  Next steps, in the order that narrowed the checksum crash: one
-lever at a time (no chaos: done, still fails), then a single
-concurrent copy pinned to fewer CPUs, then the WAL of a failing run
-against pg_waldump to see whether the losing update was decoded,
-applied to the new heap, or dropped between the two.  Environment so
-far: one WSL2 machine; reproducing on bare metal is part of
-confirming it.
+  if os.path.exists(testdir) and os.path.isdir(testdir):
+      shutil.rmtree(testdir)
+
+where testdir is derived from the test's name and nothing else.  Four
+concurrent repeats of one test therefore share one directory, and each
+one deletes the other three's data directories -- PGDATA and all --
+while their postmasters are running.  A cluster whose files are pulled
+out from under it produces exactly the symptom above.
+
+The discriminator: run the same four copies as four differently named
+tests, so each gets its own directory, under the same machine load.
+Sixteen such runs in four rounds all passed, against 3-in-4 failures
+under --repeat.  Nothing about the server was involved.
+
+The lesson, and the reason this is written down: --repeat is safe for a
+test that only reads, and unsafe for any test that builds a cluster.
+For concurrent copies of a cluster test, give each copy its own name.
+Stress::Run now claims its test directory with a sentinel file and
+fails with this explanation if it finds the claim gone or taken, so the
+next person meets a message rather than a mystery.

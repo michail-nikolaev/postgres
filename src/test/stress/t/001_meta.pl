@@ -206,6 +206,38 @@ foreach my $name (sort keys %catalogue)
 }
 
 #
+# The test-directory claim: two copies of one test share a directory
+# that testwrap deletes at every start, so a run has to notice when its
+# own directory has been taken over rather than report whatever data
+# survived.  Driven directly here, since arranging the real collision
+# deterministically is not possible.
+#
+{
+	require Stress::Util;
+
+	Stress::Util::stress_claim_testdir();
+	my $ok = eval { Stress::Util::stress_verify_testdir(); 1 };
+	ok($ok, 'a run that owns its test directory passes the check');
+
+	# Someone else's claim.
+	my $path = ($PostgreSQL::Test::Utils::tmp_check // 'tmp_check')
+	  . '/stress_testdir_claim';
+	open my $fh, '>', $path or die $!;
+	print $fh "999999\n";
+	close $fh;
+	my $died = !eval { Stress::Util::stress_verify_testdir(); 1 };
+	ok($died, 'a claim taken by another process fails the run');
+	like($@, qr/cannot run at once/, 'and the message explains why');
+
+	# The directory deleted under us.
+	unlink $path;
+	$died = !eval { Stress::Util::stress_verify_testdir(); 1 };
+	ok($died, 'a claim that was deleted fails the run');
+
+	Stress::Util::stress_claim_testdir();
+}
+
+#
 # The log scanner, on synthetic logs, so what fails and what does not
 # is pinned here rather than discovered across platforms.
 #

@@ -83,7 +83,8 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 
 use Stress::Registry qw(:registries load_all);
-use Stress::Util qw(stress_rollback_prepared);
+use Stress::Util qw(stress_rollback_prepared stress_claim_testdir
+  stress_verify_testdir);
 
 # Populate the registries before anything reads them; idempotent, so it
 # does not matter whether Run or Soak gets here first.
@@ -341,6 +342,11 @@ sub run_one
 	my $scale = PostgreSQL::Test::Utils::stress_concurrently_scale();
 	note "running scenario $name at stressval $scale";
 	my $seed = stress_seed();
+
+	# Claimed now, checked once the workload is over: a second copy of
+	# this test would have deleted our cluster out from under us, and
+	# says so rather than leaving wrong data to be explained.
+	stress_claim_testdir();
 
 	$spec = Stress::Compose::resolve($spec);
 	Stress::Compose::validate($spec);
@@ -820,6 +826,9 @@ sub run_one
 	{
 		$inner->();
 	}
+
+	# Before anything reads the results: were we sharing this directory?
+	stress_verify_testdir();
 
 	#
 	# A rotation that drops an index and builds it again is two separate
