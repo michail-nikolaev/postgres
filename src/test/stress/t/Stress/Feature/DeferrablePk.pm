@@ -30,7 +30,8 @@ schema deferrable_pk => {
 			-- the test, because the broken code prefers a replica
 			-- identity too and only falls back to the primary key.
 			INSERT INTO pgb_defer
-				SELECT g, g, 0 FROM generate_series(1, 2000) g;
+				SELECT aid, aid, 0 FROM pgbench_accounts
+				ORDER BY aid LIMIT 2000;
 		),
 		# Deliberately not in the rotation: with the fix in place REPACK
 		# refuses this table by design, and a refusal arriving in the DDL

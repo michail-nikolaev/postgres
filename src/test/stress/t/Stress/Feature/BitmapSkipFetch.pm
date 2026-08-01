@@ -33,7 +33,8 @@ schema bitmap_skip_fetch => {
 		setup => q(
 			CREATE TABLE pgb_bmskip (b int NOT NULL, pad char(1024) DEFAULT '')
 				WITH (autovacuum_enabled = false, fillfactor = 10);
-			INSERT INTO pgb_bmskip(b) SELECT g FROM generate_series(1, 4000) g;
+			INSERT INTO pgb_bmskip(b)
+				SELECT aid FROM pgbench_accounts ORDER BY aid LIMIT 4000;
 			CREATE INDEX pgb_bmskip_b_idx ON pgb_bmskip(b);
 			VACUUM (ANALYZE) pgb_bmskip;
 

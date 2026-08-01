@@ -305,3 +305,62 @@ preserve.  The risk that buys is a large commit, and the mitigation is
 that the old files stay in the branch's history to compare against --
 every invariant they check must appear as a check plugin or a bespoke
 file, and that mapping is worth writing down as the port proceeds.
+
+
+The second pass (August 2026)
+=============================
+
+Everything above describes the first restructuring -- 36 hand-written
+files into registries and scenarios -- and stands as its record.  A
+second pass reshaped the result; what follows is what changed and why,
+so this file keeps telling the truth.
+
+The monolithic Plugins.pm became bundle files: Feature/*.pm, one per
+dimension, each owning its schema decorator, loads, checks and DDL
+together, and Cross/*.pm for what cuts across.  The registries stayed
+as the runtime model; Stress::Registry collects declarations and
+checks every cross-reference at load time.
+
+The dependencies were inverted.  A scenario names loads and commands;
+Stress::Compose pulls in the schemas they require and the checks that
+verify them, generic checks join by an auto rule, and the effective
+composition is noted per run with each piece's provenance.  This
+closed the class of scenario that ran a load and forgot its check --
+three of the thirty were doing exactly that -- and let soak stop
+sampling checks as if verification were a dimension.
+
+The environment axis split into three: topology x disruptor x settings
+profile, each with its own constraints, composing where the old %ENVS
+had to fuse.  The near-duplicate scenario files (the checksum triple,
+the moving-identity pair) became scenario_templates with stub files.
+
+The REPACK tolerance became a property of the commands (mvcc_safe on
+the %DDL entries) rather than an environment variable consulted by
+some of the checks: a scenario that never repacks is strict without
+asking, and stress_strict_mvcc=1 now provably reaches every site.
+
+Chaos coverage became derived.  The build scans the backend sources
+into injection_points_defined(); the pool is that catalogue minus the
+mechanically unjitterable IS_INJECTION_POINT_ATTACHED sites, curated
+caps where somebody has reasoned about a point and conservative
+defaults where nobody has.  The per-point sleep counters landed in the
+injection_points module so a run reports which points actually fired.
+001_meta fails on a stale curated name -- the list can no longer rot
+silently, which is how 28 of 89 points had gone missing.
+
+Two detectors were added that the first pass deferred: a log scan of
+every node after every run (PANIC, traps, signals, unallowed FATALs,
+internal/corruption SQLSTATEs -- the failures no client saw), and a
+settings pool soak draws from so single GUCs vary without a curated
+modifier per knob.
+
+The side tables that could be derived from the pgbench schema now are
+(CREATE TABLE ... AS SELECT ... FROM pgbench_accounts); the ones whose
+size or quietness is load-bearing kept their own shape, with the
+measured reason in place.
+
+The layering rule that made all of this checkable: bundles declare,
+Stress::Compose is the only place combination rules live, and
+t/001_meta.pl re-derives the whole catalogue in seconds, so a
+framework change that breaks composition fails there first rather
+than in whichever CI run reaches the wrong file.

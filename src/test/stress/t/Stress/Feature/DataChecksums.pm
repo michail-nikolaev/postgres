@@ -60,10 +60,10 @@ schema data_checksum_helper => {
 			-- because a crash resets the relation from its init fork --
 			-- and the init fork is logged, precisely so a standby does not
 			-- inherit a stale one that fails verification after promotion.
-			CREATE UNLOGGED TABLE pgb_unlogged(id int PRIMARY KEY, pad text);
-			INSERT INTO pgb_unlogged
-				SELECT g, repeat(md5(g::text), 8)
-				FROM generate_series(1, 2000) g;
+			CREATE UNLOGGED TABLE pgb_unlogged AS
+				SELECT aid AS id, repeat(md5(aid::text), 8) AS pad
+				FROM pgbench_accounts ORDER BY aid LIMIT 2000;
+			ALTER TABLE pgb_unlogged ADD PRIMARY KEY (id);
 			CREATE FUNCTION pgb_flip_data_checksums() RETURNS text
 			LANGUAGE plpgsql AS $fn$
 			DECLARE

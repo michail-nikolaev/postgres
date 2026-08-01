@@ -50,12 +50,14 @@ use Stress::MVCC qw(mvcc_or_empty);
 # eight.  Small and quiet, not just small.
 schema fk_child => {
 		setup => q(
-			CREATE TABLE pgb_parent(id int PRIMARY KEY, val int);
+			CREATE TABLE pgb_parent AS
+				SELECT aid AS id, aid AS val FROM pgbench_accounts
+				ORDER BY aid LIMIT 1000;
+			ALTER TABLE pgb_parent ADD PRIMARY KEY (id);
 			CREATE TABLE pgb_child(cid bigserial PRIMARY KEY,
 				pid int NOT NULL REFERENCES pgb_parent(id), val int);
-			INSERT INTO pgb_parent SELECT g, g FROM generate_series(1, 1000) g;
 			INSERT INTO pgb_child(pid, val)
-				SELECT g, g FROM generate_series(1, 1000) g;
+				SELECT id, id FROM pgb_parent;
 		),
 		tables => [ 'pgb_parent', 'pgb_child' ],
 		indexes => [ {

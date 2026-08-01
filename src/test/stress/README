@@ -11,41 +11,66 @@ logical decoding, replication slots, the visibility map, the plan cache.
 
 Each test runs a pgbench workload whose clients maintain an invariant
 while one of those commands runs against the same tables, and checks
-that invariant along with the resulting indexes.  Any SQL error or
-broken invariant makes pgbench abort (--exit-on-abort), failing the
-test.  The tests are not deterministic: they rely on timing and
-randomized workloads, so a passing run does not prove the absence of
-bugs.  They are cheap enough to run by default, and can be scaled up.
+that invariant along with the resulting indexes and every server log.
+Any SQL error or broken invariant makes pgbench abort
+(--exit-on-abort), failing the test.  The tests are not deterministic:
+they rely on timing and randomized workloads, so a passing run does not
+prove the absence of bugs.  They are cheap enough to run by default,
+and can be scaled up.
 
 How a test is built
 ===================
 
-A test is a scenario: a named combination of plugins.  Each test file
-under t/ contains the whole of the scenario it runs and nothing else, so
-what a test does can be read from the file that names it.  The plugins
-it names live in t/Stress/Plugins.pm and come in six kinds:
+A test file under t/ is a scenario: which loads run, which commands
+rotate against them, and against what cluster.  Everything else is
+composed.  The pieces live in bundle files under t/Stress/:
 
-  schema    the pgbench schema, plus decorators that alter it: a column
-            with an invariant of its own, a constraint, a partitioning
-            of one of its tables
-  indexes   what is built on them, across every access method
-  load      what changes the data while preserving those invariants
-  ddl       what runs concurrently with that
-  check     what must hold regardless, during and after the run
-  env       what the cluster looks like: standalone, a hot standby, a
-            subscriber, a cluster being killed and restarted, and so on
+  Feature/*.pm   one file per dimension: its schema decorator, the
+                 loads that drive it, the checks that hold it to its
+                 invariant, and the DDL aimed at it -- everything about
+                 the ledger is in Ledger.pm and nowhere else
+  Cross/*.pm     what cuts across features: the shared DDL rotation,
+                 the generic checks, the topologies, disruptors and
+                 settings profiles, the modifiers, the chaos machinery
 
-The scenario names entries from each; t/Stress/Run.pm documents the
-fields, validates the combination, builds the cluster, writes one
-pgbench script per load and per check plus one for the DDL rotation, and
-runs them as a weighted mix.  Adding a dimension means adding a plugin,
-not copying a file; adding a scenario means adding one file that names
-plugins that already exist.
+A bundle declares entries into the registries (see Stress::Registry);
+a scenario names them, and Stress::Compose resolves what it wrote into
+what runs:
 
-See DESIGN for why it is built this way, PORTING for where the coverage
-of each of the older hand-written tests ended up -- including what is
-not covered to the same depth -- and REGRESSIONS for the historical bugs
-the suite is meant to catch and whether it has been shown to.
+  - the schemas the named loads, commands, indexes and checks require
+    are pulled in, transitively, in dependency order;
+  - each load and each command brings the checks that verify it
+    (tpcb_like carries balances, toggle_data_checksums carries
+    no_checksum_failures), and generic checks -- amcheck, no_slot_leak,
+    the log scan, and the gated ones like index_vs_seq -- join wherever
+    their requirements are already satisfied;
+  - a check that arrived implicitly and conflicts with a load present
+    is dropped with a note; no_checks => [...] takes named ones back
+    out, loudly if they were never in.
+
+Every run notes the effective composition with the provenance of each
+piece:
+
+  effective repack_dml_s1: schema=[pgbench] checks=[balances<load:tpcb_like,
+    amcheck<auto,...] topology=standalone mvcc_gap=tolerated
+
+so what a run verified is in its log rather than in anyone's
+reconstruction.  The cluster is described on three axes, up to one of
+each: a topology (standalone, standby, subscription -- how many nodes
+and how they relate), a disruptor (crash_loop, cancellation -- what
+happens to the cluster while the workload runs), and a settings profile
+(wal_replica, autovacuum, lock_exhaustion -- a cluster configured to
+work differently).  The axes carry their own requires/conflicts and
+compose; scenarios that differ only in an axis are declared once as a
+scenario_template in their bundle, with a five-line stub file per
+variant.
+
+t/001_meta.pl is the framework checking itself with almost no cluster:
+the registries' cross-references, every scenario's resolution, the
+composition rules, the log scanner's verdicts on synthetic logs, and
+the chaos catalogue against the build (below).  When changing the
+framework, run it first; it fails in seconds with the declaration site
+in the message.
 
 Duration scaling and reproducing a failure
 ==========================================
@@ -53,7 +78,7 @@ Duration scaling and reproducing a failure
 The run time of each test is controlled by the stress_concurrently value
 in PG_TEST_EXTRA:
 
-    make check PG_TEST_EXTRA='stress_concurrently=10'
+    meson test --suite stress    # after PG_TEST_EXTRA='stress_concurrently=10'
 
 Each scenario is calibrated so that a value of 1 makes it run for about
 six seconds, and the increase should be roughly linear; a value of 0
@@ -70,7 +95,7 @@ Every run reports the seed it used:
 Passing it back reproduces the same choices, both in Perl and in
 pgbench:
 
-    make check PG_TEST_EXTRA='stress_seed=1336750692'
+    PG_TEST_EXTRA='stress_seed=1336750692'
 
 Soak mode (see t/Stress/Soak.pm) numbers every combination it runs --
 only those, since combinations whose pieces do not fit are discarded
@@ -78,8 +103,8 @@ before they are numbered -- and which combination a number names depends
 only on the seed, so a failure reported as invented_57 comes back
 without repeating the hour before it:
 
-    make check PG_TEST_EXTRA='stress_mode=soak stress_seed=1336750692
-                              stress_soak_skip=57 stress_soak_count=1'
+    PG_TEST_EXTRA='stress_mode=soak stress_seed=1336750692
+                   stress_soak_skip=57 stress_soak_count=1'
 
 The same two settings split a long soak into shorter runs that add up to
 it; each run reports the index to resume from.
@@ -87,9 +112,10 @@ it; each run reports the index to resume from.
 The generated pgbench scripts are written into the test's data directory
 and echoed into its log, and the pgbench command line is logged too, so
 a failing scenario can be replayed by hand.  Every node also runs with
-verbose errors, backtraces for relation_open and log_lock_waits on:
-these produce no output unless something goes wrong, and a failure that
-arrives without its call site is expensive to chase.
+verbose errors, backtraces for relation_open, log_lock_waits, and the
+SQLSTATE in its log_line_prefix: these produce no output unless
+something goes wrong, and a failure that arrives without its call site
+is expensive to chase.
 
 Chaos
 =====
@@ -103,18 +129,31 @@ it, until it is wide enough to lose.
 A chaos profile does that.  It attaches jitter -- a sleep of a given
 length, taken with a given probability -- to injection points in the
 paths these races live in, and can turn on the probabilistic form of
-debug_discard_caches for the cache-flush hazards.  The profiles are in
-t/Stress/Plugins.pm under %CHAOS, and a scenario asks for one with
+debug_discard_caches for the cache-flush hazards.  The named profiles
+are in t/Stress/Cross/Chaos.pm (a feature bundle may declare its own,
+as DataChecksums.pm does), and a scenario asks for one with
 
   chaos => 'light',
 
-which is orthogonal to its environment.
+which is orthogonal to the axes.
 
-The points worth jittering are listed in %CHAOS_POINTS, each with a cap
-on how likely and how long its sleep may be.  The caps are not decoration:
-a point every commit reaches has to stay rare, a point in a lock queue
-has to stay short, and a phase change in a concurrent build that happens
-a few times a run can be slept on every time.
+The pool an invented profile draws from is not a hand-written list.
+The build scans the backend sources for injection point call sites
+(injection_points_defined(), see the injection_points module) and the
+pool is that catalogue minus what must not be jittered: the
+IS_INJECTION_POINT_ATTACHED sites, where attachment alone changes what
+the server decides, are excluded mechanically, and %CHAOS_EXCLUDED
+holds any judged exclusions beyond that.  A point somebody has reasoned
+about carries curated caps in %CHAOS_POINTS -- how likely and how long
+its sleep may be, and those caps are not decoration: a point every
+commit reaches has to stay rare, a point in a lock queue has to stay
+short.  Everything else gets conservative defaults (at most 1% of
+passes, at most 5ms).  So a point added anywhere in the tree joins the
+pool on the next build, at caps too small to break a run and large
+enough to widen a window; 001_meta notes the uncurated names, and fails
+on a curated or excluded name the tree no longer defines -- attaching
+to a stale name is silent by design, so this is the only place the rot
+can be caught.
 
 Soak does not pick from the named profiles.  It invents one -- a few
 points from the pool, each drawn inside its caps -- because there are
@@ -122,9 +161,7 @@ far more combinations of points than anyone would write down and the
 interesting ones are pairs nobody thought to pair.  Most combinations
 get none, so that a failure under chaos can still be told from one that
 does not need it.  The invented profile is printed with the rest of the
-combination and comes back with the seed:
-
-  chaos=[commit-before-clog-update:0.06992/465-11382] discard=0.00044
+combination and comes back with the seed.
 
 Two properties are what make a chaos failure worth reporting, and both
 are deliberate.  A profile only ever delays: nothing the server decides
@@ -133,14 +170,66 @@ exists without it.  And no sleep approaches lock_timeout -- a lock
 request that dawdles at the head of a queue stalls every writer behind
 it, which ends a run in a cascade that tested nothing.
 
-Every run reports what the jitter did:
+Every run reports what the jitter did, per point:
 
-  # chaos 'decoding': 649 sleeps totalling 26078119us
+  # chaos 'decoding': 186 sleeps totalling 7514092us
+  # chaos 'decoding': commit-before-clog-update: 186 sleeps totalling 7514092us
 
-because a run where nothing slept tested no more than a run without
-chaos, and the two are otherwise indistinguishable from the outside.
+with a diagnostic for an attached point that never fired, because a
+profile of five points that fired four times zero is testing one point
+while claiming five, and the aggregate alone cannot tell those apart.
 
 A build without injection points ignores all of it, with a note.
+
+Modifiers and the settings pool
+===============================
+
+A modifier is a named set of GUCs at values that change how the server
+does its work without changing what the work produces: everything
+spills instead of fitting in memory, the planner picks a different
+node, WAL is really flushed to disk, a vacuum freezes at once.  They
+are in t/Stress/Cross/Modifiers.pm, a scenario asks for one with
+modifier => 'spill', and soak gives one to every combination.  The
+rules -- outcome-neutral, never disabling what a scenario exists to
+test, every applied value read back and reported -- are documented
+with the registry.
+
+The settings pool (t/Stress/Cross/SettingsPool.pm) is the uncurated
+kind of the same variation: one knob at a time, at the ends of its
+range, drawn a few per combination by soak so that pairs nobody would
+write down get tried anyway.  The modifier rules bind here too, and a
+knob the chosen modifier or profile already sets is ineligible for
+that combination rather than silently overridden.
+
+The REPACK tolerance
+====================
+
+REPACK (CONCURRENTLY) is not MVCC-safe yet: a snapshot spanning its
+relfilenode swap may see a table empty.  Which checks must allow for
+that is derived, not configured: a %DDL entry that is not MVCC-safe
+carries mvcc_safe => 0, and only a scenario whose rotation carries such
+a command gets the tolerant form of the checks -- one that never
+repacks is strict without asking.  stress_strict_mvcc=1 in
+PG_TEST_EXTRA forces the strict form everywhere, which is how to find
+out whether REPACK has become MVCC-safe; when it has, deleting the
+mvcc_safe keys is the whole change.  See Stress::MVCC.
+
+The log scan
+============
+
+After every node has stopped, the framework reads each server log whole
+and fails the run on the unambiguous evidence of a server-side defect:
+any PANIC, an assertion trap, a segfault, a FATAL beyond the
+allowlisted lifecycle chatter, and any ERROR or WARNING whose SQLSTATE
+is internal_error or a corruption class.  This is what catches the
+failures no client saw -- an autovacuum worker's crash, a checksum
+worker's assertion -- which used to pass silently.  Allowlist entries
+are declared next to the thing that earns the noise (the standby
+topology allows its recovery-conflict disconnects; the crash loop
+allows what an immediate shutdown says), plain ERRORs are deliberately
+out of scope, and PANIC cannot be allowlisted at all.
+stress_log_scan=warn downgrades findings during bring-up; =off disables
+the scan.  See Stress::LogScan.
 
 Reproducers for open bugs
 =========================
@@ -151,86 +240,8 @@ fails on purpose.  Those are skipped unless
   PG_TEST_EXTRA='stress_open_bugs=1'
 
 which keeps the suite green for the failures nobody expects, and keeps
-soak from walking into one.  The tag comes off when the fix lands -- or,
-as with the logical decoding race and the [SP-]GiST index-only scan bug
-in REGRESSIONS, when the proposed fix is carried on this branch, at
+soak from walking into one.  The tag comes off when the fix lands, at
 which point the scenario becomes an ordinary guard against reverting it.
-
-No scenario is tagged at the moment, both having gone that way.  The
-machinery stays for the next one.
-
-Modifiers
-=========
-
-A modifier is a named set of GUCs at values that change how the server
-does its work without changing what the work produces.  Where a chaos
-profile widens a window, a modifier moves the whole run onto another code
-path: everything spills instead of fitting in memory, the planner picks a
-different node, WAL is really flushed to disk, a vacuum freezes at once.
-They are in t/Stress/Plugins.pm under %MODIFIERS, and a scenario asks for
-one with
-
-  modifier => 'spill',
-
-which is orthogonal to its environment and to its chaos profile.  Soak
-treats it as a dimension of its own and prints it with the combination.
-
-The claim a modifier makes is that the invariants still hold, and that is
-what makes them cheap: a modifier costs no new scenario, no new check and
-no new plugin combination, and every scenario in the catalogue can be run
-under each one.  A modifier that breaks an invariant means either a bug or
-a badly chosen modifier, and which one is worth finding out.
-
-Two rules, both learned here.  A modifier may not change results, so
-nothing in the registry touches isolation level or any GUC that decides
-what a query returns rather than how it gets there.  And a modifier must
-not silently disable what a scenario exists to test: enable_indexscan
-gates index-only scan paths as well as plain ones, so turning it off
-server-wide would have left the index-only scan scenario comparing two
-sequential scans and passing for the wrong reason.  That is why those
-checks now pin the GUCs they depend on and assert the plan they actually
-got, with EXPLAIN (FORMAT JSON) so the whole plan is examined rather than
-its first line.
-
-Two of them are corrections rather than additions.  full_page_writes has
-a boot value of on and nothing here ever changed it, so the path this
-suite had never taken was the one with them off, not on; and initdb in
-this tree creates clusters with data checksums, so every page read and
-written has been checksummed and the untested path is again the other
-one.  Checksums are decided at initdb time rather than by a GUC, which is
-why a modifier can carry init options as well as conf.
-
-Asynchronous IO is one of these.  io_method defaults to 'worker' in this
-tree, so the synchronous path is the one nothing exercises unless it asks
--- the reverse of what one might expect -- and io_uring is a wholly
-separate implementation that completes in the issuing backend.  aio_sync,
-aio_worker_busy and aio_uring cover the three.  Soak leaves io_method
-alone when the modifier it picked already sets it, rather than letting the
-scenario conf quietly win.
-
-Every setting a modifier applies is read back from the running server and
-reported:
-
-  # modifier 'aio_uring': io_method = io_uring
-  # modifier 'aio_uring': io_max_concurrency = 128
-
-That is not decoration.  Twice a setting this suite believed it had
-applied was not applied at all, and nothing failed -- the runs simply did
-less than they claimed.  A dimension that cannot be seen working is not
-worth having.
-
-Settings a build may not accept -- lz4 toast compression, the JIT costs --
-go in conf_optional rather than conf.  An unsupported value in
-postgresql.conf stops the server from starting; applied afterwards with
-ALTER SYSTEM it gives an ordinary error, which is caught and reported:
-
-  # modifier 'io_variants': this build will not take default_toast_compression
-
-That works because those are runtime settings.  A postmaster GUC cannot be
-caught that way -- an unsupported value stops the server from starting
-before anything can ask -- so a modifier resting on one declares
-requires_build instead, and steps aside when the build says no.  aio_uring
-does that with USE_LIBURING.
 
 Replaying a catch
 =================
@@ -254,13 +265,17 @@ That is what makes them useful after the framework is refactored.  A
 scenario that still passes proves nothing on its own -- it may have
 stopped testing anything.  To confirm it still catches what it used to:
 
-  git checkout <the revert commit of the pair>
-  ninja -C build && meson test -C build --suite setup
-  meson test -C build --suite stress <scenario>
+  git cherry-pick -n <the revert commit of the pair>
+  ninja -C buildDir && meson test -C buildDir --suite setup
+  meson test -C buildDir --suite stress <scenario>
 
 and it must fail, with the message the revert commit's own message
-quotes.  Each revert commit names its scenario, the failure rate that
-was measured, and the symptom, so there is nothing to look up.
+quotes; then git reset --hard and rebuild.  Rebuilding after the reset
+is not optional: a tmp_install left holding the reverted binaries makes
+every later run test the bug instead of the tree, which has burned this
+suite once already.  Each revert commit names its scenario, the failure
+rate that was measured, and the symptom, so there is nothing to look
+up.
 
 Several of the reverts could not be produced with "git revert" -- the
 surrounding code has moved since the fix -- and were written by hand.
@@ -272,15 +287,15 @@ being built.
 Running the tests
 =================
 
-NOTE: You must have given the --enable-tap-tests argument to configure.
+NOTE: You must have given the --enable-tap-tests argument to configure,
+or built with meson (injection points enabled if chaos should do
+anything: -Dinjection_points=true).
 
 Run
     make check
 or
     make installcheck
-You can use "make installcheck" if you previously did "make install".
-In that case, the code in the installation tree is tested.  With
-"make check", a temporary installation tree is built from the current
-sources and then tested.
+or, under meson,
+    meson test --suite stress
 
 See src/test/perl/README for more info about running these tests.

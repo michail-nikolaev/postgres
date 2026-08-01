@@ -22,8 +22,8 @@ use Stress::Registry ':declare';
 # primary key, and there are no event triggers.
 schema bare_table_event_trigger => {
 		setup => q(
-			CREATE TABLE pgb_bare(a int);
-			INSERT INTO pgb_bare SELECT g FROM generate_series(1, 100) g;
+			CREATE TABLE pgb_bare AS
+				SELECT aid AS a FROM pgbench_accounts ORDER BY aid LIMIT 100;
 			CREATE FUNCTION pgb_evt() RETURNS event_trigger
 			LANGUAGE plpgsql AS $$
 			DECLARE n bigint;

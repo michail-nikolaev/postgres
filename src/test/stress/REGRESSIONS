@@ -2222,3 +2222,49 @@ partitions scenarios overlap it, but it is aimed at one thing, it names
 what it is testing, and it is where the arbiter fixes above were
 developed.  Overlap is not duplication when the narrower test is the one
 that will say what broke.
+
+
+Open: lost updates in REPACK CONCURRENTLY's small-table shape under
+====================================================================
+machine-load contention (2026-08-01)
+------------------------------------
+
+Found while re-verifying the framework restructure, not yet diagnosed.
+With every fix on this branch applied, 122_decoding_startup_race fails
+3 runs in 4 when four copies run concurrently on one machine
+(meson test stress/122_decoding_startup_race --repeat 4), with
+
+  stress assertion failed: balances disagree:
+    accounts=-15260 tellers=-15260 branches=-20046 history=-15260
+
+and -- the important half -- the final check fails too: the
+disagreement survives the workload's end, so this is a lost or extra
+update on the repacked small table, not a snapshot spanning the swap.
+Both sightings diverged on one of repack_hot_small's targets
+(pgbench_branches once, pgbench_tellers once).
+
+What has been ruled out:
+
+  - The framework restructure: the same 3-in-4 failure reproduces on
+    the pre-restructure framework with an untouched injection_points
+    module, freshly built.
+  - The jitter: forcing stress_chaos=off leaves the rate at 3 in 4.
+    Four concurrent clusters' worth of CPU contention widens the
+    natural window on its own.
+  - Stale binaries (which produced a false version of this finding
+    first, and cost an evening: see README, "Replaying a catch").
+
+What is known: sequential runs of the same scenario pass 4 of 4 and
+have passed throughout the restructure, so the window needs the
+machine loaded, not just the scenario running.  The shape is the one
+repack_hot_small was built to expose -- a whole REPACK CONCURRENTLY of
+a table small enough to copy inside one CLOG-update window -- which is
+the same neighbourhood as the decoding-CLOG fix this scenario gates,
+and that fix's clean rate was only ever measured sequentially (3 of
+3).  Next steps, in the order that narrowed the checksum crash: one
+lever at a time (no chaos: done, still fails), then a single
+concurrent copy pinned to fewer CPUs, then the WAL of a failing run
+against pg_waldump to see whether the losing update was decoded,
+applied to the new heap, or dropped between the two.  Environment so
+far: one WSL2 machine; reproducing on bare metal is part of
+confirming it.

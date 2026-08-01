@@ -41,9 +41,11 @@ schema ios_vacuum_race => {
 				WITH (autovacuum_enabled = false, fillfactor = 10);
 
 			INSERT INTO pgb_ios_gist(a, b)
-				SELECT point(g, g), g FROM generate_series(1, 200) g;
+				SELECT point(aid, aid), aid FROM pgbench_accounts
+				ORDER BY aid LIMIT 200;
 			INSERT INTO pgb_ios_spgist(a, b)
-				SELECT point(g, g), g FROM generate_series(1, 200) g;
+				SELECT point(aid, aid), aid FROM pgbench_accounts
+				ORDER BY aid LIMIT 200;
 
 			CREATE INDEX pgb_ios_gist_a_idx ON pgb_ios_gist USING gist (a);
 			CREATE INDEX pgb_ios_spgist_a_idx ON pgb_ios_spgist USING spgist (a);

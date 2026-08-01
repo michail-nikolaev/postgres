@@ -21,7 +21,8 @@ use Stress::Registry ':declare';
 schema nulls_not_distinct => {
 		setup => q(
 			CREATE TABLE pgb_nnd(id serial PRIMARY KEY, k int, v int);
-			INSERT INTO pgb_nnd(k, v) SELECT g, 0 FROM generate_series(1, 500) g;
+			INSERT INTO pgb_nnd(k, v)
+				SELECT aid, 0 FROM pgbench_accounts ORDER BY aid LIMIT 500;
 			INSERT INTO pgb_nnd(k, v) VALUES (NULL, 0);
 			CREATE UNIQUE INDEX pgb_nnd_k ON pgb_nnd(k) NULLS NOT DISTINCT;
 		),

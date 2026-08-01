@@ -40,8 +40,8 @@ schema partitioned_side => {
 			-- no value, so partition_upsert_contend can delete and
 			-- re-insert them without moving the sum the checks watch.
 			INSERT INTO pgb_part
-				SELECT g, CASE WHEN g <= 16 THEN 0 ELSE g END
-				FROM generate_series(1, $NROWS) g;
+				SELECT aid AS id, CASE WHEN aid <= 16 THEN 0 ELSE aid END AS val
+				FROM pgbench_accounts ORDER BY aid LIMIT $NROWS;
 
 			-- An upsert routed through the parent has nowhere to put the
 			-- row while the partition covering it is detached, which the

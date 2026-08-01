@@ -32,7 +32,8 @@ schema partitioned_hash => {
 				FOR VALUES WITH (MODULUS 4, REMAINDER 2);
 			CREATE TABLE pgb_hash_3 PARTITION OF pgb_hash
 				FOR VALUES WITH (MODULUS 4, REMAINDER 3);
-			INSERT INTO pgb_hash SELECT g, 0 FROM generate_series(1, 4000) g;
+			INSERT INTO pgb_hash
+				SELECT aid, 0 FROM pgbench_accounts ORDER BY aid LIMIT 4000;
 		),
 		tables => [qw(pgb_hash_0 pgb_hash_1 pgb_hash_2 pgb_hash_3)],
 };

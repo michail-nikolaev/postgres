@@ -24,8 +24,13 @@ use Stress::Registry ':declare';
 # stale index list has to collide with.
 schema quiet_index => {
 		setup => q(
-			CREATE TABLE pgb_quiet(id int PRIMARY KEY, val int);
-			INSERT INTO pgb_quiet SELECT g, g FROM generate_series(1, 500) g;
+			-- Carved out of pgbench_accounts rather than generated: the
+			-- side tables derive from the standard schema wherever their
+			-- shape allows, so their provenance is the workload's own.
+			CREATE TABLE pgb_quiet AS
+				SELECT aid AS id, aid AS val FROM pgbench_accounts
+				ORDER BY aid LIMIT 500;
+			ALTER TABLE pgb_quiet ADD PRIMARY KEY (id);
 		),
 		tables => ['pgb_quiet'],
 		indexes => [ {
