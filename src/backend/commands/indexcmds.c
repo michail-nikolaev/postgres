@@ -4523,6 +4523,14 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 * Drop the old indexes.
 	 */
 
+	/*
+	 * The old indexes are dead and committed as such, and the session locks
+	 * are still held.  Erroring out here leaves behind what an interrupted
+	 * rebuild leaves behind: an index that is no longer live, so no longer
+	 * vacuumed, and that outlives this command.
+	 */
+	INJECTION_POINT("reindex-relation-concurrently-before-drop", NULL);
+
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_5);
 	WaitForLockersMultiple(lockTags, AccessExclusiveLock, true);
