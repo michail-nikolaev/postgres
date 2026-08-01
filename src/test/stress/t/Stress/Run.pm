@@ -90,6 +90,7 @@ use Stress::Util qw(stress_rollback_prepared);
 Stress::Registry::load_all();
 
 use Stress::Compose;
+use Stress::LogScan ();
 
 our @EXPORT =
   qw(run_scenario run_template run_one stress_seed stress_assert_defn
@@ -427,12 +428,15 @@ sub run_one
 	$lock_timeout *= 3 if _chaos_profile($spec)->{slow};
 
 	$node->append_conf('postgresql.conf', "lock_timeout = $lock_timeout");
-	# Layer 0: a failure should arrive with its call site attached.
+	# Layer 0: a failure should arrive with its call site attached, and
+	# with its SQLSTATE, which is what lets the log scan tell an internal
+	# error from the lock timeouts a stress run produces all day.
 	$node->append_conf('postgresql.conf', $_)
 	  for (
 		'log_error_verbosity = verbose',
 		q(backtrace_functions = 'relation_open'),
-		'log_lock_waits = on');
+		'log_lock_waits = on',
+		q(log_line_prefix = '%m [%p] %q%a %e '));
 	# REPACK (CONCURRENTLY) runs a decoding worker of its own, and on a
 	# table of any size the index builds ask for parallel workers too.
 	# The default pool runs out under that combination, which shows up as
@@ -860,8 +864,15 @@ sub run_one
 	$disr->{final}->($node, $ctx) if $disr->{final};
 	_chaos_report($node, $ctx);
 
+	my @all_nodes = ($node, @{ $ctx->{extra_nodes} // [] });
 	$_->stop for @{ $ctx->{extra_nodes} // [] };
 	$node->stop;
+
+	# Every node's log, read the way a person would have to: the checks
+	# above only see what a client saw, and a background process that
+	# panicked had no client.  After the stop, so the files are complete.
+	Stress::LogScan::scan_nodes($spec, @all_nodes)
+	  if grep { $_ eq 'log_scan' } @{ $spec->{checks} // [] };
 	return;
 }
 

@@ -28,6 +28,15 @@ disruptor none => {};
 # flight, so their cleanup happens through crash recovery rather than
 # through their own code.
 disruptor crash_loop => {
+		# Everything an immediate shutdown says to the sessions and
+		# workers it takes down, and to the clients that reconnect too
+		# early; all of it is this disruptor's own doing.
+		log_allow => [
+			qr/terminating connection due to immediate shutdown command/,
+			qr/terminating connection because of crash of another server process/,
+			qr/terminating connection because of unexpected SIGQUIT signal/,
+			qr/terminating any other active server processes/,
+		],
 		# The kill/restart cycle is written for one node; against a
 		# standby or a subscriber the interesting recovery is a
 		# different scenario, not this one with extra nodes attached,

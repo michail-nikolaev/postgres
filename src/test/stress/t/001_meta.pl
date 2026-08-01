@@ -206,6 +206,49 @@ foreach my $name (sort keys %catalogue)
 }
 
 #
+# The log scanner, on synthetic logs, so what fails and what does not
+# is pinned here rather than discovered across platforms.
+#
+{
+	require Stress::LogScan;
+	my $prefix = '2026-08-01 12:00:00.000 CEST [123]';
+
+	my @bad = Stress::LogScan::scan_text(
+		"$prefix XX000 PANIC:  stuck spinlock detected\n", []);
+	is(scalar @bad, 1, 'a PANIC is a finding');
+
+	@bad = Stress::LogScan::scan_text(
+		'TRAP: failed Assert("HaveRegisteredOrActiveSnapshot()"), '
+		  . "File: \"heapam.c\"\n",
+		[]);
+	is(scalar @bad, 1, 'an assertion trap is a finding');
+
+	@bad = Stress::LogScan::scan_text(
+		"$prefix XX001 ERROR:  could not read block 0\n", []);
+	is(scalar @bad, 1, 'a corruption-class ERROR is a finding');
+
+	@bad = Stress::LogScan::scan_text(
+		"$prefix 57014 ERROR:  canceling statement due to lock timeout\n",
+		[]);
+	is(scalar @bad, 0, 'an ordinary ERROR is not');
+
+	@bad = Stress::LogScan::scan_text(
+		"$prefix 57P01 FATAL:  terminating connection due to "
+		  . "administrator command\n",
+		[qr/terminating connection due to administrator command/]);
+	is(scalar @bad, 0, 'an allowlisted FATAL is not');
+
+	@bad = Stress::LogScan::scan_text(
+		"$prefix 57P01 FATAL:  some new fatal nobody allowed\n",
+		[qr/terminating connection due to administrator command/]);
+	is(scalar @bad, 1, 'an unallowed FATAL is a finding');
+
+	@bad = Stress::LogScan::scan_text(
+		"$prefix XX000 PANIC:  it broke\n", [qr/it broke/]);
+	is(scalar @bad, 1, 'a PANIC cannot be allowlisted at all');
+}
+
+#
 # The chaos catalogue against the build's own defined points.  This is
 # the one section that needs a server: the list of defined points is
 # compiled into the injection_points module, and asking it is the only

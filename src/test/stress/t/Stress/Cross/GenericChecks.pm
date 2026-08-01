@@ -122,6 +122,17 @@ check decoding_disabled => {
 		},
 };
 
+# The log scan: no script and no final of its own, because it has to
+# run after every node has stopped and its log is complete -- Run
+# executes it as the last step of the run.  It is declared here so that
+# it appears in the effective composition, joins every scenario the
+# auto rule reaches, and can be taken out with no_checks like anything
+# else.  What it fails on, and how entries allowlist their own noise
+# with log_allow, is documented in Stress::LogScan.
+check log_scan => {
+		auto => 1,
+};
+
 # A cancelled build leaves an invalid index behind: that is
 # documented, and the cancellation environment expects it.  What is
 # not acceptable is one that cannot then be dropped, which is how a

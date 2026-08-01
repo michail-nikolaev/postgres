@@ -99,6 +99,10 @@ topology standalone => {
 
 # A hot standby replaying the DDL while serving the checks.
 topology standby => {
+		# A reader whose snapshot loses to replay is cancelled, and when
+		# it happens between statements the disconnect is FATAL; both are
+		# this topology working as documented.
+		log_allow => [ qr/terminating connection due to conflict with recovery/, ],
 		# Replication has to catch up before the checks mean anything.
 		min_seconds => 5,
 		init => { allows_streaming => 1 },
