@@ -160,7 +160,7 @@ load temp_table_cic => {
 		# query text -- so it would terminate this one and the run would
 		# fail on a writer that died, which is not what that environment
 		# is testing.
-		conflicts => { env => ['cancellation'] },
+		conflicts => { disruptor => ['cancellation'] },
 		script => q(
 			-- The table survives the whole session, so every transaction
 			-- after the first would report it already exists, and the run

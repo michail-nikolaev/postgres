@@ -66,7 +66,8 @@ foreach my $name (sort keys %catalogue)
 	ok((grep { $_ eq 'amcheck' } @{ $r->{checks} }),
 		'the auto checks join a scenario that satisfies them');
 	is($r->{schema}->[0], 'pgbench', 'the loader is ensured, first');
-	is($r->{env}, 'standalone', 'the environment defaults to standalone');
+	is($r->{topology}, 'standalone', 'the topology defaults to standalone');
+	is($r->{disruptor}, 'none', 'the disruptor defaults to none');
 }
 
 {

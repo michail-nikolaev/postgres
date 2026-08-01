@@ -236,7 +236,7 @@ load row_lock => {
 		# is fair queuing working as designed, and it produced two runs
 		# that spent three minutes proving nothing.  The other
 		# environments have room for both.
-		conflicts => { env => ['lock_exhaustion'] },
+		conflicts => { profile => ['lock_exhaustion'] },
 		script => q(
 			\set aid random(1, :naccounts)
 			\set bid random(1, :nbranches)

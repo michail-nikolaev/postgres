@@ -1,12 +1,13 @@
 
 # Copyright (c) 2026, PostgreSQL Global Development Group
 
-# The cluster shapes a scenario can run against, and the loads
-# that only exist inside one of them.
+# The replication topologies: how many nodes a scenario runs against
+# and how they are related.  The loads that only exist inside one of
+# them -- the subscriber's own writes -- live here too.
 #
 # See Stress::Registry for what each declaration means.
 
-package Stress::Cross::Envs;
+package Stress::Cross::Topology;
 
 use strict;
 use warnings FATAL => 'all';
@@ -17,23 +18,18 @@ use Stress::Registry ':declare';
 use IPC::Run;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Stress::Util qw(stress_rollback_prepared stress_drop_invalid_indexes
-  _pgbench_ok _retry_on_deadlock);
+use Stress::Util qw(_pgbench_ok _retry_on_deadlock);
 
 # Extra nodes need names of their own, and soak mode builds many of them
 # in one test.
 my $node_seq = 0;
 
-# Local writes on the subscriber, against the very rows being
-# applied.  The column is the subscriber's own and is indexed, so
-# these updates are never HOT: they move the rows around underneath
-# the apply worker's lookups.
 load subscriber_churn => {
 		weight => 3,
 		target => 'subscriber',
 		# The column it writes belongs to the subscriber, and there is no
 		# subscriber anywhere else.
-		requires => { env => ['subscription'] },
+		requires => { topology => ['subscription'] },
 		script => q(
 			\set aid random(1, :naccounts)
 			UPDATE pgbench_accounts SET sub_local = sub_local + 1
@@ -54,7 +50,7 @@ load subscriber_churn => {
 load subscriber_delete_reinsert => {
 		weight => 1,
 		target => 'subscriber',
-		requires => { env => ['subscription'] },
+		requires => { topology => ['subscription'] },
 		# Deleting an account row, even for the instant this transaction
 		# holds it, breaks a foreign key pointed at it.
 		conflicts => { schema => ['fk_child'] },
@@ -83,241 +79,12 @@ load subscriber_delete_reinsert => {
 		),
 };
 
-env standalone => {
+topology standalone => {
 		conf => ['wal_level = logical'],
-};
-
-# wal_level = replica, so that the transient slot REPACK takes really
-# does toggle logical decoding on and off.
-env wal_replica => {
-		conf => [ 'wal_level = replica', 'max_connections = 50' ],
-};
-
-# Aggressive autovacuum, so the visibility map is being set
-# continuously rather than once at the start.
-env autovacuum => {
-		conf => [
-			'wal_level = logical',
-			'autovacuum_naptime = 1s',
-			'autovacuum_vacuum_scale_factor = 0.0',
-			'autovacuum_vacuum_threshold = 100',
-			'autovacuum_vacuum_insert_scale_factor = 0.0',
-			'autovacuum_vacuum_insert_threshold = 100',
-		],
-};
-
-# A deliberately small lock table, which the CONCURRENTLY commands
-# are heavy users of.
-env lock_exhaustion => {
-		conf => [
-			'wal_level = logical',
-			'max_locks_per_transaction = 16',
-			'max_connections = 50',
-		],
-};
-
-# The cluster is killed and restarted while the commands are in
-# flight, so their cleanup happens through crash recovery rather than
-# through their own code.
-env crash_loop => {
-		conf => ['wal_level = logical'],
-		run => sub {
-			my ($node, $ctx) = @_;
-
-			foreach my $cycle (1 .. 3)
-			{
-				my ($out, $err) = ('', '');
-				# Long enough that the kill lands mid-workload; the run is
-				# ended by the kill, not by the clock.
-				my $h = IPC::Run::start(
-					$ctx->{pgbench_cmd}->(duration => 60),
-					'>', \$out, '2>', \$err);
-				sleep(2);
-
-				# An immediate shutdown rather than SIGKILL on the
-				# postmaster alone.  Both leave the cluster to recover on
-				# the next start, which is what this environment is for,
-				# but SIGKILL orphans the backends: they go on holding
-				# the shared memory segment, and a new postmaster refuses
-				# to start until every one of them has noticed and
-				# exited.  Under load that took longer than any timeout
-				# worth waiting.  An immediate shutdown signals the
-				# children too and waits for them.
-				$node->stop('immediate', fail_ok => 1);
-
-				# pgbench cannot help but fail when the server disappears
-				# under it, so its exit status says nothing here.
-				eval { IPC::Run::finish($h) };
-
-				# kill9 kills the postmaster and nothing else, so its
-				# children are orphans that still hold the shared memory
-				# segment, and a new postmaster refuses to start while
-				# they do.  Most of them notice the postmaster is gone the
-				# next time they wait for anything; one that is busy
-				# rebuilding an index can take considerably longer, and on
-				# a machine running the whole suite at once, longer still.
-				# Waiting is the portable way to deal with it -- there is
-				# no handle on those processes from here.
-				my $started = 0;
-				foreach my $try (1 .. 60)
-				{
-					last if $started = $node->start(fail_ok => 1);
-					Test::More::note(
-						"cycle $cycle: still waiting for the old backends "
-						  . "to let go after $try seconds")
-					  if $try % 15 == 0;
-					sleep 1;
-				}
-				die 'the server did not come back after the crash'
-				  unless $started;
-				Test::More::pass("cycle $cycle: recovered after a crash");
-
-				# Recovery brings back any transaction that was prepared
-				# when the server went down, still holding its locks.  The
-				# drop below needs AccessExclusiveLock on an index one of
-				# them may well have been building, and would wait out the
-				# lock timeout for a transaction nothing is going to
-				# resolve.
-				my $prepared = stress_rollback_prepared($node);
-				Test::More::note(
-					"cycle $cycle: rolled back $prepared prepared "
-					  . 'transactions recovered after the crash')
-				  if $prepared;
-
-				# An interrupted concurrent build may leave an invalid
-				# index behind, which is documented; it must at least be
-				# droppable.
-				stress_drop_invalid_indexes($node);
-			}
-			return;
-		},
-};
-
-# The commands are interrupted partway rather than allowed to
-# finish, which exercises their own cleanup paths.
-env cancellation => {
-		conf => [ 'wal_level = replica', 'max_connections = 50' ],
-		run => sub {
-			my ($node, $ctx) = @_;
-
-			# The workload runs as usual, minus the DDL script: the
-			# commands are issued from here instead, so that their errors
-			# can be tolerated.
-			my ($out, $err) = ('', '');
-			my $h = IPC::Run::start(
-				$ctx->{pgbench_cmd}->(files => $ctx->{noddl_opts}),
-				'>', \$out, '2>', \$err);
-
-			my @variants = @{ $ctx->{ddl_variants} };
-			my ($attempts, $interrupted) = (0, 0);
-			my $deadline = time() + $ctx->{duration};
-			while (time() < $deadline)
-			{
-				my $v = $variants[ int(rand(scalar @variants)) ];
-				# pgbench meta-commands are not SQL; skip a variant that
-				# is only a pause.
-				my @stmts = grep { !/^\\/ } @{ $v->{stmts} };
-				next unless @stmts;
-
-				# Every so often, terminate the session running the
-				# command rather than cancelling the statement.  The two
-				# are not the same shape: a cancellation raises ERROR and
-				# unwinds through PG_FINALLY, while termination raises
-				# FATAL and does not, so cleanup hung off PG_FINALLY alone
-				# is skipped.  A REPACK's decoding worker and its
-				# transient slot are cleaned up there, and nothing else in
-				# the suite reaches that path.
-				if (int(rand(4)) == 0)
-				{
-					my ($to, $te) = ('', '');
-					my $th = IPC::Run::start(
-						[
-							$node->installed_command('psql'),
-							'-X', '-v', 'ON_ERROR_STOP=0',
-							'-d', $node->connstr('postgres'),
-							'-c', join(' ', @stmts)
-						],
-						'>', \$to, '2>', \$te);
-					select undef, undef, undef, 0.001 * (1 + int(rand(200)));
-					$node->safe_psql(
-						'postgres', q(
-						SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-							WHERE pid <> pg_backend_pid()
-								AND backend_type = 'client backend'
-								AND query ~* '^(REPACK|REINDEX|CREATE INDEX|DROP INDEX)'));
-					eval { IPC::Run::finish($th) };
-					$attempts++;
-					$interrupted++ if $te ne '';
-					next;
-				}
-
-				# Otherwise cancel at some arbitrary point, and sometimes
-				# let the command run to completion.
-				my $timeout = (int(rand(4)) == 0) ? 0 : 1 + int(rand(200));
-				my (undef, undef, $stderr) = $node->psql(
-					'postgres',
-					"SET statement_timeout = $timeout; " . join(' ', @stmts),
-					on_error_stop => 0);
-				$attempts++;
-
-				next if $stderr eq '';
-				$interrupted++;
-				# The only errors expected are the cancellation itself and
-				# the complaints that follow from a previous one having
-				# left the indexes in an unexpected state.
-				# Written on one line on purpose: under /x the spaces
-				# inside these messages would be ignored and none of them
-				# would ever match.
-				Test::More::like(
-					$stderr,
-					qr/canceling statement due to (?:statement|lock) timeout|(?:relation|index) "[^"]+" (?:already exists|does not exist)|skipping reindex of invalid index|cannot reindex exclusion constraint index [^ ]+ concurrently, skipping|cannot cluster on (?:invalid|partial) index|deadlock detected/,
-					'interrupted command failed only in expected ways')
-				  or Test::More::diag("unexpected error: $stderr");
-			}
-
-			IPC::Run::finish($h);
-			_pgbench_ok($out, $err, $ctx, 'writers');
-			Test::More::note(
-				"$attempts commands issued, $interrupted of them interrupted");
-
-			# The point of this environment is that commands get cut off
-			# partway, so a run where none did has tested nothing.  But
-			# the loop can be starved down to a handful of attempts on a
-			# busy machine, and interruptions run at roughly a fifth to a
-			# third of attempts, so demanding one out of five is a coin
-			# toss rather than a check -- zero out of five is an ordinary
-			# outcome, zero out of ten is not.  Say so instead of
-			# failing.
-			if ($attempts < 10)
-			{
-				Test::More::note(
-					"only $attempts commands got through; too few to "
-					  . 'conclude anything about cancellation');
-			}
-			else
-			{
-				Test::More::cmp_ok($interrupted, '>', 0,
-					'some were interrupted');
-			}
-
-			# Whatever was cut off, nothing may be left half-built.
-			stress_drop_invalid_indexes($node);
-			return;
-		},
-		final => sub {
-			my ($node, $ctx) = @_;
-			# A cancelled REPACK must not leave logical decoding switched
-			# on behind it.
-			$node->poll_query_until('postgres',
-				q(SELECT current_setting('effective_wal_level') = 'replica'))
-			  or die 'timed out waiting for logical decoding to be disabled';
-			Test::More::pass('effective_wal_level fell back to replica');
-			return;
-		},
 };
 
 # A hot standby replaying the DDL while serving the checks.
-env standby => {
+topology standby => {
 		# Replication has to catch up before the checks mean anything.
 		min_seconds => 5,
 		init => { allows_streaming => 1 },
@@ -422,7 +189,7 @@ env standby => {
 
 # A subscriber applying what the workload produces while the
 # publisher's tables are rebuilt underneath the decoding.
-env subscription => {
+topology subscription => {
 		# Replication has to catch up before the checks mean anything.
 		min_seconds => 5,
 		init => { allows_streaming => 'logical' },

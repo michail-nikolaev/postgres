@@ -12,4 +12,4 @@ use lib $FindBin::RealBin;
 use Stress::Run;
 
 run_template('moving_identity_sub', 'moving_identity',
-	env => 'subscription');
+	topology => 'subscription');

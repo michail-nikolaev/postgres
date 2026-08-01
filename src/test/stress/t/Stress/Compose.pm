@@ -61,8 +61,9 @@ our @EXPORT_OK = qw(resolve validate fits spec_is_runnable describe_effective);
 # Keys starting with an underscore are resolve()'s own bookkeeping.
 my %known_field = map { $_ => 1 }
   qw(schema pgbench_scale indexes load ddl ddl_concurrency checks
-  no_checks env conf chaos modifier no_forced_chaos no_forced_modifier
-  pgbench_args clients duration tags);
+  no_checks topology disruptor profile conf chaos modifier
+  no_forced_chaos no_forced_modifier pgbench_args clients duration
+  tags);
 
 my %registry = (
 	schema => \%SCHEMA,
@@ -70,6 +71,14 @@ my %registry = (
 	load => \%LOAD,
 	ddl => \%DDL,
 	checks => \%CHECK,
+);
+
+# The single-valued axes: a scenario has one of each, and a requirement
+# on one means "any of these".
+my %scalar_axis = (
+	topology => \%TOPOLOGIES,
+	disruptor => \%DISRUPTORS,
+	profile => \%PROFILES,
 );
 
 # Whether $defn's requires are satisfied by the (partial) spec, without
@@ -80,11 +89,11 @@ sub _requires_satisfied
 
 	foreach my $rkind (sort keys %{ $defn->{requires} // {} })
 	{
-		if ($rkind eq 'env')
+		if ($scalar_axis{$rkind})
 		{
 			return 0
-			  unless grep { $_ eq ($spec->{env} // '') }
-			  @{ $defn->{requires}->{env} };
+			  unless grep { $_ eq ($spec->{$rkind} // '') }
+			  @{ $defn->{requires}->{$rkind} };
 			next;
 		}
 		foreach my $rname (@{ $defn->{requires}->{$rkind} })
@@ -108,8 +117,8 @@ sub _conflicts_fire
 		foreach my $cname (@{ $defn->{conflicts}->{$ckind} })
 		{
 			return 1
-			  if $ckind eq 'env'
-			  ? ($spec->{env} // '') eq $cname
+			  if $scalar_axis{$ckind}
+			  ? ($spec->{$ckind} // '') eq $cname
 			  : grep { $_ eq $cname } @{ $spec->{$ckind} // [] };
 		}
 	}
@@ -146,7 +155,8 @@ sub resolve
 	my ($spec) = @_;
 	my %eff = %$spec;
 
-	$eff{env} //= 'standalone';
+	$eff{topology} //= 'standalone';
+	$eff{disruptor} //= 'none';
 
 	#
 	# Checks: what the scenario wrote, what its loads and commands
@@ -329,7 +339,10 @@ sub describe_effective
 	  . ']';
 	$out .= ' dropped=[' . join(',', @{ $spec->{_checks_dropped} }) . ']'
 	  if @{ $spec->{_checks_dropped} // [] };
-	$out .= " env=$spec->{env}";
+	$out .= " topology=$spec->{topology}";
+	$out .= " disruptor=$spec->{disruptor}"
+	  if ($spec->{disruptor} // 'none') ne 'none';
+	$out .= " profile=$spec->{profile}" if defined $spec->{profile};
 	return $out;
 }
 
@@ -353,9 +366,13 @@ sub fits
 
 	return 0 unless $defn;
 
-	if (my $wanted = $defn->{requires}->{env})
+	foreach my $axis (sort keys %scalar_axis)
 	{
-		return 0 unless grep { $_ eq ($partial->{env} // '') } @$wanted;
+		if (my $wanted = $defn->{requires}->{$axis})
+		{
+			return 0
+			  unless grep { $_ eq ($partial->{$axis} // '') } @$wanted;
+		}
 	}
 	return 0
 	  if $defn->{max_clients}
@@ -393,8 +410,12 @@ sub validate
 			  unless exists $registry{$kind}->{$name};
 		}
 	}
-	die "scenario names unknown env '$spec->{env}'"
-	  unless exists $ENVS{ $spec->{env} };
+	die "scenario names unknown topology '$spec->{topology}'"
+	  unless exists $TOPOLOGIES{ $spec->{topology} };
+	die "scenario names unknown disruptor '$spec->{disruptor}'"
+	  unless exists $DISRUPTORS{ $spec->{disruptor} };
+	die "scenario names unknown profile '$spec->{profile}'"
+	  if defined $spec->{profile} && !exists $PROFILES{ $spec->{profile} };
 
 	die "scenario names unknown modifier '$spec->{modifier}'"
 	  if defined $spec->{modifier} && !exists $MODIFIERS{ $spec->{modifier} };
@@ -403,19 +424,22 @@ sub validate
 	{
 		my $m = $MODIFIERS{ $spec->{modifier} };
 
-		foreach my $cenv (@{ $m->{conflicts}->{env} // [] })
-		{
-			die "modifier '$spec->{modifier}' conflicts with env '$cenv'"
-			  if ($spec->{env} // '') eq $cenv;
-		}
-
 		die "modifier '$spec->{modifier}' cannot be combined with "
 		  . "clients '$spec->{clients}'"
 		  if $m->{max_clients} && ($spec->{clients} // 0) > $m->{max_clients};
 
 		foreach my $kind (sort keys %{ $m->{conflicts} // {} })
 		{
-			next if $kind eq 'env';
+			if ($scalar_axis{$kind})
+			{
+				foreach my $cname (@{ $m->{conflicts}->{$kind} })
+				{
+					die "modifier '$spec->{modifier}' conflicts with "
+					  . "$kind '$cname'"
+					  if ($spec->{$kind} // '') eq $cname;
+				}
+				next;
+			}
 			die "modifier '$spec->{modifier}' conflicts with unknown kind "
 			  . "'$kind'"
 			  unless exists $registry{$kind};
@@ -468,16 +492,16 @@ sub validate
 				# never fires lets soak build a combination the plugin
 				# said it could not be part of.
 				die "$kind '$name' requires unknown kind '$rkind'"
-				  unless $rkind eq 'env' || exists $registry{$rkind};
+				  unless $scalar_axis{$rkind} || exists $registry{$rkind};
 
-				# 'env' is a single value rather than a list, and a
-				# requirement on it means "any one of these".
-				if ($rkind eq 'env')
+				# A single-valued axis is one value rather than a list,
+				# and a requirement on it means "any one of these".
+				if ($scalar_axis{$rkind})
 				{
-					my @want = @{ $defn->{requires}->{env} };
-					die "$kind '$name' requires env "
+					my @want = @{ $defn->{requires}->{$rkind} };
+					die "$kind '$name' requires $rkind "
 					  . join(' or ', map { "'$_'" } @want)
-					  unless grep { $_ eq ($spec->{env} // '') } @want;
+					  unless grep { $_ eq ($spec->{$rkind} // '') } @want;
 					next;
 				}
 
@@ -506,15 +530,16 @@ sub validate
 			foreach my $ckind (sort keys %{ $defn->{conflicts} // {} })
 			{
 				die "$kind '$name' conflicts with unknown kind '$ckind'"
-				  unless $ckind eq 'env' || exists $registry{$ckind};
+				  unless $scalar_axis{$ckind} || exists $registry{$ckind};
 
 				foreach my $cname (@{ $defn->{conflicts}->{$ckind} })
 				{
-					# 'env' is a single value rather than a list.
+					# A single-valued axis is one value rather than a
+					# list.
 					die "$kind '$name' cannot be combined with "
 					  . "$ckind '$cname'"
-					  if $ckind eq 'env'
-					  ? $spec->{env} eq $cname
+					  if $scalar_axis{$ckind}
+					  ? ($spec->{$ckind} // '') eq $cname
 					  : grep { $_ eq $cname } @{ $spec->{$ckind} // [] };
 				}
 			}

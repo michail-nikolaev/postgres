@@ -110,7 +110,7 @@ check no_slot_leak => {
 check decoding_disabled => {
 		auto => 1,
 		# With wal_level = logical there is nothing to switch back to.
-		requires => { env => ['wal_replica'] },
+		requires => { profile => ['wal_replica'] },
 		final => sub {
 			my ($node, $ctx) = @_;
 			Test::More::ok(

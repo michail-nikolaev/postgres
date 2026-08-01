@@ -34,7 +34,7 @@ modifier durable => {
 		# own timeout instead.  Capping the clients was tried and is
 		# worse: it leaves the environment with nothing to cancel, and
 		# its own check then fails.
-		conflicts => { env => ['cancellation'] },
+		conflicts => { disruptor => ['cancellation'] },
 		conf => [
 			'fsync = on',
 			'full_page_writes = on',
@@ -59,7 +59,7 @@ modifier spill => {
 		# own timeout instead.  Capping the clients was tried and is
 		# worse: it leaves the environment with nothing to cancel, and
 		# its own check then fails.
-		conflicts => { env => ['cancellation'] },
+		conflicts => { disruptor => ['cancellation'] },
 		conf => [
 			'work_mem = 64kB',
 			'maintenance_work_mem = 1MB',
@@ -142,7 +142,7 @@ modifier buffer_churn => {
 		# own timeout instead.  Capping the clients was tried and is
 		# worse: it leaves the environment with nothing to cancel, and
 		# its own check then fails.
-		conflicts => { env => ['cancellation'] },
+		conflicts => { disruptor => ['cancellation'] },
 		conf => [
 			'shared_buffers = 1MB',
 			'bgwriter_delay = 10ms',

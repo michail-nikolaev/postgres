@@ -55,7 +55,9 @@ The registries are:
   %LOAD          what changes the data, preserving some invariant
   %DDL           what runs concurrently with that
   %CHECK         what must hold regardless
-  %ENVS          what the cluster looks like
+  %TOPOLOGIES    how many nodes and how they are related
+  %DISRUPTORS    what happens to the cluster while the workload runs
+  %PROFILES      server configurations that are neither of those
   %MODIFIERS     how the server goes about its work
   %CHAOS_POINTS  the injection points worth jittering, with their caps
   %CHAOS         named jitter profiles built from those points
@@ -110,12 +112,17 @@ C<script> is a pgbench fragment run as its own weighted script;
 C<final> is a sub run against the node once the workload is over.
 Either may be omitted.
 
-=head2 %ENVS
+=head2 %TOPOLOGIES, %DISRUPTORS, %PROFILES
 
-An environment decides what cluster the scenario runs against, and
-carries the settings that make that cluster behave.  Getting those wrong
-is itself a source of false failures, so they belong here rather than in
-each scenario.
+What used to be one "environment" axis, on three: a scenario runs
+against a topology (standalone, a hot standby, a subscription), under a
+disruptor (nothing, a crash loop, a cancellation storm), with an
+optional settings profile (another wal_level, an aggressive autovacuum,
+a small lock table).  Each is declared with its own constraints and its
+own conf, and they compose -- which is what one fused axis could never
+do without a file per combination.  The settings they carry belong to
+them rather than to scenarios because getting them wrong is itself a
+source of false failures.
 
 =head2 %MODIFIERS
 
@@ -175,23 +182,28 @@ use Cwd qw(abs_path);
 use Exporter 'import';
 use File::Basename qw(dirname);
 
-our (%SCHEMA, %INDEXES, %LOAD, %DDL, %CHECK, %ENVS);
+our (%SCHEMA, %INDEXES, %LOAD, %DDL, %CHECK);
+our (%TOPOLOGIES, %DISRUPTORS, %PROFILES);
 our (%MODIFIERS, %CHAOS_POINTS, %CHAOS, %TEMPLATES);
 
 our @EXPORT_OK = (
-	qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS
+	qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK
+	  %TOPOLOGIES %DISRUPTORS %PROFILES
 	  %MODIFIERS %CHAOS_POINTS %CHAOS %TEMPLATES),
-	qw(schema index_def load ddl check env
+	qw(schema index_def load ddl check
+	  topology disruptor settings_profile
 	  modifier chaos_point chaos_profile scenario_template),
 	qw(load_all));
 
 our %EXPORT_TAGS = (
 	registries => [
-		qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK %ENVS
+		qw(%SCHEMA %INDEXES %LOAD %DDL %CHECK
+		  %TOPOLOGIES %DISRUPTORS %PROFILES
 		  %MODIFIERS %CHAOS_POINTS %CHAOS %TEMPLATES)
 	],
 	declare => [
-		qw(schema index_def load ddl check env
+		qw(schema index_def load ddl check
+		  topology disruptor settings_profile
 		  modifier chaos_point chaos_profile scenario_template)
 	],
 );
@@ -205,7 +217,9 @@ my %registry_of = (
 	load => \%LOAD,
 	ddl => \%DDL,
 	checks => \%CHECK,
-	env => \%ENVS,
+	topology => \%TOPOLOGIES,
+	disruptor => \%DISRUPTORS,
+	profile => \%PROFILES,
 	modifier => \%MODIFIERS,
 	chaos_point => \%CHAOS_POINTS,
 	chaos_profile => \%CHAOS,
@@ -234,7 +248,9 @@ sub index_def     { _register('indexes', @_); return }
 sub load          { _register('load', @_); return }
 sub ddl           { _register('ddl', @_); return }
 sub check         { _register('checks', @_); return }
-sub env           { _register('env', @_); return }
+sub topology      { _register('topology', @_); return }
+sub disruptor     { _register('disruptor', @_); return }
+sub settings_profile { _register('profile', @_); return }
 sub modifier      { _register('modifier', @_); return }
 sub chaos_point   { _register('chaos_point', @_); return }
 sub chaos_profile { _register('chaos_profile', @_); return }

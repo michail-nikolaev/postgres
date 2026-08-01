@@ -40,7 +40,12 @@ hand outside the harness.
                    commands bring with them; see Stress::Compose for
                    how the effective set is composed
   no_checks        checks to take back out of the effective set, by name
-  env              which cluster to run against (default standalone)
+  topology         how many nodes and how they relate: standalone,
+                   standby, subscription (default standalone)
+  disruptor        what happens to the cluster while the workload runs:
+                   none, crash_loop, cancellation (default none)
+  profile          a named server configuration from %PROFILES, for the
+                   clusters that are neither a topology nor a disruption
   conf             extra postgresql.conf lines for this scenario
   chaos            a named chaos profile from %CHAOS, or a profile soak
                    invented; widens race windows with injection-point
@@ -354,15 +359,20 @@ sub run_one
 	my $duration = ($spec->{duration} // 6) * $scale;
 	$duration = $1
 	  if ($ENV{PG_TEST_EXTRA} // '') =~ /\bstress_seconds=(\d+)\b/;
-	my $env = $ENVS{ $spec->{env} };
+	my $topo = $TOPOLOGIES{ $spec->{topology} };
+	my $disr = $DISRUPTORS{ $spec->{disruptor} };
+	my $prof = defined $spec->{profile} ? $PROFILES{ $spec->{profile} } : {};
 
-	# An environment that has to get a second server caught up cannot
+	# A topology that has to get a second server caught up cannot
 	# answer anything in a second: the checks would be reading a
 	# subscriber that is still behind, which looks like a broken
-	# combination and is not one.  Such an environment names its floor
+	# combination and is not one.  Such a topology names its floor
 	# and survey mode respects it.
-	$duration = $env->{min_seconds}
-	  if $env->{min_seconds} && $duration < $env->{min_seconds};
+	foreach my $axis ($topo, $disr, $prof)
+	{
+		$duration = $axis->{min_seconds}
+		  if $axis->{min_seconds} && $duration < $axis->{min_seconds};
+	}
 	# Already ordered by resolve(): every decorator follows the ones it
 	# requires.
 	my @schema = map { $SCHEMA{$_} } @{ $spec->{schema} };
@@ -375,13 +385,13 @@ sub run_one
 	$run_counter++;
 	my $node_name = $run_counter > 1 ? "${name}_$run_counter" : $name;
 	my $node = PostgreSQL::Test::Cluster->new($node_name);
-	# The environment decides how the cluster is initialized: a standby
+	# The topology decides how the cluster is initialized: a standby
 	# or a subscriber needs the primary set up for replication before it
 	# can connect at all.
 	# A modifier may need something decided at initdb time -- data
 	# checksums are written into the cluster, not set by a GUC -- so its
-	# init options are merged with the environment's.
-	my %init = (%{ $env->{init} // {} },
+	# init options are merged with the topology's.
+	my %init = (%{ $topo->{init} // {} },
 		%{ $spec->{modifier} ? ($MODIFIERS{ $spec->{modifier} }->{init} // {})
 			: {} });
 	$node->init(%init);
@@ -430,7 +440,13 @@ sub run_one
 	# being tested.
 	$node->append_conf('postgresql.conf', $_)
 	  for ('max_worker_processes = 32', 'max_parallel_workers = 16');
-	$node->append_conf('postgresql.conf', $_) for @{ $env->{conf} // [] };
+	# Topology first, then the settings profile, then the disruptor, so
+	# that a disruptor that needs its own wal_level wins over the
+	# topology's -- last occurrence of a setting is the one the server
+	# takes.
+	$node->append_conf('postgresql.conf', $_)
+	  for (@{ $topo->{conf} // [] }, @{ $prof->{conf} // [] },
+		@{ $disr->{conf} // [] });
 	# A load may need the server configured for it -- two-phase commit
 	# has to be enabled before a client can prepare a transaction.
 	$node->append_conf('postgresql.conf', $_)
@@ -620,10 +636,10 @@ sub run_one
 	# it.
 	_chaos_setup($node, $spec, $ctx);
 
-	# Anything the environment needs beyond the primary node -- a
+	# Anything the topology needs beyond the primary node -- a
 	# standby, a subscriber -- is built now, with the schema and its
 	# helper functions already in place so a backup carries them.
-	$env->{setup}->($node, $ctx) if $env->{setup};
+	$topo->{setup}->($node, $ctx) if $topo->{setup};
 
 	# Whatever slots the environment legitimately created -- a
 	# subscription owns one for as long as it exists -- are the baseline
@@ -759,18 +775,28 @@ sub run_one
 	$ctx->{stderr_re} = $stderr_re;
 	$ctx->{duration} = $duration;
 
-	if ($env->{run})
-	{
-		# The environment drives the run itself: more than one node, or
-		# something happening to the cluster while the workload runs.
-		$env->{run}->($node, $ctx);
-	}
-	else
-	{
+	# The workload, as a composition: the topology decides what runs
+	# where -- one pgbench, or one per node -- and the disruptor decides
+	# what happens to the cluster while it does.  A disruptor that
+	# drives its own bounded workloads simply does not call the inner
+	# runner it was handed.
+	my $inner =
+	  $topo->{run}
+	  ? sub { $topo->{run}->($node, $ctx); return }
+	  : sub {
 		$node->command_checks_all(
 			$pgbench_cmd->(), 0,
 			[qr{actually processed}], [$stderr_re],
 			"scenario $name");
+		return;
+	  };
+	if ($disr->{run})
+	{
+		$disr->{run}->($node, $ctx, $inner);
+	}
+	else
+	{
+		$inner->();
 	}
 
 	#
@@ -812,7 +838,8 @@ sub run_one
 		my $c = $CHECK{$cname};
 		$c->{final}->($node, $ctx) if $c->{final};
 	}
-	$env->{final}->($node, $ctx) if $env->{final};
+	$topo->{final}->($node, $ctx) if $topo->{final};
+	$disr->{final}->($node, $ctx) if $disr->{final};
 	_chaos_report($node, $ctx);
 
 	$_->stop for @{ $ctx->{extra_nodes} // [] };

@@ -44,7 +44,7 @@ run_scenario(
 		# error rather than a slower plan, and quiet_index_scan -- which
 		# is why the quiet_index schema is named -- makes it plan against
 		# the index replay keeps removing.
-		env => 'standby',
+		topology => 'standby',
 		clients => 20,
 		tags => ['ci'],
 	});

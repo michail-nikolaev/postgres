@@ -49,7 +49,7 @@ run_scenario(
 			'subscriber_delete_reinsert'
 		],
 		ddl => [@STANDARD_DDL],
-		env => 'subscription',
+		topology => 'subscription',
 		clients => 20,
 		tags => ['ci'],
 	});

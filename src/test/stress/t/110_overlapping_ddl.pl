@@ -44,7 +44,7 @@ run_scenario(
 		load => [ 'tpcb_like', 'balanced_pair' ],
 		ddl => [@STANDARD_DDL],
 		ddl_concurrency => 4,
-		env => 'wal_replica',
+		profile => 'wal_replica',
 		clients => 30,
 		tags => ['ci'],
 	});

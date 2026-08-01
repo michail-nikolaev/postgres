@@ -16,7 +16,7 @@ run_scenario(
 		indexes => ['btree_abalance'],
 		load => [ 'tpcb_like', 'balanced_pair' ],
 		ddl => [@STANDARD_DDL],
-		env => 'crash_loop',
+		disruptor => 'crash_loop',
 		clients => 20,
 		tags => ['ci'],
 	});

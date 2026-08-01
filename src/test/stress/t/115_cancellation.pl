@@ -21,7 +21,7 @@ run_scenario(
 		# same moment -- and one of those activations then gets
 		# cancelled, which is the race this scenario is here for.
 		ddl_concurrency => 4,
-		env => 'cancellation',
+		disruptor => 'cancellation',
 		clients => 20,
 		tags => ['ci'],
 	});

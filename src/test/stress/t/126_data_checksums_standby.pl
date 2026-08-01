@@ -16,4 +16,4 @@ use lib $FindBin::RealBin;
 use Stress::Run;
 
 run_template('data_checksums_standby', 'data_checksums',
-	env => 'standby');
+	topology => 'standby');

@@ -19,7 +19,7 @@ run_scenario(
 		],
 		load => [ 'tpcb_like', 'balanced_pair' ],
 		ddl => [@STANDARD_DDL],
-		env => 'lock_exhaustion',
+		profile => 'lock_exhaustion',
 		clients => 20,
 		tags => ['ci'],
 	});

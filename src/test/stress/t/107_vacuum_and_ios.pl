@@ -16,7 +16,7 @@ run_scenario(
 		indexes => [ 'covering_aid', 'btree_abalance' ],
 		load => ['tpcb_like'],
 		ddl => [ @STANDARD_DDL, 'vacuum' ],
-		env => 'autovacuum',
+		profile => 'autovacuum',
 		clients => 20,
 		tags => ['ci'],
 	});

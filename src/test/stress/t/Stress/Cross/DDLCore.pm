@@ -255,7 +255,7 @@ ddl alter_table_rewrite => {
 		# table, and the subscriber does not follow: apply then fails on
 		# every change until the column is gone again, and the
 		# subscription never catches up.
-		conflicts => { env => ['subscription'] },
+		conflicts => { topology => ['subscription'] },
 		# Changing a column's type changes the result type of everything
 		# selecting it, and a client holding a cached statement across
 		# that gets "cached plan must not change result type" -- correct

@@ -14,4 +14,4 @@ use lib $FindBin::RealBin;
 use Stress::Run;
 
 run_template('data_checksums_crash', 'data_checksums',
-	env => 'crash_loop');
+	disruptor => 'crash_loop');

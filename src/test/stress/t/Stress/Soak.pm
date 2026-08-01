@@ -181,10 +181,10 @@ sub _pick_some
 # engine that validates the result.
 sub _modifier_fits
 {
-	my ($name, $env, $clients, $indexes) = @_;
+	my ($name, $axes, $clients, $indexes) = @_;
 
 	return Stress::Compose::fits('modifier', $name,
-		{ env => $env, clients => $clients, indexes => $indexes });
+		{ %$axes, clients => $clients, indexes => $indexes });
 }
 
 # Invent a chaos profile: a few points from the pool, each with a
@@ -241,7 +241,35 @@ sub _invent_chaos
 # the caller validates it, and throws it away if the pieces do not fit.
 sub _invent
 {
-	my $env = _pick(sort keys %ENVS);
+	# The cluster, on three axes rather than one: where the workload
+	# runs, what happens to it while it does, and how the server is
+	# configured.  Most combinations get no disruptor and no profile,
+	# for the same reason most get no chaos: a failure under one has to
+	# be tellable from a failure that needs none.
+	my $topology = _pick(sort keys %TOPOLOGIES);
+	my $disruptor = 'none';
+	if (rand() < 0.3)
+	{
+		my @fit = grep {
+			$_ ne 'none'
+			  && Stress::Compose::fits('disruptor', $_,
+				{ topology => $topology })
+		} sort keys %DISRUPTORS;
+		$disruptor = _pick(@fit) if @fit;
+	}
+	my $profile;
+	if (rand() < 0.3)
+	{
+		my @fit = grep {
+			Stress::Compose::fits('profile', $_,
+				{ topology => $topology, disruptor => $disruptor })
+		} sort keys %PROFILES;
+		$profile = _pick(@fit) if @fit;
+	}
+	my %axes = (
+		topology => $topology,
+		disruptor => $disruptor,
+		defined $profile ? (profile => $profile) : ());
 
 	# Decorators bring their own tables and invariants; take a couple.
 	# Ones that cannot live in this environment, or alongside something
@@ -252,19 +280,15 @@ sub _invent
 	my @decorators;
 	foreach my $name (_pick_some(0, 2, grep { $_ ne 'pgbench' } sort keys %SCHEMA))
 	{
-		my $defn = $SCHEMA{$name};
-		next if grep { $_ eq $env } @{ $defn->{conflicts}->{env} // [] };
-		next if grep { my $d = $_; grep { $_ eq $d } @decorators }
-		  @{ $defn->{conflicts}->{schema} // [] };
-		next if grep { my $picked = $_;
-			grep { $_ eq $name } @{ $SCHEMA{$picked}->{conflicts}->{schema} // [] } }
-		  @decorators;
+		next
+		  unless Stress::Compose::fits('schema', $name,
+			{ %axes, schema => \@decorators });
 
 		# Anything it depends on has to come with it.
 		push @decorators, grep {
 			my $dep = $_;
 			!grep { $_ eq $dep } @decorators
-		} @{ $defn->{requires}->{schema} // [] };
+		} @{ $SCHEMA{$name}->{requires}->{schema} // [] };
 		push @decorators, $name;
 	}
 	my @schema = ('pgbench', @decorators);
@@ -273,7 +297,7 @@ sub _invent
 	# will validate the result; schema requirements are no bar, because
 	# resolve() pulls a load's schema in with it -- picking balanced_pair
 	# is what brings the ledger along.
-	my $partial = { schema => \@schema, env => $env };
+	my $partial = { %axes, schema => \@schema };
 	my @loads =
 	  grep { Stress::Compose::fits('load', $_, $partial) } sort keys %LOAD;
 	# catalogue_only entries stay in the scenarios that name them: they
@@ -346,7 +370,8 @@ sub _invent
 	# sorts spill, whether WAL waits for the disk, which node the planner
 	# picks -- without changing what any of it produces.
 	my $modifier = _pick(
-		grep { _modifier_fits($_, $env, 10, \@indexes) } sort keys %MODIFIERS);
+		grep { _modifier_fits($_, \%axes, 10, \@indexes) }
+		  sort keys %MODIFIERS);
 
 	return {
 		schema => \@schema,
@@ -367,7 +392,7 @@ sub _invent
 		# the auto set joins wherever it applies.  Soak used to sample
 		# checks as a dimension, which mostly invented combinations that
 		# verified less than they ran.
-		env => $env,
+		%axes,
 		# Ten, because the invented combinations run at scale 1 and a
 		# scale-1 pgbench has exactly one pgbench_branches row that every
 		# transaction updates.  Twenty or thirty clients serialize on that
@@ -536,11 +561,17 @@ sub soak_run
 			# catalogue under them is how it gets tested.
 			unless (defined $spec->{modifier})
 			{
+				my %axes = (
+					topology => $spec->{topology} // 'standalone',
+					disruptor => $spec->{disruptor} // 'none',
+					defined $spec->{profile}
+					? (profile => $spec->{profile})
+					: ());
 				$spec = {
 					%$spec,
 					modifier => _pick(
 						grep {
-							_modifier_fits($_, $spec->{env} // '',
+							_modifier_fits($_, \%axes,
 								$spec->{clients} // 0, $spec->{indexes} // [])
 						} sort keys %MODIFIERS)
 				};
@@ -596,7 +627,10 @@ sub _describe
 	  grep { ref $spec->{$_} eq 'ARRAY' } qw(schema load ddl checks);
 
 	# The scalars matter as much as the lists for reproducing a failure.
-	$out .= " env=$spec->{env}" if $spec->{env};
+	$out .= " topology=$spec->{topology}" if $spec->{topology};
+	$out .= " disruptor=$spec->{disruptor}"
+	  if ($spec->{disruptor} // 'none') ne 'none';
+	$out .= " profile=$spec->{profile}" if defined $spec->{profile};
 	$out .= " scale=$spec->{pgbench_scale}" if $spec->{pgbench_scale};
 	$out .= " clients=$spec->{clients}" if $spec->{clients};
 	$out .= " ddl_concurrency=$spec->{ddl_concurrency}"

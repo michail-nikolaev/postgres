@@ -36,7 +36,7 @@ schema partitioned => {
 		# drops it concurrently, which a partitioned index refuses.
 		conflicts => {
 			schema => [ 'exclusion_slot', 'fk_child' ],
-			env => ['subscription'],
+			topology => ['subscription'],
 		},
 		setup => q(
 			ALTER TABLE pgbench_accounts RENAME TO pgbench_accounts_main;
