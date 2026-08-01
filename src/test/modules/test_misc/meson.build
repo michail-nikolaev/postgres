@@ -24,6 +24,7 @@ tests += {
       't/013_temp_obj_multisession.pl',
       't/014_log_statement_max_length.pl',
       't/015_ri_fastpath_reindex.pl',
+      't/016_hash_vacuum_metapage.pl',
     ],
     # The injection points are cluster-wide, so disable installcheck
     'runningcheck': false,
