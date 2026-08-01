@@ -2462,6 +2462,22 @@ check reads an empty table for an instant and the next read is fine.
 This one is not.  The copy is a single shot, and getting it wrong loses
 the table's contents on the subscriber for good.
 
+It reproduces on its own, with no stress machinery at all: one
+publisher, one subscriber, a ten-row table, and a loop of REPACK
+(CONCURRENTLY) running while the subscription starts.  Five to six
+rounds in six copy an empty table.  That is
+src/test/subscription/t/100_tablesync_repack.pl, skipped unless
+
+  PG_TEST_EXTRA='repack_tablesync'
+
+since it fails on purpose while the gap is open.  A ten-row table is
+not a curiosity: the window is the gap between the slot's exported
+snapshot and the COPY that reads with it -- slot creation, worker
+startup, the handshake -- so a table small enough to copy instantly
+spends all of its synchronization inside the window, while a large one
+mostly misses it.  Four hundred thousand rows did not reproduce it in
+six rounds; ten rows reproduced it in five of six.
+
 The suite's own exposure is closed: the subscription topology now waits
 for the initial synchronization to finish before the workload starts,
 which it should have done from the beginning -- wait_for_catchup
