@@ -2831,6 +2831,10 @@ ri_FastPathCheck(RI_ConstraintInfo *riinfo,
 	INJECTION_POINT("ri-before-pk-lock", NULL);
 
 	pk_rel = table_open(riinfo->pk_relid, RowShareLock);
+
+	/* Re-read the constraint under that lock; see ri_FastPathGetEntry(). */
+	riinfo = ri_LoadConstraintInfo(riinfo->constraint_id);
+
 	idx_rel = index_open(riinfo->conindid, AccessShareLock);
 
 	slot = table_slot_create(pk_rel, NULL);
@@ -4399,6 +4403,21 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
 		INJECTION_POINT("ri-before-pk-lock", NULL);
 
 		entry->pk_rel = table_open(riinfo->pk_relid, RowShareLock);
+
+		/*
+		 * Re-read the constraint now that the PK table is locked, because
+		 * conindid may have been read before that lock was taken and REINDEX
+		 * CONCURRENTLY moves a constraint to a new index.  Locking the PK
+		 * table is what makes the value we read here stable: index_drop()
+		 * removes the old index only after the swap that repointed conindid
+		 * has committed, and only after waiting for the lockers of the table,
+		 * so we either see the new index or an old one that cannot go away
+		 * until this transaction ends.  Without this we could open an index
+		 * that has already been dropped, or scan one that has been marked
+		 * dead and so no longer receives new rows.
+		 */
+		riinfo = ri_LoadConstraintInfo(riinfo->constraint_id);
+
 		entry->idx_rel = index_open(riinfo->conindid, AccessShareLock);
 		entry->pk_slot = table_slot_create(entry->pk_rel, NULL);
 
