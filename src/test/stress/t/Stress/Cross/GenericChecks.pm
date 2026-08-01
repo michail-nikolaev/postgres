@@ -111,6 +111,14 @@ check decoding_disabled => {
 		auto => 1,
 		# With wal_level = logical there is nothing to switch back to.
 		requires => { profile => ['wal_replica'] },
+		# And not against a subscription, which owns a logical slot for
+		# as long as it exists: decoding stays on because it is still
+		# wanted, and waiting for it to go off waits out the poll
+		# timeout to report the server doing its job.  Unreachable until
+		# the environment axis was split -- wal_replica and subscription
+		# used to be two values of one axis -- and found by the first
+		# soak that could name both.
+		conflicts => { topology => ['subscription'] },
 		final => sub {
 			my ($node, $ctx) = @_;
 			Test::More::ok(

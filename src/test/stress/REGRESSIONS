@@ -2331,3 +2331,24 @@ each needs a combination no hand-written scenario names.
     site inside a critical section is usable only by a callback every
     backend pre-loads, and nothing in the catalogue marks which sites
     those are.
+
+3.  A check that waited for something correct not to happen.
+
+    decoding_disabled polls until effective_wal_level falls back to
+    replica, which is what a REPACK's transient slot going away looks
+    like.  Against a subscription it never does, and should not: the
+    subscription owns a logical slot for as long as it exists, so
+    decoding stays on because it is still wanted.  The check waited out
+    its 192-second poll and reported the server doing its job:
+
+      not ok - logical decoding was switched back off
+      poll_query_until timed out: SELECT current_setting(
+        'effective_wal_level') = 'replica'
+
+    Unreachable before the environment axis was split, since
+    wal_replica and subscription were two values of one axis and could
+    not both be chosen; the first soak that could name both found it in
+    ten combinations.  The check now conflicts with the subscription
+    topology.  Its neighbour, the cancellation disruptor's final, polls
+    the same thing and was already declared incompatible for the same
+    reason.
