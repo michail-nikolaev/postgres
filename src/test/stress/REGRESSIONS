@@ -2419,12 +2419,33 @@ command that must briefly exclude every writer cannot get through a
 queue that never drains.  The commit that introduced stress_chaos=
 measured the same thing at the same rate -- one failure in twelve.
 
-So for a pass over the whole catalogue, use discard_only: it is the
-rate the two backend bugs on this branch were actually found at
-("2 runs in 10 with nothing but debug_discard_caches_probability set"),
-and eight passes of it here were clean rather than starved.  Keep
-discard_hard for a scenario or two at a time, where the starvation is
-visible for what it is.
+The first version of this note said discard_only was the answer, on
+six clean passes.  It is not: the seventh starved
+117_partitioned_pgbench the same way, and 117 is the scenario whose own
+comment explains that at scale 5 every transaction queues on one
+pgbench_branches row, so any parked lock request builds a queue.  One
+pass in seven against one in eight is no difference at all.
+
+What is true is narrower.  Forcing any profile that slows the server
+materially will occasionally starve the scenarios tuned for one that
+is not, whichever profile it is, and the useful skill is reading the
+failure rather than avoiding it: a run that took ten times its duration
+and ended in "canceling statement due to lock timeout" is starvation,
+not a finding.  discard_only is still the rate the two backend bugs on
+this branch were found at, so it remains the lever to point at the
+catalogue -- with the expectation of a starved pass now and then, and
+without treating one as a result.
+
+A second symptom belongs to the same cause, and cost time twice before
+being written down: under --protocol=prepared, a PREPARE cancelled by
+lock_timeout leaves pgbench believing the statement was prepared, and
+the next use of it fails with
+
+  ERROR:  prepared statement "P_0" does not exist
+
+That message is never the finding.  It always means an earlier error,
+and the earlier error is the one to read -- a lock timeout here, an
+untyped parameter in the case recorded above.
 
 A subscriber left empty by a REPACK of the table being copied
 =============================================================
