@@ -49,7 +49,7 @@ tests += {
       't/037_except.pl',
       't/038_walsnd_shutdown_timeout.pl',
       't/100_bugs.pl',
-      't/100_tablesync_repack.pl',
+      't/100_repack_snapshots.pl',
     ],
   },
 }

@@ -2483,13 +2483,40 @@ check reads an empty table for an instant and the next read is fine.
 This one is not.  The copy is a single shot, and getting it wrong loses
 the table's contents on the subscriber for good.
 
-It reproduces on its own, with no stress machinery at all: one
-publisher, one subscriber, a ten-row table, and a loop of REPACK
-(CONCURRENTLY) running while the subscription starts.  Five to six
-rounds in six copy an empty table.  That is
-src/test/subscription/t/100_tablesync_repack.pl, skipped unless
+It is not about replication at all, which took another two experiments
+to establish.  REPACK (CONCURRENTLY) builds the new heap by inserting
+the rows as itself -- heapam_relation_copy_for_cluster() sends the
+concurrent case to heap_insert_for_repack(), an ordinary heap_insert(),
+where the non-concurrent case goes to reform_and_rewrite_tuple() and
+preserves each tuple's xmin and xmax.  Every row of the new heap
+therefore carries the repacking transaction's xid, and any snapshot
+older than that commit sees the whole table as written by a
+transaction it does not consider committed.
 
-  PG_TEST_EXTRA='repack_tablesync'
+A reader that has already touched the table is safe by accident: it
+holds AccessShareLock, so the swap waits for it rather than overtaking
+it.  What is exposed is a holder of an old snapshot that has not yet
+opened the table -- and there are three of those, measured:
+
+  an ordinary REPEATABLE READ transaction, snapshot taken, table not
+  yet read                                     0 of 10 rows, every time
+
+  a snapshot exported from a logical slot and read under SET
+  TRANSACTION SNAPSHOT, which is what pg_dump --snapshot does and what
+  the documentation recommends for building a subscriber by hand
+                                               0 rows, 4 rounds of 4
+
+  logical replication's initial tablesync      0 rows, 5 rounds of 6,
+                                               and permanently
+
+The first two are deterministic.  The third needs the repack to land in
+the window between the exported snapshot and the COPY, which is why a
+small table reproduces it and a large one does not.
+
+All three are src/test/subscription/t/100_repack_snapshots.pl, skipped
+unless
+
+  PG_TEST_EXTRA='repack_snapshots'
 
 since it fails on purpose while the gap is open.  A ten-row table is
 not a curiosity: the window is the gap between the slot's exported
