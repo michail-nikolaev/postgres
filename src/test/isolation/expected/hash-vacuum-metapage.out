@@ -1,0 +1,14 @@
+Parsed test spec with 2 sessions
+
+starting permutation: warm lock vac inval commit
+step warm: SELECT count(*) FROM hashvac;
+count
+-----
+  900
+(1 row)
+
+step lock: BEGIN; LOCK TABLE pg_tablespace IN ACCESS EXCLUSIVE MODE;
+step vac: VACUUM hashvac; <waiting ...>
+step inval: ALTER INDEX hashvac_idx SET (fillfactor = 90);
+step commit: COMMIT;
+step vac: <... completed>
