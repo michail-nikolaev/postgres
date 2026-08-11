@@ -63,6 +63,26 @@ CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING BRIN(i);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;
 
+-- A BRIN summary holds values of many heap pages at a time, so a value
+-- stored out of line is fetched as it enters the summary rather than when
+-- the range is written out.  The build therefore keeps rotating over such a
+-- column exactly as it does over any other: the swaps reported below are one
+-- per page of this five page table, for both of the builds.
+CREATE TABLE cic_reset_snap.brin_toast(i int, t text, pad char(1004));
+ALTER TABLE cic_reset_snap.brin_toast ALTER COLUMN t SET STORAGE EXTERNAL;
+ALTER TABLE cic_reset_snap.brin_toast ALTER COLUMN pad SET STORAGE PLAIN;
+ALTER TABLE cic_reset_snap.brin_toast SET (parallel_workers=0);
+INSERT INTO cic_reset_snap.brin_toast
+    SELECT g, repeat(chr(64 + g % 26), 4000), 'x' FROM generate_series(1, 35) g;
+SELECT injection_points_attach('heap_reset_scan_snapshot_swap', 'notice');
+CREATE INDEX CONCURRENTLY brin_toast_idx
+    ON cic_reset_snap.brin_toast USING BRIN(t);
+CREATE INDEX CONCURRENTLY brin_plain_idx
+    ON cic_reset_snap.brin_toast USING BRIN(i);
+SELECT injection_points_detach('heap_reset_scan_snapshot_swap');
+SELECT count(*) FROM cic_reset_snap.brin_toast WHERE t > repeat('A', 4000);
+DROP TABLE cic_reset_snap.brin_toast;
+
 CREATE INDEX CONCURRENTLY idx ON cic_reset_snap.tbl USING HASH(i);
 REINDEX INDEX CONCURRENTLY cic_reset_snap.idx;
 DROP INDEX CONCURRENTLY cic_reset_snap.idx;

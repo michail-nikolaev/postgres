@@ -19,6 +19,7 @@
 #include "access/brin_page.h"
 #include "access/brin_pageops.h"
 #include "access/brin_xlog.h"
+#include "access/detoast.h"
 #include "access/relation.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
@@ -173,6 +174,9 @@ typedef struct BrinBuildState
 	Size		bs_emptyTupleLen;
 	MemoryContext bs_context;
 
+	/* does this build replace its snapshot as it scans? */
+	bool		bs_reset_snapshot;
+
 	/*
 	 * bs_leader is only present when a parallel index build is performed, and
 	 * only in the leader process. (Actually, only the leader process has a
@@ -274,7 +278,7 @@ brinhandler(PG_FUNCTION_ARGS)
 		.ampredlocks = false,
 		.amcanparallel = false,
 		.amcanbuildparallel = true,
-		.amcanresetsnapshot = false,
+		.amcanresetsnapshot = true,
 		.amcaninclude = false,
 		.amusemaintenanceworkmem = false,
 		.amsummarizing = true,
@@ -991,6 +995,56 @@ brinendscan(IndexScanDesc scan)
 }
 
 /*
+ * Accumulate one heap tuple into the range summary being built.
+ *
+ * The summary keeps the values it is given until the range is written out,
+ * and a copy of a value stored out of line is just the pointer:
+ * brin_form_tuple() is what finally fetches it.  A build that resets
+ * snapshots cannot wait that long -- by then the scan may be on a newer
+ * snapshot, under which vacuum is free to remove the TOAST rows the summary
+ * still points at -- so such values are fetched here, as they enter the
+ * summary.
+ *
+ * That trades one fetch per range for one per row, which is why only builds
+ * that reset snapshots do it.  Holding the scan on its snapshot instead does
+ * not work here: the summary keeps every row it is handed, so the hold would
+ * span the whole build and nothing would ever be reset.
+ */
+static void
+brin_add_values(BrinBuildState *state, Relation index, Datum *values,
+				bool *isnull)
+{
+	TupleDesc	tupdesc = state->bs_bdesc->bd_tupdesc;
+	Datum		fetched[INDEX_MAX_KEYS];
+	int			fetchedatts[INDEX_MAX_KEYS];
+	int			nfetched = 0;
+
+	if (state->bs_reset_snapshot)
+	{
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			if (isnull[i] || TupleDescAttr(tupdesc, i)->attlen != -1)
+				continue;
+			if (!VARATT_IS_EXTERNAL(DatumGetPointer(values[i])))
+				continue;
+
+			if (nfetched == 0)
+				memcpy(fetched, values, tupdesc->natts * sizeof(Datum));
+
+			fetched[i] = PointerGetDatum(detoast_external_attr((varlena *)
+															   DatumGetPointer(values[i])));
+			fetchedatts[nfetched++] = i;
+		}
+	}
+
+	(void) add_values_to_range(index, state->bs_bdesc, state->bs_dtuple,
+							   nfetched > 0 ? fetched : values, isnull);
+
+	for (int i = 0; i < nfetched; i++)
+		pfree(DatumGetPointer(fetched[fetchedatts[i]]));
+}
+
+/*
  * Per-heap-tuple callback for table_index_build_scan.
  *
  * Note we don't worry about the page range at the end of the table here; it is
@@ -1035,8 +1089,7 @@ brinbuildCallback(Relation index,
 	}
 
 	/* Accumulate the current tuple into the running state */
-	(void) add_values_to_range(index, state->bs_bdesc, state->bs_dtuple,
-							   values, isnull);
+	brin_add_values(state, index, values, isnull);
 }
 
 /*
@@ -1100,8 +1153,7 @@ brinbuildCallbackParallel(Relation index,
 	}
 
 	/* Accumulate the current tuple into the running state */
-	(void) add_values_to_range(index, state->bs_bdesc, state->bs_dtuple,
-							   values, isnull);
+	brin_add_values(state, index, values, isnull);
 }
 
 /*
@@ -1165,6 +1217,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	revmap = brinRevmapInitialize(index, &pagesPerRange);
 	state = initialize_brin_buildstate(index, revmap, pagesPerRange,
 									   RelationGetNumberOfBlocks(heap));
+	state->bs_reset_snapshot = indexInfo->ii_ResetSnapshot;
 
 	/*
 	 * Attempt to launch parallel worker scan when required
@@ -1694,6 +1747,7 @@ initialize_brin_buildstate(Relation idxRel, BrinRevmap *revmap,
 
 	/* Remember the memory context to use for an empty tuple, if needed. */
 	state->bs_context = CurrentMemoryContext;
+	state->bs_reset_snapshot = false;
 	state->bs_emptyTuple = NULL;
 	state->bs_emptyTupleLen = 0;
 
