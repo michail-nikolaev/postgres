@@ -2948,6 +2948,7 @@ AbortTransaction(void)
 
 	/* Forget about any active REINDEX. */
 	ResetReindexState(s->nestingLevel);
+	index_build_phase_reset();
 
 	/* Reset logical streaming state. */
 	ResetLogicalStreamingState();
@@ -5351,6 +5352,7 @@ AbortSubTransaction(void)
 
 	/* Forget about any active REINDEX. */
 	ResetReindexState(s->nestingLevel);
+	index_build_phase_reset();
 
 	/* Reset logical streaming state. */
 	ResetLogicalStreamingState();

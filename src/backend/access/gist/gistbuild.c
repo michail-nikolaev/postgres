@@ -38,6 +38,7 @@
 #include "access/gist_private.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "optimizer/optimizer.h"
@@ -274,15 +275,18 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
 										   gistSortedBuildCallback,
 										   &buildstate, NULL);
-
 		/*
 		 * Perform the sort and build index pages.
 		 */
-		tuplesort_performsort(buildstate.sortstate);
+		INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
+		{
+			tuplesort_performsort(buildstate.sortstate);
 
-		gist_indexsortbuild(&buildstate);
+			gist_indexsortbuild(&buildstate);
 
-		tuplesort_end(buildstate.sortstate);
+			tuplesort_end(buildstate.sortstate);
+		}
+		INDEX_BUILD_PHASE_END();
 	}
 	else
 	{
@@ -313,7 +317,6 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
 										   gistBuildCallback,
 										   &buildstate, NULL);
-
 		/*
 		 * If buffering was used, flush out all the tuples that are still in
 		 * the buffers.
@@ -321,7 +324,11 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		if (buildstate.buildMode == GIST_BUFFERING_ACTIVE)
 		{
 			elog(DEBUG1, "all tuples processed, emptying buffers");
-			gistEmptyAllBuffers(&buildstate);
+			INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
+			{
+				gistEmptyAllBuffers(&buildstate);
+			}
+			INDEX_BUILD_PHASE_END();
 			gistFreeBuildBuffers(buildstate.gfbb);
 		}
 

@@ -18,6 +18,7 @@
 #include <limits.h>
 
 #include "access/xact.h"
+#include "catalog/index.h"
 #include "commands/prepare.h"
 #include "executor/executor.h"
 #include "executor/tstoreReceiver.h"
@@ -1768,6 +1769,15 @@ EnsurePortalSnapshotExists(void)
 	 * Portal, it's somebody else's responsibility to manage things.)
 	 */
 	if (ActiveSnapshotSet())
+		return;
+
+	/*
+	 * A concurrent index build may be in a phase that deliberately holds no
+	 * snapshot.  Let it supply one it owns, so that the snapshot goes away
+	 * with the phase instead of living as long as the portal -- and so that
+	 * this works in parallel workers, which have no portal at all.
+	 */
+	if (index_build_phase_supply_snapshot())
 		return;
 
 	/* Otherwise, we'd better have an active Portal */

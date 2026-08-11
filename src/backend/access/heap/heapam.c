@@ -721,9 +721,10 @@ heap_prepare_pagescan(TableScanDesc sscan)
  * defeats the purpose of resetting, so tests may attach to the
  * "heap_reset_scan_snapshot_xmin_pinned" injection point to catch it.
  *
- * The last snapshot the scan takes stays active once the scan ends: the rest
- * of the build runs under it, and whoever provided the active-stack entry
- * the scan took over drops it.
+ * The last snapshot the scan takes stays active once the scan ends, so that
+ * whatever the access method still holds from the pages it scanned stays
+ * valid; the first build phase that needs no snapshot drops it, see
+ * INDEX_BUILD_PHASE_BEGIN().
  */
 static inline void
 heap_reset_scan_snapshot(HeapScanDesc scan)
@@ -1525,10 +1526,10 @@ heap_endscan(TableScanDesc sscan)
 	{
 		/*
 		 * The registered reference is dropped by the SO_TEMP_SNAPSHOT path
-		 * below, but the snapshot stays active: the rest of the build runs
-		 * under it.  Whoever established the active-stack entry the scan
-		 * took over pops it -- index_build() for a serial build or for the
-		 * leader, ParallelWorkerMain() for a parallel worker.
+		 * below, but the snapshot stays active: what the caller kept from
+		 * the pages it scanned is still valid under it.  The build drops it
+		 * when it enters a phase that needs no snapshot; see
+		 * INDEX_BUILD_PHASE_BEGIN().
 		 */
 		Assert(scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT);
 		Assert(GetActiveSnapshot() == sscan->rs_snapshot);

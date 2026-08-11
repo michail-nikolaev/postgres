@@ -20,6 +20,7 @@
 #include "access/spgist_private.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
@@ -127,18 +128,22 @@ spgbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	MemoryContextDelete(buildstate.tmpCtx);
 
-	SpGistUpdateMetaPage(index);
-
-	/*
-	 * We didn't write WAL records as we built the index, so if WAL-logging is
-	 * required, write all pages to the WAL now.
-	 */
-	if (RelationNeedsWAL(index))
+	INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
 	{
-		log_newpage_range(index, MAIN_FORKNUM,
-						  0, RelationGetNumberOfBlocks(index),
-						  true);
+		SpGistUpdateMetaPage(index);
+
+		/*
+		 * We didn't write WAL records as we built the index, so if
+		 * WAL-logging is required, write all pages to the WAL now.
+		 */
+		if (RelationNeedsWAL(index))
+		{
+			log_newpage_range(index, MAIN_FORKNUM,
+							  0, RelationGetNumberOfBlocks(index),
+							  true);
+		}
 	}
+	INDEX_BUILD_PHASE_END();
 
 	result = palloc0_object(IndexBuildResult);
 	result->heap_tuples = reltuples;

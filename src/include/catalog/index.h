@@ -26,6 +26,49 @@ typedef struct AttrMap AttrMap;
 
 #define DEFAULT_INDEX_TYPE	"btree"
 
+extern void index_build_allow_xmin_advance(bool reset_snapshots);
+
+/*
+ * State of a build phase that runs without a query snapshot; see
+ * index_build_phase_begin().
+ */
+typedef struct IndexBuildPhaseState
+{
+	bool		active;			/* does this build reset snapshots? */
+	bool		restore;		/* did we take a snapshot from the caller? */
+	Snapshot	snapshot;		/* snapshot supplied on demand, or NULL */
+} IndexBuildPhaseState;
+
+extern void index_build_phase_begin(IndexBuildPhaseState *phase,
+									bool reset_snapshots);
+extern void index_build_phase_end(IndexBuildPhaseState *phase);
+extern bool index_build_phase_supply_snapshot(void);
+extern void index_build_phase_reset(void);
+
+/*
+ * Bracket a part of an index build that works on data already collected by
+ * the heap scan -- sorting, merging, writing the index -- and therefore needs
+ * no snapshot of its own.  In a snapshot-resetting build no snapshot is held
+ * inside the region, so the xmin horizon can advance while it runs.
+ *
+ * Anything that does need a snapshot in there (an opclass support function
+ * executing SQL, say) is served one owned by the region, which is dropped
+ * when the region ends; tests attach an ERROR action to the injection points
+ * of index_build_phase_begin()/_supply_snapshot() to catch such cases.
+ *
+ * As with PG_TRY(), control must not leave the region with return or goto.
+ */
+#define INDEX_BUILD_PHASE_BEGIN(reset_snapshots) \
+	do { \
+		IndexBuildPhaseState _index_build_phase; \
+		index_build_phase_begin(&_index_build_phase, (reset_snapshots)); \
+		do {
+
+#define INDEX_BUILD_PHASE_END() \
+		} while (0); \
+		index_build_phase_end(&_index_build_phase); \
+	} while (0)
+
 /* Action code for index_set_state_flags */
 typedef enum
 {

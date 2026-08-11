@@ -39,6 +39,28 @@ SELECT injection_points_attach('bt_load_defer_unique_check', 'error');
  
 (1 row)
 
+-- No scenario below (until the cursor ones) is expected to leave xmin pinned
+-- when a build phase starts or ends; enforce that strictly.
+SELECT injection_points_attach('index_build_phase_entered_pinned', 'error');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+SELECT injection_points_attach('index_build_allow_xmin_advance_pinned', 'error');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+-- Nothing in the standard battery executes SQL in a phase that holds no
+-- snapshot, so the build must never have to supply one.
+SELECT injection_points_attach('index_build_phase_needs_snapshot', 'error');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
 CREATE SCHEMA cic_reset_snap;
 -- Rows are padded with a non-compressible attribute to get a platform
 -- independent layout of 7 rows per page: the 35-row table has 5 pages, so
@@ -356,6 +378,57 @@ CREATE INDEX CONCURRENTLY enum_idx ON cic_reset_snap.enum_tbl(c);
 NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
 RESET debug_discard_caches;
 DROP TABLE cic_reset_snap.enum_tbl;
+-- An opclass support function may itself execute SQL, and the phases that
+-- call it hold no snapshot: the region has to supply one on demand.  Watch
+-- that happen instead of treating it as a failure.
+SELECT injection_points_detach('index_build_phase_needs_snapshot');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
+SELECT injection_points_attach('index_build_phase_needs_snapshot', 'notice');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+CREATE FUNCTION cic_reset_snap.cmp_sql(int, int) RETURNS int IMMUTABLE
+LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE 'SELECT 1';
+    RETURN CASE WHEN $1 < $2 THEN -1 WHEN $1 > $2 THEN 1 ELSE 0 END;
+END; $$;
+CREATE OPERATOR CLASS cic_reset_snap.int4_sql_ops FOR TYPE int4 USING btree AS
+    OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+    FUNCTION 1 cic_reset_snap.cmp_sql(int, int);
+CREATE TABLE cic_reset_snap.opclass_tbl(i int);
+ALTER TABLE cic_reset_snap.opclass_tbl SET (parallel_workers=0);
+INSERT INTO cic_reset_snap.opclass_tbl SELECT g FROM generate_series(1, 200) g;
+CREATE INDEX CONCURRENTLY opclass_idx
+    ON cic_reset_snap.opclass_tbl(i cic_reset_snap.int4_sql_ops);
+NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
+NOTICE:  notice triggered for injection point index_build_phase_needs_snapshot
+REINDEX INDEX CONCURRENTLY cic_reset_snap.opclass_idx;
+NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
+NOTICE:  notice triggered for injection point index_build_phase_needs_snapshot
+DROP INDEX CONCURRENTLY cic_reset_snap.opclass_idx;
+-- The same in a parallel build.  The leader could fall back on the portal
+-- snapshot of the CREATE INDEX statement, at the price of pinning the horizon
+-- for the rest of the build, but a worker has no portal at all: the region is
+-- the only thing that can hand it one.  Which participant reaches the phase
+-- first varies, so stop reporting the supplied snapshots.
+SELECT injection_points_detach('index_build_phase_needs_snapshot');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
+ALTER TABLE cic_reset_snap.opclass_tbl SET (parallel_workers=2);
+CREATE INDEX CONCURRENTLY opclass_idx
+    ON cic_reset_snap.opclass_tbl(i cic_reset_snap.int4_sql_ops);
+NOTICE:  notice triggered for injection point table_parallelscan_initialize_reset_snapshot
+DROP TABLE cic_reset_snap.opclass_tbl;
 -- An "immutable" function may open and leak a cursor; read-only SPI borrows
 -- and registers the caller's (scan) snapshot, which then survives snapshot
 -- resets.  The build must degrade to keeping xmin rather than fail.
@@ -366,33 +439,48 @@ BEGIN
     IF i = at THEN OPEN c FOR SELECT 1; END IF;
     RETURN true;
 END; $$;
--- The leaked registration keeps xmin pinned across resets, so watch the
--- per-reset point instead of failing on it.
+-- The leaked registration keeps xmin pinned, so the pinned injection points
+-- fire; observe the phase-boundary one and mute the others.
+SELECT injection_points_detach('index_build_allow_xmin_advance_pinned');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
+SELECT injection_points_attach('index_build_allow_xmin_advance_pinned', 'notice');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+SELECT injection_points_detach('index_build_phase_entered_pinned');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
 SELECT injection_points_detach('heap_reset_scan_snapshot_xmin_pinned');
  injection_points_detach 
 -------------------------
  
 (1 row)
 
-SELECT injection_points_attach('heap_reset_scan_snapshot_xmin_pinned', 'notice');
- injection_points_attach 
--------------------------
- 
-(1 row)
-
 -- Small table: no snapshot reset happens after the cursor is opened, so the
--- build simply keeps the snapshot the cursor holds.
+-- leaked registration of the scan snapshot is seen at the end of the scan.
 CREATE TABLE cic_reset_snap.cur_small(i int);
 ALTER TABLE cic_reset_snap.cur_small SET (parallel_workers=0);
 INSERT INTO cic_reset_snap.cur_small SELECT g FROM generate_series(1, 10) g;
 CREATE INDEX CONCURRENTLY cur_small_idx ON cic_reset_snap.cur_small(i)
     WHERE cic_reset_snap.leak_cursor(i, 5);
 NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
+NOTICE:  notice triggered for injection point index_build_allow_xmin_advance_pinned
+NOTICE:  notice triggered for injection point index_build_allow_xmin_advance_pinned
+NOTICE:  notice triggered for injection point index_build_allow_xmin_advance_pinned
 DROP TABLE cic_reset_snap.cur_small;
 -- Larger table with a reset on every page: the leaked registration is seen
--- at the next snapshot reset.  Detach the point: the number of resets after
--- the cursor is opened depends on the page layout.
-SELECT injection_points_detach('heap_reset_scan_snapshot_xmin_pinned');
+-- at the next snapshot reset.  Detach the pinned point: the number of resets
+-- after the cursor is opened depends on the page layout.
+SELECT injection_points_detach('index_build_allow_xmin_advance_pinned');
  injection_points_detach 
 -------------------------
  
@@ -406,11 +494,13 @@ CREATE INDEX CONCURRENTLY cur_idx ON cic_reset_snap.cur_tbl(i)
 NOTICE:  notice triggered for injection point heap_beginscan_reset_snapshot
 DROP TABLE cic_reset_snap.cur_tbl;
 DROP SCHEMA cic_reset_snap CASCADE;
-NOTICE:  drop cascades to 5 other objects
+NOTICE:  drop cascades to 7 other objects
 DETAIL:  drop cascades to table cic_reset_snap.tbl
 drop cascades to function cic_reset_snap.predicate_stable(integer)
 drop cascades to function cic_reset_snap.predicate_stable_no_param()
 drop cascades to type cic_reset_snap.rainbow
+drop cascades to function cic_reset_snap.cmp_sql(integer,integer)
+drop cascades to operator family cic_reset_snap.int4_sql_ops for access method btree
 drop cascades to function cic_reset_snap.leak_cursor(integer,integer)
 SELECT injection_points_detach('heap_beginscan_reset_snapshot');
  injection_points_detach 

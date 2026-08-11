@@ -24,6 +24,7 @@
 #include "access/stratnum.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
@@ -196,11 +197,14 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 									   &buildstate, NULL);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL,
 								 buildstate.indtuples);
-
 	if (buildstate.spool)
 	{
 		/* sort the tuples and insert them into the index */
-		_h_indexbuild(buildstate.spool, buildstate.heapRel);
+		INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
+		{
+			_h_indexbuild(buildstate.spool, buildstate.heapRel);
+		}
+		INDEX_BUILD_PHASE_END();
 		_h_spooldestroy(buildstate.spool);
 	}
 

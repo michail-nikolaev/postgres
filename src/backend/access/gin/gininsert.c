@@ -713,7 +713,6 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	buildstate.bs_reset_snapshot = indexInfo->ii_ResetSnapshot;
 	ginInitBA(&buildstate.accum);
 
-
 	/* Report table scan phase started */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 								 PROGRESS_GIN_PHASE_INDEXBUILD_TABLESCAN);
@@ -777,11 +776,13 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			tuplesort_begin_index_gin(heap, index,
 									  maintenance_work_mem, coordinate,
 									  TUPLESORT_NONE);
-
-		/* scan the relation in parallel and merge per-worker results */
-		reltuples = _gin_parallel_merge(state);
-
-		_gin_end_parallel(state->bs_leader, state);
+		/* merge per-worker results */
+		INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
+		{
+			reltuples = _gin_parallel_merge(state);
+			_gin_end_parallel(state->bs_leader, state);
+		}
+		INDEX_BUILD_PHASE_END();
 	}
 	else						/* no parallel index build */
 	{
@@ -791,19 +792,22 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		 */
 		reltuples = table_index_build_scan(heap, index, indexInfo, false, true,
 										   ginBuildCallback, &buildstate, NULL);
-
 		/* dump remaining entries to the index */
-		oldCtx = MemoryContextSwitchTo(buildstate.tmpCtx);
-		ginBeginBAScan(&buildstate.accum);
-		while ((list = ginGetBAEntry(&buildstate.accum,
-									 &attnum, &key, &category, &nlist)) != NULL)
+		INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
 		{
-			/* there could be many entries, so be willing to abort here */
-			CHECK_FOR_INTERRUPTS();
-			ginEntryInsert(&buildstate.ginstate, attnum, key, category,
-						   list, nlist, &buildstate.buildStats);
+			oldCtx = MemoryContextSwitchTo(buildstate.tmpCtx);
+			ginBeginBAScan(&buildstate.accum);
+			while ((list = ginGetBAEntry(&buildstate.accum,
+										 &attnum, &key, &category, &nlist)) != NULL)
+			{
+				/* there could be many entries, so be willing to abort here */
+				CHECK_FOR_INTERRUPTS();
+				ginEntryInsert(&buildstate.ginstate, attnum, key, category,
+							   list, nlist, &buildstate.buildStats);
+			}
+			MemoryContextSwitchTo(oldCtx);
 		}
-		MemoryContextSwitchTo(oldCtx);
+		INDEX_BUILD_PHASE_END();
 	}
 
 	MemoryContextDelete(buildstate.funcCtx);
@@ -2139,19 +2143,22 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, progress,
 									   ginBuildCallbackParallel, state, scan);
+	INDEX_BUILD_PHASE_BEGIN(pscan->phs_reset_snapshot);
+	{
+		/* write remaining accumulated entries */
+		ginFlushBuildState(state, index);
 
-	/* write remaining accumulated entries */
-	ginFlushBuildState(state, index);
+		/*
+		 * Do the first phase of in-worker processing - sort the data produced
+		 * by the callback, and combine them into much larger chunks and place
+		 * that into the shared tuplestore for leader to process.
+		 */
+		_gin_process_worker_data(state, state->bs_worker_sort, progress);
 
-	/*
-	 * Do the first phase of in-worker processing - sort the data produced by
-	 * the callback, and combine them into much larger chunks and place that
-	 * into the shared tuplestore for leader to process.
-	 */
-	_gin_process_worker_data(state, state->bs_worker_sort, progress);
-
-	/* sort the GIN tuples built by this worker */
-	tuplesort_performsort(state->bs_sortstate);
+		/* sort the GIN tuples built by this worker */
+		tuplesort_performsort(state->bs_sortstate);
+	}
+	INDEX_BUILD_PHASE_END();
 
 	state->bs_reltuples += reltuples;
 
@@ -2168,7 +2175,6 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 	ConditionVariableSignal(&ginshared->workersdonecv);
 
 	tuplesort_end(state->bs_sortstate);
-
 }
 
 /*

@@ -1508,6 +1508,160 @@ index_create_copy(Relation heapRelation, uint16 flags,
 }
 
 /*
+ * index_build_allow_xmin_advance
+ *
+ * Drop the catalog snapshot (if any) so it does not pin the xmin horizon,
+ * and verify that a concurrent index build using snapshot resets is not
+ * otherwise pinning the horizon at this point.
+ *
+ * Support functions invoked by the preceding build phase (tuplesort
+ * comparators, opclass support functions, ...) may take a catalog snapshot
+ * at any time through a syscache miss, and that snapshot keeps MyProc->xmin
+ * set.  It is legitimate transient state, so release it here, at the phase
+ * boundary.
+ *
+ * After that we would like to assert that xmin is no longer set, but it may
+ * legitimately remain pinned by someone still holding a registered or
+ * active snapshot: for example, user code in an index expression may have
+ * opened a cursor, and read-only SPI queries register the caller's snapshot
+ * for as long as the cursor stays open.  That only means the horizon cannot
+ * advance -- it is not a bug in the build machinery, so no assertion is
+ * made.  The strict expectation is testable instead: whenever xmin stays
+ * pinned, the index_build_allow_xmin_advance_pinned injection point fires,
+ * and tests attach an ERROR action to it where no pinning is expected.
+ */
+void
+index_build_allow_xmin_advance(bool reset_snapshots)
+{
+	if (!reset_snapshots)
+		return;
+
+	InvalidateCatalogSnapshot();
+#ifdef USE_INJECTION_POINTS
+	if (TransactionIdIsValid(MyProc->xmin))
+		INJECTION_POINT("index_build_allow_xmin_advance_pinned", NULL);
+#endif
+}
+
+/*
+ * The innermost index build phase running without a query snapshot, or NULL.
+ * Regions do not nest.
+ */
+static IndexBuildPhaseState *IndexBuildCurrentPhase = NULL;
+
+/*
+ * index_build_phase_begin
+ *
+ * Enter a region that needs no snapshot of its own; see
+ * INDEX_BUILD_PHASE_BEGIN().
+ */
+void
+index_build_phase_begin(IndexBuildPhaseState *phase, bool reset_snapshots)
+{
+	phase->active = reset_snapshots;
+	phase->restore = false;
+	phase->snapshot = NULL;
+	if (!reset_snapshots)
+		return;
+
+	/* A syscache miss in the previous phase may have left one behind. */
+	InvalidateCatalogSnapshot();
+
+	Assert(IndexBuildCurrentPhase == NULL);
+
+	/*
+	 * A concurrent build carries one active snapshot from phase to phase: the
+	 * one the heap scan ended with, or the one handed back by the region
+	 * before this one.  Nothing in here needs it, so take it away for the
+	 * duration of the region and give an equivalent back at the end.
+	 */
+	phase->restore = ActiveSnapshotSet();
+	if (phase->restore)
+		PopActiveSnapshot();
+
+	IndexBuildCurrentPhase = phase;
+
+#ifdef USE_INJECTION_POINTS
+	if (TransactionIdIsValid(MyProc->xmin))
+		INJECTION_POINT("index_build_phase_entered_pinned", NULL);
+#endif
+}
+
+/*
+ * index_build_phase_end
+ *
+ * Leave the region, dropping the snapshot it lent out, if any.
+ */
+void
+index_build_phase_end(IndexBuildPhaseState *phase)
+{
+	if (!phase->active)
+		return;
+
+	Assert(IndexBuildCurrentPhase == phase);
+	IndexBuildCurrentPhase = NULL;
+
+	if (phase->snapshot != NULL)
+	{
+		Assert(GetActiveSnapshot() == phase->snapshot);
+		PopActiveSnapshot();
+		UnregisterSnapshot(phase->snapshot);
+		phase->snapshot = NULL;
+	}
+
+	InvalidateCatalogSnapshot();
+#ifdef USE_INJECTION_POINTS
+	if (TransactionIdIsValid(MyProc->xmin))
+		INJECTION_POINT("index_build_allow_xmin_advance_pinned", NULL);
+#endif
+
+	/*
+	 * Hand a snapshot back in place of the one we took, so that the build
+	 * finds the stack as it left it.  Only the entry matters, not which
+	 * snapshot it holds: anything the caller kept from before the region
+	 * cannot depend on it, or the region could not have run without one.
+	 */
+	if (phase->restore)
+		PushActiveSnapshot(GetTransactionSnapshot());
+}
+
+/*
+ * index_build_phase_supply_snapshot
+ *
+ * Provide a snapshot to code that turns out to need one inside a region,
+ * instead of letting it attach one to the portal (which would outlive the
+ * region) or fail outright (which is what happens in a parallel worker,
+ * where there is no portal at all).  Returns false if we are not in a
+ * region, leaving the caller to its usual behavior.
+ */
+bool
+index_build_phase_supply_snapshot(void)
+{
+	IndexBuildPhaseState *phase = IndexBuildCurrentPhase;
+
+	if (phase == NULL || phase->snapshot != NULL)
+		return false;
+
+	INJECTION_POINT("index_build_phase_needs_snapshot", NULL);
+
+	phase->snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(phase->snapshot);
+	return true;
+}
+
+/*
+ * index_build_phase_reset
+ *
+ * Forget the current region at transaction abort; its snapshots are
+ * released by the transaction machinery.
+ */
+void
+index_build_phase_reset(void)
+{
+	IndexBuildCurrentPhase = NULL;
+}
+
+/*
  * index_concurrently_build
  *
  * Build index for a concurrent operation.  Low-level locks are taken when
@@ -1562,6 +1716,8 @@ index_concurrently_build(Oid heapRelationId,
 
 	/* Now build the index */
 	index_build(heapRel, indexRelation, indexInfo, false, true, true);
+
+	index_build_allow_xmin_advance(indexInfo->ii_ResetSnapshot);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -3195,10 +3351,10 @@ index_build(Relation heapRelation,
 
 	/*
 	 * Run the build under an active snapshot, as any other index operation
-	 * would.  A snapshot-resetting build is the exception: an ambient
-	 * snapshot would pin the xmin horizon for the whole build, so its heap
-	 * scan establishes the active snapshot itself, replacing it as the scan
-	 * proceeds, and leaves the last one behind for the phases that follow.
+	 * would.  Snapshot-resetting builds are the exception: an ambient
+	 * snapshot would pin xmin for the whole build, so there the scan
+	 * machinery manages the active stack itself and the build runs without
+	 * one.
 	 */
 	if (indexInfo->ii_Concurrent && !indexInfo->ii_ResetSnapshot)
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -3210,9 +3366,16 @@ index_build(Relation heapRelation,
 											 indexInfo);
 	Assert(stats);
 
-	/* Drop the snapshot the build ran under, whoever established it. */
+	/*
+	 * Drop the snapshot the build ran under: either the one pushed above, or
+	 * the one the heap scan left active and the build phases handed back.
+	 */
 	if (indexInfo->ii_Concurrent)
+	{
+		Assert(ActiveSnapshotSet());
 		PopActiveSnapshot();
+	}
+	Assert(!indexInfo->ii_Concurrent || !ActiveSnapshotSet());
 
 	/*
 	 * If this is an unlogged index, we may need to write out an init fork for

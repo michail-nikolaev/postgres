@@ -1276,10 +1276,13 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		state->bs_sortstate =
 			tuplesort_begin_index_brin(maintenance_work_mem, coordinate,
 									   TUPLESORT_NONE);
-		/* scan the relation and merge per-worker results */
-		reltuples = _brin_parallel_merge(state);
-
-		_brin_end_parallel(state->bs_leader, state);
+		/* merge per-worker results */
+		INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
+		{
+			reltuples = _brin_parallel_merge(state);
+			_brin_end_parallel(state->bs_leader, state);
+		}
+		INDEX_BUILD_PHASE_END();
 	}
 	else						/* no parallel index build */
 	{
@@ -1293,7 +1296,7 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 										   brinbuildCallback, state, NULL);
 
 		/*
-		 * process the final batch
+		 * Process the final batch.
 		 *
 		 * XXX Note this does not update state->bs_currRangeStart, i.e. it
 		 * stays set to the last range added to the index. This is OK, because
@@ -1301,16 +1304,20 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		 */
 		form_and_insert_tuple(state);
 
-		/*
-		 * Backfill the final ranges with empty data.
-		 *
-		 * This saves us from doing what amounts to full table scans when the
-		 * index with a predicate like WHERE (nonnull_column IS NULL), or
-		 * other very selective predicates.
-		 */
-		brin_fill_empty_ranges(state,
-							   state->bs_currRangeStart,
-							   state->bs_maxRangeStart);
+		INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
+		{
+			/*
+			 * Backfill the final ranges with empty data.
+			 *
+			 * This saves us from doing what amounts to full table scans when
+			 * the index with a predicate like WHERE (nonnull_column IS NULL),
+			 * or other very selective predicates.
+			 */
+			brin_fill_empty_ranges(state,
+								   state->bs_currRangeStart,
+								   state->bs_maxRangeStart);
+		}
+		INDEX_BUILD_PHASE_END();
 	}
 
 	/* release resources */
@@ -2941,12 +2948,18 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 
 	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
 									   brinbuildCallbackParallel, state, scan);
-
-	/* insert the last item */
+	/*
+	 * Insert the last item.  Like the serial build, this still needs the
+	 * snapshot the scan ended with.
+	 */
 	form_and_spill_tuple(state);
 
-	/* sort the BRIN ranges built by this worker */
-	tuplesort_performsort(state->bs_sortstate);
+	INDEX_BUILD_PHASE_BEGIN(pscan->phs_reset_snapshot);
+	{
+		/* sort the BRIN ranges built by this worker */
+		tuplesort_performsort(state->bs_sortstate);
+	}
+	INDEX_BUILD_PHASE_END();
 
 	state->bs_reltuples += reltuples;
 
@@ -2963,7 +2976,6 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 	ConditionVariableSignal(&brinshared->workersdonecv);
 
 	tuplesort_end(state->bs_sortstate);
-
 }
 
 /*

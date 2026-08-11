@@ -16,6 +16,7 @@
 #include "access/generic_xlog.h"
 #include "access/tableam.h"
 #include "bloom.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
@@ -146,8 +147,12 @@ blbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 									   NULL);
 
 	/* Flush last page if needed (it will be, unless heap was empty) */
-	if (buildstate.count > 0)
-		flushCachedPage(index, &buildstate);
+	INDEX_BUILD_PHASE_BEGIN(indexInfo->ii_ResetSnapshot);
+	{
+		if (buildstate.count > 0)
+			flushCachedPage(index, &buildstate);
+	}
+	INDEX_BUILD_PHASE_END();
 
 	MemoryContextDelete(buildstate.tmpCtx);
 

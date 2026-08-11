@@ -567,14 +567,23 @@ _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2, bool reset_snapshots)
 	/* Execute the sort */
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 								 PROGRESS_BTREE_PHASE_PERFORMSORT_1);
-	tuplesort_performsort(btspool->sortstate);
-	if (btspool2)
+	INDEX_BUILD_PHASE_BEGIN(reset_snapshots);
 	{
-		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
-									 PROGRESS_BTREE_PHASE_PERFORMSORT_2);
-		tuplesort_performsort(btspool2->sortstate);
+		tuplesort_performsort(btspool->sortstate);
+		if (btspool2)
+		{
+			pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
+										 PROGRESS_BTREE_PHASE_PERFORMSORT_2);
+			tuplesort_performsort(btspool2->sortstate);
+		}
 	}
+	INDEX_BUILD_PHASE_END();
 
+	/*
+	 * Look up everything the load needs while the build still holds a
+	 * snapshot: these do syscache lookups and call an opclass support
+	 * function.
+	 */
 	wstate.heap = btspool->heap;
 	wstate.index = btspool->index;
 	wstate.inskey = _bt_mkscankey(wstate.index, NULL);
@@ -586,7 +595,11 @@ _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2, bool reset_snapshots)
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 								 PROGRESS_BTREE_PHASE_LEAF_LOAD);
-	_bt_load(&wstate, btspool, btspool2);
+	INDEX_BUILD_PHASE_BEGIN(reset_snapshots);
+	{
+		_bt_load(&wstate, btspool, btspool2);
+	}
+	INDEX_BUILD_PHASE_END();
 }
 
 /*
@@ -2134,14 +2147,18 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 									 PROGRESS_BTREE_PHASE_PERFORMSORT_1);
-	tuplesort_performsort(btspool->sortstate);
-	if (btspool2)
+	INDEX_BUILD_PHASE_BEGIN(pscan->phs_reset_snapshot);
 	{
-		if (progress)
-			pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
-										 PROGRESS_BTREE_PHASE_PERFORMSORT_2);
-		tuplesort_performsort(btspool2->sortstate);
+		tuplesort_performsort(btspool->sortstate);
+		if (btspool2)
+		{
+			if (progress)
+				pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
+											 PROGRESS_BTREE_PHASE_PERFORMSORT_2);
+			tuplesort_performsort(btspool2->sortstate);
+		}
 	}
+	INDEX_BUILD_PHASE_END();
 
 	/*
 	 * Done.  Record ambuild statistics, and whether we encountered a broken
@@ -2164,5 +2181,4 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	tuplesort_end(btspool->sortstate);
 	if (btspool2)
 		tuplesort_end(btspool2->sortstate);
-
 }
