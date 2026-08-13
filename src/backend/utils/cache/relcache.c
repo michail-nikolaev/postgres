@@ -5855,7 +5855,14 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 
 		/* Add publications that the ancestors are in too. */
 		ancestors = get_partition_ancestors(relid);
-		last_ancestor_relid = llast_oid(ancestors);
+
+		/*
+		 * A partition whose concurrent detach has been committed but not
+		 * finalized reports no ancestors, even though relispartition is still
+		 * set.  Fall back to the partition itself, which is what it will be
+		 * once the detach completes.
+		 */
+		last_ancestor_relid = ancestors != NIL ? llast_oid(ancestors) : relid;
 
 		foreach(lc, ancestors)
 		{

@@ -37,6 +37,8 @@ step s1insert		{ INSERT INTO d3_listp VALUES (1); }
 step s1insertpart	{ INSERT INTO d3_listp1 VALUES (1); }
 step s1sid			{ SELECT * FROM d3_idp; }
 step s1insertidpart	{ INSERT INTO d3_idp1 (a) VALUES (1) RETURNING b; }
+step s1updpart		{ UPDATE d3_listp1 SET a = 1; }
+step s1delpart		{ DELETE FROM d3_listp1; }
 step s1drop			{ DROP TABLE d3_listp; }
 step s1droppart		{ DROP TABLE d3_listp1; }
 step s1trunc		{ TRUNCATE TABLE d3_listp; }
@@ -65,6 +67,11 @@ permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s1insertpart
 # The sequence behind an identity column lives in the topmost ancestor, and a
 # partition pending detach has none.
 permutation s2snitch s1b s1sid s2detachid s1cancel(s2detachid) s1c s1insertidpart
+
+# Deciding whether the relation is published made the same assumption, and
+# every UPDATE and DELETE of a publishable relation goes through it.
+permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s1updpart
+permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s1delpart
 
 # Test partition descriptor caching
 permutation s2snitch s1b s1s s2detach2 s1cancel(s2detach2) s1c s1brr s1insert s1s s1insert s1c
