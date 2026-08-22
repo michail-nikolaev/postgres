@@ -65,6 +65,7 @@
 #include "utils/builtins.h"
 #include "utils/combocid.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/relmapper.h"
@@ -1378,6 +1379,12 @@ RecordTransactionCommit(void)
 	wrote_xlog = (XactLastRecEnd != 0);
 
 	/*
+	 * Load the injection point before entering the critical section below:
+	 * the injection point machinery cannot allocate memory there.
+	 */
+	INJECTION_POINT_LOAD("commit-before-clog-update");
+
+	/*
 	 * If we haven't been assigned an XID yet, we neither can, nor do we want
 	 * to write a COMMIT record.
 	 */
@@ -1542,6 +1549,14 @@ RecordTransactionCommit(void)
 		forceSyncCommit || nrels > 0)
 	{
 		XLogFlush(XactLastRecEnd);
+
+		/*
+		 * The transaction is durably committed as far as WAL is concerned,
+		 * but CLOG does not know about it yet.  Consumers that derive
+		 * transaction status from WAL, i.e. logical decoding, can observe
+		 * that disagreement here.
+		 */
+		INJECTION_POINT_CACHED("commit-before-clog-update", NULL);
 
 		/*
 		 * Now we may update the CLOG, if we wrote a COMMIT record above

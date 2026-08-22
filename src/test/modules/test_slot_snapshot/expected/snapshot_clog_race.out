@@ -1,0 +1,149 @@
+Parsed test spec with 5 sessions
+
+starting permutation: s1_xid s2_import s3_xid s1_rollback s3_rollback s4_change s5_wake_snapbuild s2_scan s2_rollback s5_wake_clog s1_check
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_xid: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step s2_import: 
+	BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+	SET TRANSACTION SNAPSHOT 'logical-slot:race_slot';
+ <waiting ...>
+step s3_xid: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step s1_rollback: ROLLBACK;
+step s3_rollback: ROLLBACK;
+step s4_change: 
+	INSERT INTO tbl VALUES (3, 30);
+	UPDATE tbl SET j = j + 1 WHERE i = 1;
+	DELETE FROM tbl WHERE i = 2;
+ <waiting ...>
+step s5_wake_snapbuild: SELECT injection_points_wakeup('snapbuild-full-snapshot');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_import: <... completed>
+step s2_scan: SELECT i, j FROM tbl ORDER BY i;
+i| j
+-+--
+1|10
+2|20
+(2 rows)
+
+step s2_rollback: ROLLBACK;
+step s5_wake_clog: SELECT injection_points_wakeup('commit-before-clog-update');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_check: SELECT i, j FROM tbl ORDER BY i;
+i| j
+-+--
+1|10
+2|20
+(2 rows)
+
+step s4_change: <... completed>
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: s1_xid s2_import s3_xid s1_rollback s3_rollback s4_change s5_wake_clog s5_wake_snapbuild s2_scan s2_rollback s1_check
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_xid: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step s2_import: 
+	BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+	SET TRANSACTION SNAPSHOT 'logical-slot:race_slot';
+ <waiting ...>
+step s3_xid: BEGIN; SELECT pg_current_xact_id() IS NOT NULL AS has_xid;
+has_xid
+-------
+t      
+(1 row)
+
+step s1_rollback: ROLLBACK;
+step s3_rollback: ROLLBACK;
+step s4_change: 
+	INSERT INTO tbl VALUES (3, 30);
+	UPDATE tbl SET j = j + 1 WHERE i = 1;
+	DELETE FROM tbl WHERE i = 2;
+ <waiting ...>
+step s5_wake_clog: SELECT injection_points_wakeup('commit-before-clog-update');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s4_change: <... completed>
+step s5_wake_snapbuild: SELECT injection_points_wakeup('snapbuild-full-snapshot');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s2_import: <... completed>
+step s2_scan: SELECT i, j FROM tbl ORDER BY i;
+i| j
+-+--
+1|11
+3|30
+(2 rows)
+
+step s2_rollback: ROLLBACK;
+step s1_check: SELECT i, j FROM tbl ORDER BY i;
+i| j
+-+--
+1|11
+3|30
+(2 rows)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

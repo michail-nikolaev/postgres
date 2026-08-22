@@ -141,6 +141,7 @@
 #include "storage/procarray.h"
 #include "storage/standby.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/snapshot.h"
@@ -1392,6 +1393,8 @@ SnapBuildFindSnapshot(SnapBuild *builder, XLogRecPtr lsn, xl_running_xacts *runn
 					   LSN_FORMAT_ARGS(lsn)),
 				errdetail("Waiting for transactions (approximately %d) older than %u to end.",
 						  running->xcnt, running->nextXid));
+
+		INJECTION_POINT("snapbuild-full-snapshot", NULL);
 
 		SnapBuildWaitSnapshot(running, running->nextXid);
 	}
