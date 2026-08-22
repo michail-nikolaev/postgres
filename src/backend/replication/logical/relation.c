@@ -791,7 +791,8 @@ FindUsableIndexForReplicaIdentityFull(Relation localrel, AttrMap *attrmap)
 		Relation	idxRel;
 
 		idxRel = index_open(idxoid, AccessShareLock);
-		isUsableIdx = IsIndexUsableForReplicaIdentityFull(idxRel, attrmap);
+		isUsableIdx = idxRel->rd_index->indisvalid &&
+			IsIndexUsableForReplicaIdentityFull(idxRel, attrmap);
 		index_close(idxRel, AccessShareLock);
 
 		/* Return the first eligible index found */
