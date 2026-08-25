@@ -31,6 +31,7 @@
 #include "replication/logicalrelation.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -380,6 +381,13 @@ retry:
 	/* Try to find the tuple */
 	while (table_scan_getnextslot(scan, ForwardScanDirection, scanslot))
 	{
+		/*
+		 * The scan has released the buffer lock on the page holding the tuple
+		 * just returned, so a concurrent update may place a new version of
+		 * some other row at an offset this scan has already passed.
+		 */
+		INJECTION_POINT("relation_find_repl_tuple_seq_scanned", NULL);
+
 		if (!tuples_equal(scanslot, searchslot, eq, NULL))
 			continue;
 
@@ -403,7 +411,6 @@ retry:
 							   LockWaitBlock,
 							   0 /* don't follow updates */ ,
 							   &tmfd);
-
 
 		if (should_refetch_tuple(res, &tmfd))
 		{
