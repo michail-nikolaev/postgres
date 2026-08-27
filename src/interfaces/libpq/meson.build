@@ -166,6 +166,7 @@ tests += {
       'with_ssl': ssl_library,
       'with_gssapi': gssapi.found() ? 'yes' : 'no',
       'with_krb_srvnam': 'postgres',
+      'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
     },
     'deps': libpq_test_deps,
   },

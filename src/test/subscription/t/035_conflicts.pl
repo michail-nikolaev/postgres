@@ -414,7 +414,8 @@ $node_A->safe_psql('postgres',
 # RecordTransactionCommitPrepared.
 ###############################################################################
 
-my $injection_points_supported = $node_B->check_extension('injection_points');
+my $injection_points_supported = $ENV{enable_injection_points} eq 'yes'
+  && $node_B->check_extension('injection_points');
 
 # This test depends on an injection point to block the prepared transaction
 # commit after marking DELAY_CHKPT_IN_COMMIT flag.

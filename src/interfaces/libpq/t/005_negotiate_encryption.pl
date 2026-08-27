@@ -152,7 +152,8 @@ $node->start;
 # Check if the extension injection_points is available, as it may be
 # possible that this script is run with installcheck, where the module
 # would not be installed by default.
-my $injection_points_supported = $node->check_extension('injection_points');
+my $injection_points_supported = $ENV{enable_injection_points} eq 'yes'
+  && $node->check_extension('injection_points');
 
 $node->safe_psql('postgres', 'CREATE USER localuser;');
 $node->safe_psql('postgres', 'CREATE USER testuser;');

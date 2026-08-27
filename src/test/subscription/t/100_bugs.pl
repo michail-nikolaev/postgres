@@ -679,7 +679,8 @@ $node_subscriber->start;
 SKIP:
 {
 	skip "injection points not supported by this build", 1
-	  if $node_subscriber->check_extension('injection_points') == 0;
+	  if $ENV{enable_injection_points} ne 'yes'
+	  || $node_subscriber->check_extension('injection_points') == 0;
 
 	# Test that ALTER SUBSCRIPTION ... REFRESH PUBLICATION skips a subscribed
 	# relation that is dropped concurrently during the refresh.
