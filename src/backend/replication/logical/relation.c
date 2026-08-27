@@ -55,8 +55,7 @@ typedef struct LogicalRepPartMapEntry
 	LogicalRepRelMapEntry relmapentry;
 } LogicalRepPartMapEntry;
 
-static Oid	FindLogicalRepLocalIndex(Relation localrel, LogicalRepRelation *remoterel,
-									 AttrMap *attrMap);
+static void FindLogicalRepLocalIndex(LogicalRepRelMapEntry *entry);
 
 /*
  * Relcache invalidation callback for our relation map cache.
@@ -496,8 +495,7 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 		 * of the relation cache entry (such as ANALYZE or CREATE/DROP index
 		 * on the relation).
 		 */
-		entry->localindexoid = FindLogicalRepLocalIndex(entry->localrel, remoterel,
-														entry->attrmap);
+		FindLogicalRepLocalIndex(entry);
 
 		entry->localrelvalid = true;
 	}
@@ -763,8 +761,7 @@ logicalrep_partition_open(LogicalRepRelMapEntry *root,
 	 * We also prefer to run this code on the oldctx so that we do not leak
 	 * anything in the LogicalRepPartMapContext (hence CacheMemoryContext).
 	 */
-	entry->localindexoid = FindLogicalRepLocalIndex(partrel, remoterel,
-													entry->attrmap);
+	FindLogicalRepLocalIndex(entry);
 
 	entry->localrelvalid = true;
 
@@ -923,30 +920,39 @@ GetRelationIdentityOrPK(Relation rel)
 }
 
 /*
- * Returns the index oid if we can use an index for subscriber. Otherwise,
- * returns InvalidOid.
+ * Sets entry->localindexoid to the index oid if we can use an index for
+ * subscriber. Otherwise, sets it to InvalidOid.
+ *
+ * entry->idxisreplident is set to whether that index was chosen as the
+ * relation's replica identity or primary key, rather than as one usable
+ * for a REPLICA IDENTITY FULL remote relation.
  */
-static Oid
-FindLogicalRepLocalIndex(Relation localrel, LogicalRepRelation *remoterel,
-						 AttrMap *attrMap)
+static void
+FindLogicalRepLocalIndex(LogicalRepRelMapEntry *entry)
 {
-	Oid			idxoid;
+	Relation	localrel = entry->localrel;
+
+	entry->localindexoid = InvalidOid;
+	entry->idxisreplident = false;
 
 	/*
 	 * We never need index oid for partitioned tables, always rely on leaf
 	 * partition's index.
 	 */
 	if (localrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-		return InvalidOid;
+		return;
 
 	/*
 	 * Simple case, we already have a primary key or a replica identity index.
 	 */
-	idxoid = GetRelationIdentityOrPK(localrel);
-	if (OidIsValid(idxoid))
-		return idxoid;
+	entry->localindexoid = GetRelationIdentityOrPK(localrel);
+	if (OidIsValid(entry->localindexoid))
+	{
+		entry->idxisreplident = true;
+		return;
+	}
 
-	if (remoterel->replident == REPLICA_IDENTITY_FULL)
+	if (entry->remoterel.replident == REPLICA_IDENTITY_FULL)
 	{
 		/*
 		 * We are looking for one more opportunity for using an index. If
@@ -963,8 +969,7 @@ FindLogicalRepLocalIndex(Relation localrel, LogicalRepRelation *remoterel,
 		 * long run or use the full-fledged planner which could cause
 		 * overhead.
 		 */
-		return FindUsableIndexForReplicaIdentityFull(localrel, attrMap);
+		entry->localindexoid =
+			FindUsableIndexForReplicaIdentityFull(localrel, entry->attrmap);
 	}
-
-	return InvalidOid;
 }

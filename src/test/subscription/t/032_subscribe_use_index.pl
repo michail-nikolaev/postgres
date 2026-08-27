@@ -606,6 +606,218 @@ $node_subscriber->safe_psql('postgres', "DROP TABLE test_replica_id_full");
 # Testcase end: Subscription can use hash index
 # =============================================================================
 
+# =============================================================================
+# Testcase start: Subscription keeps using an index that concurrent DDL has
+# demoted from replica identity
+#
+# REINDEX CONCURRENTLY and DROP INDEX CONCURRENTLY hold locks that do not
+# conflict with the apply worker's, so either can commit after the worker has
+# taken the index out of its relation map entry.  The index goes on finding
+# the row, so the change must still be applied through it, not dropped as a
+# missing-tuple conflict.
+
+SKIP:
+{
+	skip 'Injection points not supported by this build', 8
+	  unless $ENV{enable_injection_points} eq 'yes';
+	skip 'Extension injection_points not installed', 8
+	  unless $node_subscriber->check_extension('injection_points');
+
+	$node_subscriber->safe_psql('postgres',
+		'CREATE EXTENSION injection_points');
+
+	# create tables pub and sub
+	$node_publisher->safe_psql('postgres',
+		"CREATE TABLE test_reindex (x int PRIMARY KEY, y int)");
+	$node_subscriber->safe_psql('postgres',
+		"CREATE TABLE test_reindex (x int PRIMARY KEY, y int)");
+
+	# insert some initial data
+	$node_publisher->safe_psql('postgres',
+		"INSERT INTO test_reindex SELECT i, i FROM generate_series(1,20) i");
+
+	# create pub/sub
+	$node_publisher->safe_psql('postgres',
+		"CREATE PUBLICATION tap_pub_reindex FOR TABLE test_reindex");
+	$node_subscriber->safe_psql('postgres',
+		"CREATE SUBSCRIPTION tap_sub_reindex CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub_reindex"
+	);
+
+	# wait for initial table synchronization to finish
+	$node_subscriber->wait_for_subscription_sync($node_publisher, $appname);
+
+	my $old_index_oid = $node_subscriber->safe_psql('postgres',
+		"SELECT 'test_reindex_pkey'::regclass::oid");
+
+	# The rebuild goes first and stops at the swap.  The other order does
+	# not work: REINDEX CONCURRENTLY waits for older snapshots, so a worker
+	# paused mid-transaction would block it rather than race it.
+	my $reindex = $node_subscriber->background_psql('postgres');
+	$reindex->query_safe(
+		q[
+		SELECT injection_points_set_local();
+		SELECT injection_points_attach('reindex-relation-concurrently-before-swap', 'wait');
+	]);
+	$reindex->query_until(
+		qr/starting_reindex/, q[
+		\echo starting_reindex
+		REINDEX INDEX CONCURRENTLY test_reindex_pkey;
+	]);
+	$node_subscriber->wait_for_event('client backend',
+		'reindex-relation-concurrently-before-swap');
+
+	# Now let the worker take the index and stop before opening the
+	# relation's indexes.  The point is attached server-wide: the apply
+	# worker is not a session this test can attach anything in.
+	$node_subscriber->safe_psql('postgres',
+		"SELECT injection_points_attach('apply-update-before-open-indices', 'wait')"
+	);
+
+	$node_publisher->safe_psql('postgres',
+		"UPDATE test_reindex SET y = 99 WHERE x = 7");
+
+	$node_subscriber->wait_for_event(
+		'logical replication apply worker',
+		'apply-update-before-open-indices');
+
+	# Let the rebuild swap the index.  Only the swap is needed: dropping the
+	# old index waits for the apply worker's lock anyway.
+	$node_subscriber->safe_psql('postgres',
+		"SELECT injection_points_wakeup('reindex-relation-concurrently-before-swap')"
+	);
+	$node_subscriber->poll_query_until('postgres',
+		"SELECT 'test_reindex_pkey'::regclass::oid <> $old_index_oid")
+	  or die "timed out waiting for the identity index to be swapped";
+
+	# Release the worker.  The index it holds is no longer the identity.
+	$node_subscriber->safe_psql(
+		'postgres',
+		"SELECT injection_points_wakeup('apply-update-before-open-indices');
+		 SELECT injection_points_detach('apply-update-before-open-indices');"
+	);
+	ok($reindex->quit, 'REINDEX CONCURRENTLY completes');
+
+	$node_publisher->wait_for_catchup($appname);
+
+	# The update must have been applied, not dropped as a missing tuple.
+	$result = $node_subscriber->safe_psql('postgres',
+		"SELECT y FROM test_reindex WHERE x = 7");
+	is($result, qq(99), 'update applied through the index in force now');
+
+	# And the worker is still alive to apply the next one.
+	$node_publisher->safe_psql('postgres',
+		"UPDATE test_reindex SET y = 123 WHERE x = 8");
+	$node_publisher->wait_for_catchup($appname);
+	$result = $node_subscriber->safe_psql('postgres',
+		"SELECT y FROM test_reindex WHERE x = 8");
+	is($result, qq(123), 'replication continues');
+
+	# The same window without a rebuild: DROP INDEX CONCURRENTLY clears
+	# indisvalid and indisreplident and commits that before waiting for the
+	# lock apply holds, leaving relreplident set to 'i' with no index
+	# claiming to be that identity.  The drop gets no further while apply
+	# holds the table, so the index is still complete and maintained.
+	$node_publisher->safe_psql(
+		'postgres', q[
+		CREATE TABLE test_dropri (x int NOT NULL, y int);
+		CREATE UNIQUE INDEX test_dropri_ri ON test_dropri (x);
+		ALTER TABLE test_dropri REPLICA IDENTITY USING INDEX test_dropri_ri;
+		INSERT INTO test_dropri SELECT i, i FROM generate_series(1,20) i;
+		CREATE PUBLICATION tap_pub_dropri FOR TABLE test_dropri;
+	]);
+	$node_subscriber->safe_psql(
+		'postgres', q[
+		CREATE TABLE test_dropri (x int NOT NULL, y int);
+		CREATE UNIQUE INDEX test_dropri_ri ON test_dropri (x);
+		ALTER TABLE test_dropri REPLICA IDENTITY USING INDEX test_dropri_ri;
+	]);
+	$node_subscriber->safe_psql('postgres',
+		"CREATE SUBSCRIPTION tap_sub_dropri CONNECTION '$publisher_connstr application_name=dropri' PUBLICATION tap_pub_dropri"
+	);
+	$node_subscriber->wait_for_subscription_sync($node_publisher, 'dropri');
+
+	$node_subscriber->safe_psql('postgres',
+		"SELECT injection_points_attach('apply-update-before-open-indices', 'wait')"
+	);
+	$node_publisher->safe_psql('postgres',
+		"UPDATE test_dropri SET y = 99 WHERE x = 7");
+	$node_subscriber->wait_for_event(
+		'logical replication apply worker',
+		'apply-update-before-open-indices');
+
+	# This commits the loss of the replica identity, then parks waiting for
+	# the apply worker's lock on the table.
+	my $log_offset = -s $node_subscriber->logfile;
+	my $drop = $node_subscriber->background_psql('postgres');
+	$drop->query_until(
+		qr/starting_drop/, q[
+		\echo starting_drop
+		DROP INDEX CONCURRENTLY test_dropri_ri;
+	]);
+	$node_subscriber->poll_query_until('postgres',
+			"SELECT count(*) = 0 FROM pg_index"
+		  . " WHERE indrelid = 'test_dropri'::regclass AND indisreplident")
+	  or die "timed out waiting for the identity index to be invalidated";
+
+	$node_subscriber->safe_psql(
+		'postgres',
+		"SELECT injection_points_detach('apply-update-before-open-indices');
+		 SELECT injection_points_wakeup('apply-update-before-open-indices');"
+	);
+	# The straddling change goes through, found by the demoted index.
+	$node_publisher->wait_for_catchup('dropri');
+	$result = $node_subscriber->safe_psql('postgres',
+		"SELECT y FROM test_dropri WHERE x = 7");
+	is($result, qq(99), 'change straddling the drop is applied');
+	ok($drop->quit, 'DROP INDEX CONCURRENTLY completes');
+
+	# From the next change on the entry is rebuilt, finds no replica
+	# identity, and apply stops with the usual error.
+	$node_publisher->safe_psql('postgres',
+		"UPDATE test_dropri SET y = 123 WHERE x = 8");
+	ok( $node_subscriber->poll_query_until(
+			'postgres', q[
+			SELECT apply_error_count > 0 FROM pg_stat_subscription_stats
+			WHERE subname = 'tap_sub_dropri']),
+		'later changes wait for a replica identity');
+	like(
+		slurp_file($node_subscriber->logfile, $log_offset),
+		qr/logical replication target relation "public\.test_dropri" has neither REPLICA IDENTITY index nor PRIMARY KEY/,
+		'and say why');
+
+	# Give the relation a replica identity again and they resume.
+	$node_subscriber->safe_psql(
+		'postgres', q[
+		CREATE UNIQUE INDEX test_dropri_ri2 ON test_dropri (x);
+		ALTER TABLE test_dropri REPLICA IDENTITY USING INDEX test_dropri_ri2;
+	]);
+	$node_publisher->wait_for_catchup('dropri');
+	$result = $node_subscriber->safe_psql('postgres',
+		"SELECT y FROM test_dropri WHERE x = 8");
+	is($result, qq(123), 'replication resumes');
+
+	$node_publisher->safe_psql('postgres', "DROP PUBLICATION tap_pub_dropri");
+	$node_publisher->safe_psql('postgres', "DROP TABLE test_dropri");
+	$node_subscriber->safe_psql('postgres',
+		"DROP SUBSCRIPTION tap_sub_dropri");
+	$node_subscriber->safe_psql('postgres', "DROP TABLE test_dropri");
+
+	# cleanup pub
+	$node_publisher->safe_psql('postgres',
+		"DROP PUBLICATION tap_pub_reindex");
+	$node_publisher->safe_psql('postgres', "DROP TABLE test_reindex");
+	# cleanup sub
+	$node_subscriber->safe_psql('postgres',
+		"DROP SUBSCRIPTION tap_sub_reindex");
+	$node_subscriber->safe_psql('postgres', "DROP TABLE test_reindex");
+	$node_subscriber->safe_psql('postgres',
+		"DROP EXTENSION injection_points");
+}
+
+# Testcase end: Subscription keeps using an index that concurrent DDL has
+# demoted from replica identity
+# =============================================================================
+
 $node_subscriber->stop('fast');
 $node_publisher->stop('fast');
 
