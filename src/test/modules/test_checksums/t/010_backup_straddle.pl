@@ -65,6 +65,14 @@ $node->append_conf('postgresql.conf', 'autovacuum = off');
 $node->append_conf('postgresql.conf', 'wal_log_hints = off');
 $node->start;
 
+# Check if the extension injection_points is available, as it may be
+# possible that this script is run with installcheck, where the module
+# would not be installed by default.
+if (!$node->check_extension('injection_points'))
+{
+	plan skip_all => 'Extension injection_points not installed';
+}
+
 $node->safe_psql('postgres', 'CREATE EXTENSION injection_points;');
 
 # A body of relation pages for the backup to misjudge.  The scan pulls the

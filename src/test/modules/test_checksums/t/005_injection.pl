@@ -31,6 +31,14 @@ $node->init(no_data_checksums => 1);
 $node->start;
 
 # Set up test environment
+# Check if the extension injection_points is available, as it may be
+# possible that this script is run with installcheck, where the module
+# would not be installed by default.
+if (!$node->check_extension('injection_points'))
+{
+	plan skip_all => 'Extension injection_points not installed';
+}
+
 $node->safe_psql('postgres', 'CREATE EXTENSION test_checksums;');
 $node->safe_psql('postgres', 'CREATE EXTENSION injection_points;');
 

@@ -173,6 +173,14 @@ max_connections = 100
 log_statement = none
 ]);
 $node->start;
+# Check if the extension injection_points is available, as it may be
+# possible that this script is run with installcheck, where the module
+# would not be installed by default.
+if (!$node->check_extension('injection_points'))
+{
+	plan skip_all => 'Extension injection_points not installed';
+}
+
 $node->safe_psql('postgres', 'CREATE EXTENSION test_checksums;');
 $node->safe_psql('postgres', 'CREATE EXTENSION injection_points;');
 # Create some content to have un-checksummed data in the cluster

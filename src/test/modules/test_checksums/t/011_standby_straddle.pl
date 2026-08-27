@@ -66,6 +66,14 @@ $node_primary->append_conf('postgresql.conf', 'autovacuum = off');
 $node_primary->append_conf('postgresql.conf', 'wal_log_hints = off');
 $node_primary->start;
 
+# Check if the extension injection_points is available, as it may be
+# possible that this script is run with installcheck, where the module
+# would not be installed by default.
+if (!$node_primary->check_extension('injection_points'))
+{
+	plan skip_all => 'Extension injection_points not installed';
+}
+
 $node_primary->safe_psql('postgres', 'CREATE EXTENSION injection_points;');
 
 my $slotname = 'physical_slot';

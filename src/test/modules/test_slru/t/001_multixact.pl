@@ -20,6 +20,14 @@ $node->init;
 $node->append_conf('postgresql.conf',
 	"shared_preload_libraries = 'test_slru,injection_points'");
 $node->start;
+# Check if the extension injection_points is available, as it may be
+# possible that this script is run with installcheck, where the module
+# would not be installed by default.
+if (!$node->check_extension('injection_points'))
+{
+	plan skip_all => 'Extension injection_points not installed';
+}
+
 $node->safe_psql('postgres', q(CREATE EXTENSION injection_points));
 $node->safe_psql('postgres', q(CREATE EXTENSION test_slru));
 
