@@ -1826,7 +1826,7 @@ DefineIndex(ParseState *pstate,
 	 * before the reference snap was taken, we have to wait out any
 	 * transactions that might have older snapshots.
 	 */
-	INJECTION_POINT("define-index-before-set-valid", NULL);
+	INJECTION_POINT("define-index-before-set-valid", indexRelationName);
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_3);
 	WaitForOlderSnapshots(limitXmin, true);

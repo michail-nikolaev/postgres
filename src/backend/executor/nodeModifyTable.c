@@ -1228,7 +1228,8 @@ ExecInsert(ModifyTableContext *context,
 			 * if we're going to go ahead with the insertion, instead of
 			 * waiting for the whole transaction to complete.
 			 */
-			INJECTION_POINT("exec-insert-before-insert-speculative", NULL);
+			INJECTION_POINT("exec-insert-before-insert-speculative",
+							RelationGetRelationName(resultRelationDesc));
 			specToken = SpeculativeInsertionLockAcquire(GetCurrentTransactionId());
 
 			/* insert the tuple, with the speculative token */

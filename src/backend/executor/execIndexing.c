@@ -955,7 +955,8 @@ retry:
 
 #ifdef USE_INJECTION_POINTS
 	if (!conflict)
-		INJECTION_POINT("check-exclusion-or-unique-constraint-no-conflict", NULL);
+		INJECTION_POINT("check-exclusion-or-unique-constraint-no-conflict",
+						RelationGetRelationName(index));
 #endif
 
 	return !conflict;

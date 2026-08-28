@@ -19,15 +19,20 @@ SELECT injection_points_set_local();
 
 set enable_seqscan=off;
 
--- Print a NOTICE whenever an incomplete split gets fixed
-SELECT injection_points_attach('gin-finish-incomplete-split', 'notice');
+-- Print a NOTICE whenever an incomplete split gets fixed.  The gin
+-- injection points pass the name of the index being modified, so the
+-- condition string keeps the points from firing for other indexes,
+-- catalog indexes in particular.
+SELECT injection_points_attach('gin-finish-incomplete-split', 'notice',
+                               'gin_incomplete_splits_i_idx');
 
 --
 -- First create the test table and some helper functions
 --
 create table gin_incomplete_splits(i int4[]) with (autovacuum_enabled = off);
 
-create index on gin_incomplete_splits using gin (i) with (fastupdate = off);
+create index gin_incomplete_splits_i_idx on gin_incomplete_splits
+  using gin (i) with (fastupdate = off);
 
 -- Creates an array with all integers from $1 (inclusive) $2 (exclusive)
 create function range_array(int, int) returns int[] language sql immutable as $$
@@ -114,7 +119,8 @@ select verify(:next_i);
 --
 -- Test incomplete leaf split
 --
-SELECT injection_points_attach('gin-leave-leaf-split-incomplete', 'error');
+SELECT injection_points_attach('gin-leave-leaf-split-incomplete', 'error',
+                               'gin_incomplete_splits_i_idx');
 select insert_until_fail(:next_i) as next_i
 \gset
 SELECT injection_points_detach('gin-leave-leaf-split-incomplete');
@@ -132,7 +138,8 @@ select verify(:next_i);
 --
 -- Test incomplete internal page split
 --
-SELECT injection_points_attach('gin-leave-internal-split-incomplete', 'error');
+SELECT injection_points_attach('gin-leave-internal-split-incomplete', 'error',
+                               'gin_incomplete_splits_i_idx');
 select insert_until_fail(:next_i, 100) as next_i
 \gset
 SELECT injection_points_detach('gin-leave-internal-split-incomplete');
@@ -166,7 +173,8 @@ delete from gin_posting_tree where id between 10001 and 27500;
 vacuum (index_cleanup on) gin_posting_tree;
 
 -- Insert rows until a leaf page split fails, leaving the split incomplete
-SELECT injection_points_attach('gin-leave-leaf-split-incomplete', 'error');
+SELECT injection_points_attach('gin-leave-leaf-split-incomplete', 'error',
+                               'gin_posting_tree_idx');
 do $$
 begin
   for n in 1..200000 loop

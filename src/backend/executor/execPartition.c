@@ -768,6 +768,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 
 			for (int listidx = 0; listidx < leaf_part_rri->ri_NumIndices; listidx++)
 			{
+				Relation	partIndex;
 				Oid			indexoid;
 				List	   *ancestors;
 
@@ -792,9 +793,11 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 				 * GetNonHistoricCatalogSnapshot).  Consider a syscache or
 				 * some other way to cache?
 				 */
-				indexoid = RelationGetRelid(leaf_part_rri->ri_IndexRelationDescs[listidx]);
+				partIndex = leaf_part_rri->ri_IndexRelationDescs[listidx];
+				indexoid = RelationGetRelid(partIndex);
 				ancestors = get_partition_ancestors(indexoid);
-				INJECTION_POINT("exec-init-partition-after-get-partition-ancestors", NULL);
+				INJECTION_POINT("exec-init-partition-after-get-partition-ancestors",
+								RelationGetRelationName(partIndex));
 
 				if (ancestors != NIL &&
 					!list_member_oid(ancestors_seen, linitial_oid(ancestors)))

@@ -8,6 +8,15 @@
 # constraint" errors that occurred when infer_arbiter_indexes() only considered
 # indisvalid indexes, causing different transactions to use different arbiter
 # indexes.
+#
+# The executor and CREATE INDEX injection points used below pass the name of
+# the object they act on: the index for the arbiter check, the result relation
+# (the leaf partition, for a partitioned table) for the speculative insertion,
+# and the new index for CREATE INDEX CONCURRENTLY.  Each attach names that
+# object as its condition string, so a point only fires for the relation the
+# test step is about.  The REINDEX phase points take no argument: the swap
+# phase one runs between transactions, where the catalog lookup needed to
+# resolve a name is not possible.
 
 use strict;
 use warnings FATAL => 'all';
@@ -61,13 +70,13 @@ my $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tblpk_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblpk');
 ]);
 
 $s3->query_safe(
@@ -132,13 +141,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tblpk_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblpk');
 ]);
 
 $s3->query_safe(
@@ -191,13 +200,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tblpk_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblpk');
 ]);
 
 $s3->query_safe(
@@ -252,13 +261,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tblpk_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblpk');
 ]);
 
 $s3->query_safe(
@@ -312,13 +321,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tblpk_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblpk');
 ]);
 
 $s3->query_safe(
@@ -371,13 +380,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tblpk_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblpk');
 ]);
 
 $s3->query_safe(
@@ -432,13 +441,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tbl_partition_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tbl_partition');
 ]);
 
 $s3->query_safe(
@@ -492,13 +501,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tbl_partition_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tbl_partition');
 ]);
 
 $s3->query_safe(
@@ -551,13 +560,13 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tbl_partition_pkey');
 ]);
 
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tbl_partition');
 ]);
 
 $s3->query_safe(
@@ -614,7 +623,7 @@ $s3 = $node->background_psql('postgres', on_error_stop => 0);
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-init-partition-after-get-partition-ancestors', 'wait');
+SELECT injection_points_attach('exec-init-partition-after-get-partition-ancestors', 'wait', 'tbl_partition_pkey');
 ]);
 
 $s2->query_safe(
@@ -664,7 +673,7 @@ my $s1_pid = $s1->query_safe('SELECT pg_backend_pid()');
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tblpk_pkey');
 ]);
 
 $s1->query_until(
@@ -691,13 +700,13 @@ if (!wait_for_idle($node, $s1_pid))
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblpk');
 ]);
 
 $s3->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('define-index-before-set-valid', 'wait');
+SELECT injection_points_attach('define-index-before-set-valid', 'wait', 'tbl_pkey_duplicate');
 ]);
 
 # s3: Start CREATE INDEX CONCURRENTLY (blocks on define-index-before-set-valid)
@@ -757,7 +766,7 @@ $s1_pid = $s1->query_safe('SELECT pg_backend_pid()');
 $s1->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait');
+SELECT injection_points_attach('check-exclusion-or-unique-constraint-no-conflict', 'wait', 'tbl_pkey_special');
 ]);
 
 $s1->query_until(
@@ -784,13 +793,13 @@ if (!wait_for_idle($node, $s1_pid))
 $s2->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait');
+SELECT injection_points_attach('exec-insert-before-insert-speculative', 'wait', 'tblexpr');
 ]);
 
 $s3->query_safe(
 	q[
 SELECT injection_points_set_local();
-SELECT injection_points_attach('define-index-before-set-valid', 'wait');
+SELECT injection_points_attach('define-index-before-set-valid', 'wait', 'tbl_pkey_special_duplicate');
 ]);
 
 # s3: Start CREATE INDEX CONCURRENTLY (blocks on define-index-before-set-valid)
