@@ -2017,7 +2017,8 @@ _bt_pagedel(Relation rel, Buffer leafbuf, BTVacState *vstate)
 		}
 		else
 		{
-			INJECTION_POINT("nbtree-finish-half-dead-page-vacuum", NULL);
+			INJECTION_POINT("nbtree-finish-half-dead-page-vacuum",
+							RelationGetRelationName(rel));
 		}
 
 		/*
@@ -2368,7 +2369,8 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
 
 	_bt_unlockbuf(rel, leafbuf);
 
-	INJECTION_POINT("nbtree-leave-page-half-dead", NULL);
+	INJECTION_POINT("nbtree-leave-page-half-dead",
+					RelationGetRelationName(rel));
 
 	/*
 	 * Check here, as calling loops will have locks held, preventing

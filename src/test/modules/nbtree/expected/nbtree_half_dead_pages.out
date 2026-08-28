@@ -44,8 +44,12 @@ SELECT injection_points_set_local();
 
 -- Use the index for all the queries
 set enable_seqscan=off;
--- Print a NOTICE whenever a half-dead page is deleted
-SELECT injection_points_attach('nbtree-finish-half-dead-page-vacuum', 'notice');
+-- Print a NOTICE whenever a half-dead page is deleted.  The nbtree
+-- injection points pass the name of the index being vacuumed, so the
+-- condition string keeps the points from firing for other indexes,
+-- catalog indexes in particular.
+SELECT injection_points_attach('nbtree-finish-half-dead-page-vacuum', 'notice',
+                               'nbtree_half_dead_pages_id_idx');
  injection_points_attach 
 -------------------------
  
@@ -57,14 +61,15 @@ create index nbtree_half_dead_pages_id_idx on nbtree_half_dead_pages using btree
 delete from nbtree_half_dead_pages where id > 100000 and id < 120000;
 -- Run VACUUM and interrupt it so that it leaves behind a half-dead page
 call wait_prunable();
-SELECT injection_points_attach('nbtree-leave-page-half-dead', 'error');
+SELECT injection_points_attach('nbtree-leave-page-half-dead', 'error',
+                               'nbtree_half_dead_pages_id_idx');
  injection_points_attach 
 -------------------------
  
 (1 row)
 
 vacuum nbtree_half_dead_pages;
-ERROR:  error triggered for injection point nbtree-leave-page-half-dead
+ERROR:  error triggered for injection point nbtree-leave-page-half-dead (nbtree_half_dead_pages_id_idx)
 CONTEXT:  while vacuuming index "nbtree_half_dead_pages_id_idx" of relation "public.nbtree_half_dead_pages"
 SELECT injection_points_detach('nbtree-leave-page-half-dead');
  injection_points_detach 
@@ -90,7 +95,7 @@ select bt_index_parent_check('nbtree_half_dead_pages_id_idx'::regclass, true, tr
 
 -- Finish the deletion and re-check
 vacuum nbtree_half_dead_pages;
-NOTICE:  notice triggered for injection point nbtree-finish-half-dead-page-vacuum
+NOTICE:  notice triggered for injection point nbtree-finish-half-dead-page-vacuum (nbtree_half_dead_pages_id_idx)
 select * from nbtree_half_dead_pages where id > 99998 and id < 120002;
    id   
 --------

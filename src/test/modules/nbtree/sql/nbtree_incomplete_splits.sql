@@ -24,8 +24,12 @@ SELECT injection_points_set_local();
 -- Use the index for all the queries
 set enable_seqscan=off;
 
--- Print a NOTICE whenever an incomplete split gets fixed
-SELECT injection_points_attach('nbtree-finish-incomplete-split', 'notice');
+-- Print a NOTICE whenever an incomplete split gets fixed.  The nbtree
+-- injection points pass the name of the index being modified, so the
+-- condition string keeps the points from firing for other indexes,
+-- catalog indexes in particular.
+SELECT injection_points_attach('nbtree-finish-incomplete-split', 'notice',
+                               'nbtree_incomplete_splits_i_idx');
 
 --
 -- First create the test table and some helper functions
@@ -106,7 +110,8 @@ select verify(:next_i);
 --
 -- Test incomplete leaf split
 --
-SELECT injection_points_attach('nbtree-leave-leaf-split-incomplete', 'error');
+SELECT injection_points_attach('nbtree-leave-leaf-split-incomplete', 'error',
+                               'nbtree_incomplete_splits_i_idx');
 select insert_until_fail(:next_i) as next_i
 \gset
 SELECT injection_points_detach('nbtree-leave-leaf-split-incomplete');
@@ -124,7 +129,8 @@ select verify(:next_i);
 --
 -- Test incomplete internal page split
 --
-SELECT injection_points_attach('nbtree-leave-internal-split-incomplete', 'error');
+SELECT injection_points_attach('nbtree-leave-internal-split-incomplete', 'error',
+                               'nbtree_incomplete_splits_i_idx');
 select insert_until_fail(:next_i, 100) as next_i
 \gset
 SELECT injection_points_detach('nbtree-leave-internal-split-incomplete');

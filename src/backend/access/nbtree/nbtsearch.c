@@ -18,7 +18,6 @@
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/xact.h"
-#include "catalog/catalog.h"
 #include "executor/instrument_node.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -1518,10 +1517,7 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	{
 		Assert(!so->needPrimScan);
 
-#ifdef USE_INJECTION_POINTS
-		if (!IsCatalogRelation(rel))
-			INJECTION_POINT("nbtree-first-empty", NULL);
-#endif
+		INJECTION_POINT("nbtree-first-empty", RelationGetRelationName(rel));
 
 		/*
 		 * We only get here if the index is completely empty. Lock relation
@@ -1984,10 +1980,7 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 {
 	BlockNumber origblkno = *blkno; /* detects circular links */
 
-#ifdef USE_INJECTION_POINTS
-	if (!IsCatalogRelation(rel))
-		INJECTION_POINT("nbtree-walk-left", NULL);
-#endif
+	INJECTION_POINT("nbtree-walk-left", RelationGetRelationName(rel));
 
 	for (;;)
 	{
@@ -2024,10 +2017,8 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 			if (P_RIGHTMOST(opaque) || ++tries > 4)
 				break;
 
-#ifdef USE_INJECTION_POINTS
-			if (!IsCatalogRelation(rel))
-				INJECTION_POINT("nbtree-walk-left-step-right", NULL);
-#endif
+			INJECTION_POINT("nbtree-walk-left-step-right",
+							RelationGetRelationName(rel));
 
 			/* step right */
 			*blkno = opaque->btpo_next;
@@ -2046,10 +2037,8 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 		opaque = BTPageGetOpaque(page);
 		if (P_ISDELETED(opaque))
 		{
-#ifdef USE_INJECTION_POINTS
-			if (!IsCatalogRelation(rel))
-				INJECTION_POINT("nbtree-walk-left-deleted", NULL);
-#endif
+			INJECTION_POINT("nbtree-walk-left-deleted",
+							RelationGetRelationName(rel));
 
 			/*
 			 * It was deleted.  Move right to first nondeleted page (there
@@ -2099,10 +2088,8 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 		*blkno = origblkno = opaque->btpo_prev;
 		_bt_relbuf(rel, buf);
 
-#ifdef USE_INJECTION_POINTS
-		if (!IsCatalogRelation(rel))
-			INJECTION_POINT("nbtree-walk-left-restart", NULL);
-#endif
+		INJECTION_POINT("nbtree-walk-left-restart",
+						RelationGetRelationName(rel));
 	}
 
 	return InvalidBuffer;
@@ -2222,10 +2209,8 @@ _bt_endpoint(IndexScanDesc scan, ScanDirection dir)
 
 	if (!BufferIsValid(so->currPos.buf))
 	{
-#ifdef USE_INJECTION_POINTS
-		if (!IsCatalogRelation(rel))
-			INJECTION_POINT("nbtree-endpoint-empty", NULL);
-#endif
+		INJECTION_POINT("nbtree-endpoint-empty",
+						RelationGetRelationName(rel));
 
 		/*
 		 * Empty index. Lock the whole relation using the approach explained

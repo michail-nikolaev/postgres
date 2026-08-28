@@ -44,8 +44,12 @@ SELECT injection_points_set_local();
 -- Use the index for all the queries
 set enable_seqscan=off;
 
--- Print a NOTICE whenever a half-dead page is deleted
-SELECT injection_points_attach('nbtree-finish-half-dead-page-vacuum', 'notice');
+-- Print a NOTICE whenever a half-dead page is deleted.  The nbtree
+-- injection points pass the name of the index being vacuumed, so the
+-- condition string keeps the points from firing for other indexes,
+-- catalog indexes in particular.
+SELECT injection_points_attach('nbtree-finish-half-dead-page-vacuum', 'notice',
+                               'nbtree_half_dead_pages_id_idx');
 
 create table nbtree_half_dead_pages(id bigint) with (autovacuum_enabled = off);
 
@@ -57,7 +61,8 @@ delete from nbtree_half_dead_pages where id > 100000 and id < 120000;
 
 -- Run VACUUM and interrupt it so that it leaves behind a half-dead page
 call wait_prunable();
-SELECT injection_points_attach('nbtree-leave-page-half-dead', 'error');
+SELECT injection_points_attach('nbtree-leave-page-half-dead', 'error',
+                               'nbtree_half_dead_pages_id_idx');
 vacuum nbtree_half_dead_pages;
 SELECT injection_points_detach('nbtree-leave-page-half-dead');
 

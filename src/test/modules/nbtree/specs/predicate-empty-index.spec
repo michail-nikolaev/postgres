@@ -12,7 +12,7 @@
 setup
 {
   CREATE EXTENSION injection_points;
-  CREATE TABLE ssi_btree (id int PRIMARY KEY);
+  CREATE TABLE ssi_btree (id int, CONSTRAINT ssi_btree_pkey PRIMARY KEY (id));
 }
 
 teardown
@@ -27,8 +27,12 @@ setup {
   SET LOCAL enable_seqscan = off;
   SET LOCAL enable_bitmapscan = off;
   SELECT injection_points_set_local();
-  SELECT injection_points_attach('nbtree-first-empty', 'wait');
-  SELECT injection_points_attach('nbtree-endpoint-empty', 'wait');
+  -- Both points pass the name of the index being scanned, so the waits
+  -- only happen for ssi_btree_pkey and not for any catalog index.
+  SELECT injection_points_attach('nbtree-first-empty', 'wait',
+                                 'ssi_btree_pkey');
+  SELECT injection_points_attach('nbtree-endpoint-empty', 'wait',
+                                 'ssi_btree_pkey');
 }
 # Scan with a useful insertion scan key: descends via _bt_first/_bt_search.
 step s1_scan_first        { SELECT id FROM ssi_btree WHERE id = 2 AND pg_backend_pid() <> 0; }

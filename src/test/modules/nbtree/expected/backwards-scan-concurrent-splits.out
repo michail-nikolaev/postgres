@@ -2,10 +2,14 @@ Parsed test spec with 2 sessions
 
 starting permutation: b_attach b_scan i_insert_dups i_detach b_detach
 step b_attach: 
-  SELECT injection_points_attach('nbtree-walk-left', 'wait');
-  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice');
+  SELECT injection_points_attach('nbtree-walk-left', 'wait',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice',
+                                 'backwards_scan_tbl_col_idx');
 
 injection_points_attach
 -----------------------
@@ -45,7 +49,7 @@ injection_points_wakeup
                        
 (1 row)
 
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right (backwards_scan_tbl_col_idx)
 step b_scan: <... completed>
 col
 ---
@@ -81,10 +85,14 @@ injection_points_detach
 
 starting permutation: b_attach b_scan i_insert i_detach b_detach
 step b_attach: 
-  SELECT injection_points_attach('nbtree-walk-left', 'wait');
-  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice');
+  SELECT injection_points_attach('nbtree-walk-left', 'wait',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice',
+                                 'backwards_scan_tbl_col_idx');
 
 injection_points_attach
 -----------------------
@@ -124,11 +132,11 @@ injection_points_wakeup
                        
 (1 row)
 
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-restart
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right (backwards_scan_tbl_col_idx)
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right (backwards_scan_tbl_col_idx)
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right (backwards_scan_tbl_col_idx)
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right (backwards_scan_tbl_col_idx)
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-restart (backwards_scan_tbl_col_idx)
 step b_scan: <... completed>
 col
 ---
@@ -164,10 +172,14 @@ injection_points_detach
 
 starting permutation: b_attach d_delete_left wait_prunable b_scan vacuum_tbl i_detach b_detach
 step b_attach: 
-  SELECT injection_points_attach('nbtree-walk-left', 'wait');
-  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice');
+  SELECT injection_points_attach('nbtree-walk-left', 'wait',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice',
+                                 'backwards_scan_tbl_col_idx');
 
 injection_points_attach
 -----------------------
@@ -209,7 +221,7 @@ injection_points_wakeup
                        
 (1 row)
 
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-step-right (backwards_scan_tbl_col_idx)
 step b_scan: <... completed>
 col
 ---
@@ -239,9 +251,12 @@ injection_points_detach
 
 starting permutation: b_attach_nosr i_grow d_delete_mid wait_prunable b_scan_999 vacuum_tbl i_detach b_detach_nosr
 step b_attach_nosr: 
-  SELECT injection_points_attach('nbtree-walk-left', 'wait');
-  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice');
+  SELECT injection_points_attach('nbtree-walk-left', 'wait',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice',
+                                 'backwards_scan_tbl_col_idx');
 
 injection_points_attach
 -----------------------
@@ -279,8 +294,8 @@ injection_points_wakeup
                        
 (1 row)
 
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-deleted
-scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-restart
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-deleted (backwards_scan_tbl_col_idx)
+scan_session: NOTICE:  notice triggered for injection point nbtree-walk-left-restart (backwards_scan_tbl_col_idx)
 step b_scan_999: <... completed>
 col
 ---

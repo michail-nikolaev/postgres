@@ -1255,9 +1255,11 @@ _bt_insertonpg(Relation rel,
 		 */
 #ifdef USE_INJECTION_POINTS
 		if (P_ISLEAF(opaque))
-			INJECTION_POINT("nbtree-leave-leaf-split-incomplete", NULL);
+			INJECTION_POINT("nbtree-leave-leaf-split-incomplete",
+							RelationGetRelationName(rel));
 		else
-			INJECTION_POINT("nbtree-leave-internal-split-incomplete", NULL);
+			INJECTION_POINT("nbtree-leave-internal-split-incomplete",
+							RelationGetRelationName(rel));
 #endif
 
 		_bt_insert_parent(rel, heaprel, buf, rbuf, stack, isroot, isonly);
@@ -2309,7 +2311,8 @@ _bt_finish_split(Relation rel, Relation heaprel, Buffer lbuf, BTStack stack)
 	/* Was this the only page on the level before split? */
 	wasonly = (P_LEFTMOST(lpageop) && P_RIGHTMOST(rpageop));
 
-	INJECTION_POINT("nbtree-finish-incomplete-split", NULL);
+	INJECTION_POINT("nbtree-finish-incomplete-split",
+					RelationGetRelationName(rel));
 	elog(DEBUG1, "finishing incomplete split of %u/%u",
 		 BufferGetBlockNumber(lbuf), BufferGetBlockNumber(rbuf));
 

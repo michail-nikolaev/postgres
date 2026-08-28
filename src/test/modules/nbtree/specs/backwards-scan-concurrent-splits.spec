@@ -14,12 +14,18 @@
 #
 # Note: the permutations' expected notifications (and the leaf pages that each
 # concurrent session step splits or deletes) assume the default 8KB BLCKSZ.
+#
+# The nbtree injection points pass the name of the index being scanned as
+# their argument, so every attach below uses a condition string to restrict
+# the point to backwards_scan_tbl_col_idx.  Without it the scan would also
+# stop while descending catalog indexes.
 
 setup
 {
   CREATE EXTENSION injection_points;
   CREATE TABLE backwards_scan_tbl(col int4) WITH (autovacuum_enabled = off);
-  CREATE INDEX ON backwards_scan_tbl(col) WITH (deduplicate_items = off);
+  CREATE INDEX backwards_scan_tbl_col_idx ON backwards_scan_tbl(col)
+    WITH (deduplicate_items = off);
   INSERT INTO backwards_scan_tbl SELECT i FROM generate_series(0, 700) i;
   -- Wait until every dead tuple in the table has become removable by VACUUM.
   -- Autovacuum can hold a snapshot open in any database at any time, which
@@ -60,18 +66,25 @@ setup {
   SET enable_sort=off;
 }
 step b_attach {
-  SELECT injection_points_attach('nbtree-walk-left', 'wait');
-  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice');
+  SELECT injection_points_attach('nbtree-walk-left', 'wait',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-step-right', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice',
+                                 'backwards_scan_tbl_col_idx');
 }
 # Variant that doesn't attach to nbtree-walk-left-step-right, for
 # permutations whose number of step right attempts varies with the amount of
 # free space that index tuples' varying alignment padding leaves on each page
 step b_attach_nosr {
-  SELECT injection_points_attach('nbtree-walk-left', 'wait');
-  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice');
-  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice');
+  SELECT injection_points_attach('nbtree-walk-left', 'wait',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-restart', 'notice',
+                                 'backwards_scan_tbl_col_idx');
+  SELECT injection_points_attach('nbtree-walk-left-deleted', 'notice',
+                                 'backwards_scan_tbl_col_idx');
 }
 # Note: Both scan variants call parallel restricted pg_backend_pid() so that
 # the scan runs in the leader process under debug_parallel_query
