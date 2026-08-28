@@ -23,6 +23,7 @@
 #include "catalog/catalog.h"
 #include "miscadmin.h"
 #include "utils/fmgroids.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -561,16 +562,59 @@ toast_open_indexes(Relation toastrel,
 	List	   *indexlist;
 	ListCell   *lc;
 
-	/* Get index list of the toast relation */
-	indexlist = RelationGetIndexList(toastrel);
-	Assert(indexlist != NIL);
+	/*
+	 * Get the index list of the toast relation and open every index it names.
+	 *
+	 * An index can be gone by the time we get to open it.  What keeps that
+	 * from happening on a primary is index_drop(), which waits out every
+	 * locker of the toast table before it removes the catalog entry, so the
+	 * lock we hold on the toast table is enough.  Recovery has no such
+	 * interlock: replaying the drop of the old index at the end of a REINDEX
+	 * CONCURRENTLY takes AccessExclusiveLock on the index alone and releases
+	 * it at the replayed commit, and nothing makes replay wait for a backend
+	 * that holds only the toast table's lock and has already read the index
+	 * list.  We cannot just leave such an index out, since it may be the only
+	 * one the list named; but locking it processed the invalidation that
+	 * removed it, so reading the list again yields one without it.  Retry
+	 * until every index the list names is still there when we open it.
+	 */
+	for (;;)
+	{
+		bool		missing = false;
 
-	*num_indexes = list_length(indexlist);
+		CHECK_FOR_INTERRUPTS();
 
-	/* Open all the index relations */
-	*toastidxs = palloc_array(Relation, *num_indexes);
-	foreach(lc, indexlist)
-		(*toastidxs)[i++] = index_open(lfirst_oid(lc), lock);
+		indexlist = RelationGetIndexList(toastrel);
+		Assert(indexlist != NIL);
+
+		INJECTION_POINT("toast-open-indexes-before-index-open",
+						RelationGetRelationName(toastrel));
+
+		*num_indexes = list_length(indexlist);
+
+		/* Open all the index relations */
+		*toastidxs = palloc_array(Relation, *num_indexes);
+		i = 0;
+		foreach(lc, indexlist)
+		{
+			Relation	toastidx = try_index_open(lfirst_oid(lc), lock);
+
+			if (toastidx == NULL)
+			{
+				missing = true;
+				break;
+			}
+
+			(*toastidxs)[i++] = toastidx;
+		}
+
+		if (!missing)
+			break;
+
+		/* Start over with a list that reflects the drop we just found */
+		toast_close_indexes(*toastidxs, i, lock);
+		list_free(indexlist);
+	}
 
 	/* Fetch the first valid index in list */
 	for (i = 0; i < *num_indexes; i++)

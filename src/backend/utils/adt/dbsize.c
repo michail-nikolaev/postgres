@@ -416,8 +416,13 @@ calculate_toast_table_size(Oid toastrelid)
 	{
 		Relation	toastIdxRel;
 
-		toastIdxRel = relation_open(lfirst_oid(lc),
-									AccessShareLock);
+		toastIdxRel = try_relation_open(lfirst_oid(lc),
+										AccessShareLock);
+
+		/* Skip an index replay removed under us; see calculate_indexes_size */
+		if (toastIdxRel == NULL)
+			continue;
+
 		for (forkNum = 0; forkNum <= MAX_FORKNUM; forkNum++)
 			size += calculate_relation_size(&(toastIdxRel->rd_locator),
 											toastIdxRel->rd_backend, forkNum);
@@ -484,7 +489,21 @@ calculate_indexes_size(Relation rel)
 			Relation	idxRel;
 			ForkNumber	forkNum;
 
-			idxRel = relation_open(idxOid, AccessShareLock);
+			idxRel = try_relation_open(idxOid, AccessShareLock);
+
+			/*
+			 * The index may be gone by now.  What keeps that from happening
+			 * on a primary is index_drop(), which waits out every locker of
+			 * the table before it removes the catalog entry, so the lock we
+			 * hold on the table is enough.  Recovery has no such interlock:
+			 * replaying a DROP INDEX CONCURRENTLY, or the drop of the old
+			 * index at the end of a REINDEX CONCURRENTLY, takes
+			 * AccessExclusiveLock on the index alone and releases it at the
+			 * replayed commit.  An index that is no longer there takes up no
+			 * space, so just leave it out of the total.
+			 */
+			if (idxRel == NULL)
+				continue;
 
 			for (forkNum = 0; forkNum <= MAX_FORKNUM; forkNum++)
 				size += calculate_relation_size(&(idxRel->rd_locator),
