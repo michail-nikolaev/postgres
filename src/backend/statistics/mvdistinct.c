@@ -140,6 +140,8 @@ statext_ndistinct_build(double totalrows, StatsBuildData *data)
 /*
  * statext_ndistinct_load
  *		Load the ndistinct value for the indicated pg_statistic_ext tuple
+ *
+ * Returns NULL if there is no statistics data to use.
  */
 MVNDistinct *
 statext_ndistinct_load(Oid mvoid, bool inh)
@@ -152,7 +154,7 @@ statext_ndistinct_load(Oid mvoid, bool inh)
 	htup = SearchSysCache2(STATEXTDATASTXOID,
 						   ObjectIdGetDatum(mvoid), BoolGetDatum(inh));
 	if (!HeapTupleIsValid(htup))
-		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
+		return NULL;
 
 	ndist = SysCacheGetAttr(STATEXTDATASTXOID, htup,
 							Anum_pg_statistic_ext_data_stxdndistinct, &isnull);

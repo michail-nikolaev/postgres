@@ -44,6 +44,7 @@ tests += {
   'isolation': {
     'specs': [
       'basic',
+      'concurrent_drop_statistics',
       'inplace',
       'reindex_concurrently_deferred',
       'repack',

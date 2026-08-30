@@ -1,0 +1,191 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_park_at_begin s1_mcv s2_drop_mcv s2_resume_lookup
+step s1_park_at_begin: 
+	SELECT injection_points_set_local();
+	SELECT injection_points_attach('get-relation-statistics-begin', 'wait', 't');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_mcv: SELECT count(*) FROM t WHERE e = 4 AND f = 4; <waiting ...>
+step s2_drop_mcv: DROP STATISTICS s_mcv;
+step s2_resume_lookup: 
+	SELECT injection_points_detach('get-relation-statistics-begin');
+	SELECT injection_points_wakeup('get-relation-statistics-begin');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_mcv: <... completed>
+count
+-----
+   10
+(1 row)
+
+
+starting permutation: s1_park_at_end s1_ndistinct s2_drop_ndistinct s2_resume_end
+step s1_park_at_end: 
+	SELECT injection_points_set_local();
+	SELECT injection_points_attach('get-relation-statistics-end', 'wait', 't');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_ndistinct: SELECT count(*) FROM (SELECT a, b FROM t GROUP BY a, b) s; <waiting ...>
+step s2_drop_ndistinct: DROP STATISTICS s_ndistinct;
+step s2_resume_end: 
+	SELECT injection_points_detach('get-relation-statistics-end');
+	SELECT injection_points_wakeup('get-relation-statistics-end');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_ndistinct: <... completed>
+count
+-----
+  101
+(1 row)
+
+
+starting permutation: s1_park_at_end s1_dependencies s2_drop_dependencies s2_resume_end
+step s1_park_at_end: 
+	SELECT injection_points_set_local();
+	SELECT injection_points_attach('get-relation-statistics-end', 'wait', 't');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_dependencies: SELECT count(*) FROM t WHERE e = 4 AND f = 4 AND c = 4 AND d = 4; <waiting ...>
+step s2_drop_dependencies: DROP STATISTICS s_dependencies;
+step s2_resume_end: 
+	SELECT injection_points_detach('get-relation-statistics-end');
+	SELECT injection_points_wakeup('get-relation-statistics-end');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_dependencies: <... completed>
+count
+-----
+   10
+(1 row)
+
+
+starting permutation: s1_park_at_end s1_mcv s2_drop_mcv s2_resume_end
+step s1_park_at_end: 
+	SELECT injection_points_set_local();
+	SELECT injection_points_attach('get-relation-statistics-end', 'wait', 't');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_mcv: SELECT count(*) FROM t WHERE e = 4 AND f = 4; <waiting ...>
+step s2_drop_mcv: DROP STATISTICS s_mcv;
+step s2_resume_end: 
+	SELECT injection_points_detach('get-relation-statistics-end');
+	SELECT injection_points_wakeup('get-relation-statistics-end');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_mcv: <... completed>
+count
+-----
+   10
+(1 row)
+
+
+starting permutation: s1_park_at_end s1_expressions s2_drop_expressions s2_resume_end
+step s1_park_at_end: 
+	SELECT injection_points_set_local();
+	SELECT injection_points_attach('get-relation-statistics-end', 'wait', 't');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_expressions: SELECT count(*) FROM t WHERE a = 4 AND g + 1 = 5; <waiting ...>
+step s2_drop_expressions: DROP STATISTICS s_expressions;
+step s2_resume_end: 
+	SELECT injection_points_detach('get-relation-statistics-end');
+	SELECT injection_points_wakeup('get-relation-statistics-end');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_expressions: <... completed>
+count
+-----
+   10
+(1 row)
+

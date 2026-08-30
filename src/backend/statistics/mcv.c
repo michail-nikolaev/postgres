@@ -551,6 +551,8 @@ build_column_frequencies(SortItem *groups, int ngroups,
 /*
  * statext_mcv_load
  *		Load the MCV list for the indicated pg_statistic_ext_data tuple.
+ *
+ * Returns NULL if there is no statistics data to use.
  */
 MCVList *
 statext_mcv_load(Oid mvoid, bool inh)
@@ -562,7 +564,7 @@ statext_mcv_load(Oid mvoid, bool inh)
 									   ObjectIdGetDatum(mvoid), BoolGetDatum(inh));
 
 	if (!HeapTupleIsValid(htup))
-		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
+		return NULL;
 
 	mcvlist = SysCacheGetAttr(STATEXTDATASTXOID, htup,
 							  Anum_pg_statistic_ext_data_stxdmcv, &isnull);
@@ -2056,13 +2058,22 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 	/* load the MCV list stored in the statistics object */
 	mcv = statext_mcv_load(stat->statOid, rte->inh);
 
+	*basesel = 0.0;
+	*totalsel = 0.0;
+
+	/*
+	 * With no MCV data there is nothing to improve on; returning zero for all
+	 * three leaves mcv_combine_selectivities() with the caller's simple
+	 * estimate, which is what an absent statistics object should give.
+	 */
+	if (mcv == NULL)
+		return 0.0;
+
 	/* build a match bitmap for the clauses */
 	matches = mcv_get_match_bitmap(root, clauses, stat->keys, stat->exprs,
 								   mcv, false);
 
 	/* sum frequencies for all the matching MCV items */
-	*basesel = 0.0;
-	*totalsel = 0.0;
 	for (uint32 i = 0; i < mcv->nitems; i++)
 	{
 		*totalsel += mcv->items[i].frequency;
@@ -2125,6 +2136,15 @@ mcv_clause_selectivity_or(PlannerInfo *root, StatisticExtInfo *stat,
 	Selectivity s = 0.0;
 	bool	   *new_matches;
 
+	*basesel = 0.0;
+	*overlap_mcvsel = 0.0;
+	*overlap_basesel = 0.0;
+	*totalsel = 0.0;
+
+	/* As in mcv_clauselist_selectivity(), no MCV data means no improvement */
+	if (mcv == NULL)
+		return 0.0;
+
 	/* build the OR-matches bitmap, if not built already */
 	if (*or_matches == NULL)
 		*or_matches = palloc0_array(bool, mcv->nitems);
@@ -2138,10 +2158,6 @@ mcv_clause_selectivity_or(PlannerInfo *root, StatisticExtInfo *stat,
 	 * those matching the overlap between this clause and any of the preceding
 	 * clauses as described above.
 	 */
-	*basesel = 0.0;
-	*overlap_mcvsel = 0.0;
-	*overlap_basesel = 0.0;
-	*totalsel = 0.0;
 	for (uint32 i = 0; i < mcv->nitems; i++)
 	{
 		*totalsel += mcv->items[i].frequency;

@@ -48,6 +48,7 @@
 #include "storage/bufmgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
@@ -1743,6 +1744,9 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 
 	statoidlist = RelationGetStatExtList(relation);
 
+	INJECTION_POINT("get-relation-statistics-begin",
+					RelationGetRelationName(relation));
+
 	foreach(l, statoidlist)
 	{
 		Oid			statOid = lfirst_oid(l);
@@ -1754,7 +1758,7 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 
 		htup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statOid));
 		if (!HeapTupleIsValid(htup))
-			elog(ERROR, "cache lookup failed for statistics object %u", statOid);
+			continue;
 		staForm = (Form_pg_statistic_ext) GETSTRUCT(htup);
 
 		/*
@@ -1831,6 +1835,8 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	list_free(statoidlist);
+
+	INJECTION_POINT("get-relation-statistics-end", RelationGetRelationName(relation));
 
 	return stainfos;
 }

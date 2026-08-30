@@ -2457,7 +2457,7 @@ statext_expressions_load(Oid stxoid, bool inh, int idx)
 	htup = SearchSysCache2(STATEXTDATASTXOID,
 						   ObjectIdGetDatum(stxoid), BoolGetDatum(inh));
 	if (!HeapTupleIsValid(htup))
-		elog(ERROR, "cache lookup failed for statistics object %u", stxoid);
+		return NULL;
 
 	value = SysCacheGetAttr(STATEXTDATASTXOID, htup,
 							Anum_pg_statistic_ext_data_stxdexpr, &isnull);
