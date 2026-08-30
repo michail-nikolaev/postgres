@@ -701,6 +701,12 @@ statext_dependencies_load(Oid mvoid, bool inh)
 
 	deps = SysCacheGetAttr(STATEXTDATASTXOID, htup,
 						   Anum_pg_statistic_ext_data_stxddependencies, &isnull);
+
+	/*
+	 * Unlike an MCV list, this kind is always stored once the statistics
+	 * object asks for it, so a row that lacks it is a real inconsistency
+	 * rather than a concurrent ANALYZE.
+	 */
 	if (isnull)
 		elog(ERROR,
 			 "requested statistics kind \"%c\" is not yet built for statistics object %u",

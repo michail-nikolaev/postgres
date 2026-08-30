@@ -14,6 +14,7 @@ REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 
 ISOLATION = basic \
 	    concurrent_drop_statistics \
+	    concurrent_rebuild_statistics \
 	    inplace \
 	    reindex_concurrently_deferred \
 	    repack \

@@ -569,10 +569,18 @@ statext_mcv_load(Oid mvoid, bool inh)
 	mcvlist = SysCacheGetAttr(STATEXTDATASTXOID, htup,
 							  Anum_pg_statistic_ext_data_stxdmcv, &isnull);
 
+	/*
+	 * The MCV list may be gone even though the row is still there.  ANALYZE
+	 * stores none when every sampled value was too wide for one, and it takes
+	 * only ShareUpdateExclusiveLock on the table, so it can replace the row
+	 * between the time the planner saw this kind built and the time we get
+	 * here.  Report that there is no data, as above.
+	 */
 	if (isnull)
-		elog(ERROR,
-			 "requested statistics kind \"%c\" is not yet built for statistics object %u",
-			 STATS_EXT_MCV, mvoid);
+	{
+		ReleaseSysCache(htup);
+		return NULL;
+	}
 
 	result = statext_mcv_deserialize(DatumGetByteaP(mcvlist));
 

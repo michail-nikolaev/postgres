@@ -1,0 +1,42 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_park_at_end s1_mcv s2_widen s2_resume_end
+step s1_park_at_end: 
+	SELECT injection_points_set_local();
+	SELECT injection_points_attach('get-relation-statistics-end', 'wait', 'w');
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step s1_mcv: SELECT count(*) FROM w WHERE x = '4' AND y = '4'; <waiting ...>
+step s2_widen: 
+	UPDATE w SET x = repeat('a', 2000) || x, y = repeat('b', 2000) || y;
+	ANALYZE w;
+
+step s2_resume_end: 
+	SELECT injection_points_detach('get-relation-statistics-end');
+	SELECT injection_points_wakeup('get-relation-statistics-end');
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step s1_mcv: <... completed>
+count
+-----
+    0
+(1 row)
+

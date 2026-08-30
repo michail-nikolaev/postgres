@@ -158,6 +158,12 @@ statext_ndistinct_load(Oid mvoid, bool inh)
 
 	ndist = SysCacheGetAttr(STATEXTDATASTXOID, htup,
 							Anum_pg_statistic_ext_data_stxdndistinct, &isnull);
+
+	/*
+	 * Unlike an MCV list, this kind is always stored once the statistics
+	 * object asks for it, so a row that lacks it is a real inconsistency
+	 * rather than a concurrent ANALYZE.
+	 */
 	if (isnull)
 		elog(ERROR,
 			 "requested statistics kind \"%c\" is not yet built for statistics object %u",

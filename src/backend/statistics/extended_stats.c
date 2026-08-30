@@ -2461,6 +2461,12 @@ statext_expressions_load(Oid stxoid, bool inh, int idx)
 
 	value = SysCacheGetAttr(STATEXTDATASTXOID, htup,
 							Anum_pg_statistic_ext_data_stxdexpr, &isnull);
+
+	/*
+	 * Unlike an MCV list, this kind is always stored once the statistics
+	 * object asks for it, so a row that lacks it is a real inconsistency
+	 * rather than a concurrent ANALYZE.
+	 */
 	if (isnull)
 		elog(ERROR,
 			 "requested statistics kind \"%c\" is not yet built for statistics object %u",
