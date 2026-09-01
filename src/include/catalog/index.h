@@ -133,6 +133,8 @@ extern IndexInfo *BuildIndexInfo(Relation index);
 
 extern IndexInfo *BuildDummyIndexInfo(Relation index);
 
+extern bool IsIndexCompatibleAsArbiter(Relation indexRel1,
+									   Relation indexRel2);
 extern bool CompareIndexInfo(const IndexInfo *info1, const IndexInfo *info2,
 							 const Oid *collations1, const Oid *collations2,
 							 const Oid *opfamilies1, const Oid *opfamilies2,
