@@ -177,9 +177,17 @@ should_refetch_tuple(TM_Result res, TM_FailureData *tmfd)
  *
  * If a matching tuple is found, lock it with lockmode, fill the slot with its
  * contents, and return true.  Return false otherwise.
+ *
+ * 'isIdxSafeToSkipDuplicates' says how the scan's matches are to be treated:
+ * if true, the index determines the tuple all by itself and the first match
+ * is taken; if false, every match is compared against 'searchslot', which must
+ * then carry a complete row -- the remote relation has REPLICA IDENTITY FULL.
+ * The caller decides; deriving it here would let concurrent DDL flip it after
+ * the index was chosen.
  */
 bool
 RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
+							 bool isIdxSafeToSkipDuplicates,
 							 LockTupleMode lockmode,
 							 TupleTableSlot *searchslot,
 							 TupleTableSlot *outslot)
@@ -192,12 +200,9 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 	Relation	idxrel;
 	bool		found;
 	TypeCacheEntry **eq = NULL;
-	bool		isIdxSafeToSkipDuplicates;
 
 	/* Open the index. */
 	idxrel = index_open(idxoid, RowExclusiveLock);
-
-	isIdxSafeToSkipDuplicates = (GetRelationIdentityOrPK(rel) == idxoid);
 
 	InitDirtySnapshot(snap);
 
@@ -629,9 +634,12 @@ RelationFindDeletedTupleInfoSeq(Relation rel, TupleTableSlot *searchslot,
 /*
  * Similar to RelationFindDeletedTupleInfoSeq() but using index scan to locate
  * the deleted tuple.
+ *
+ * 'isIdxSafeToSkipDuplicates' works as in RelationFindReplTupleByIndex().
  */
 bool
 RelationFindDeletedTupleInfoByIndex(Relation rel, Oid idxoid,
+									bool isIdxSafeToSkipDuplicates,
 									TupleTableSlot *searchslot,
 									TransactionId oldestxmin,
 									TransactionId *delete_xid,
@@ -644,7 +652,6 @@ RelationFindDeletedTupleInfoByIndex(Relation rel, Oid idxoid,
 	IndexScanDesc scan;
 	TupleTableSlot *scanslot;
 	TypeCacheEntry **eq = NULL;
-	bool		isIdxSafeToSkipDuplicates;
 	TupleDesc	desc PG_USED_FOR_ASSERTS_ONLY = RelationGetDescr(rel);
 
 	Assert(equalTupleDescs(desc, searchslot->tts_tupleDescriptor));
@@ -653,8 +660,6 @@ RelationFindDeletedTupleInfoByIndex(Relation rel, Oid idxoid,
 	*delete_xid = InvalidTransactionId;
 	*delete_time = 0;
 	*delete_origin = InvalidReplOriginId;
-
-	isIdxSafeToSkipDuplicates = (GetRelationIdentityOrPK(rel) == idxoid);
 
 	scanslot = table_slot_create(rel, NULL);
 
