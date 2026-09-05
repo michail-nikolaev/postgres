@@ -1087,10 +1087,27 @@ GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot)
 		Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tuple);
 		Oid			relid = relForm->oid;
 
-		if (is_publishable_class(relid, relForm) &&
-			!(relForm->relispartition && pubviaroot) &&
-			!list_member_oid(exceptlist, relid))
-			result = lappend_oid(result, relid);
+		if (!is_publishable_class(relid, relForm) ||
+			list_member_oid(exceptlist, relid))
+			continue;
+
+		/*
+		 * With pubviaroot, skip partitions in favor of their ancestors.  A
+		 * partition pending concurrent detach has no ancestors, even though
+		 * relispartition is still set, and must be published separately.
+		 */
+		if (relForm->relispartition && pubviaroot)
+		{
+			List	   *ancestors = get_partition_ancestors(relid);
+
+			if (ancestors != NIL)
+			{
+				list_free(ancestors);
+				continue;
+			}
+		}
+
+		result = lappend_oid(result, relid);
 	}
 
 	table_endscan(scan);
@@ -1109,10 +1126,23 @@ GetAllPublicationRelations(Oid pubid, char relkind, bool pubviaroot)
 			Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tuple);
 			Oid			relid = relForm->oid;
 
-			if (is_publishable_class(relid, relForm) &&
-				!relForm->relispartition &&
-				!list_member_oid(exceptlist, relid))
-				result = lappend_oid(result, relid);
+			if (!is_publishable_class(relid, relForm) ||
+				list_member_oid(exceptlist, relid))
+				continue;
+
+			/* A partitioned table can also be pending concurrent detach. */
+			if (relForm->relispartition)
+			{
+				List	   *ancestors = get_partition_ancestors(relid);
+
+				if (ancestors != NIL)
+				{
+					list_free(ancestors);
+					continue;
+				}
+			}
+
+			result = lappend_oid(result, relid);
 		}
 
 		table_endscan(scan);
@@ -1349,7 +1379,11 @@ is_table_publishable_in_publication(Oid relid, Publication *pub)
 	relispartition = get_rel_relispartition(relid);
 
 	if (relispartition)
+	{
 		ancestors = get_partition_ancestors(relid);
+		/* Publish a partition pending concurrent detach separately. */
+		relispartition = (ancestors != NIL);
+	}
 
 	if (pub->alltables)
 	{
