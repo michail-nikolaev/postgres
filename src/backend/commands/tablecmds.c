@@ -21758,6 +21758,29 @@ ATExecDetachPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		/* Invalidate relcache entries for the parent -- must be before close */
 		CacheInvalidateRelcache(rel);
 
+		/*
+		 * Invalidate the partition too, and its descendants if it is itself
+		 * partitioned.  Nothing in their pg_class rows changes yet, but their
+		 * ancestors do: get_partition_ancestors() stops at a partition
+		 * pending detach, so anything derived from the ancestors, like the
+		 * publication descriptor, is stale from this commit on.  Lock the
+		 * descendants with the same mode the partition was locked with.
+		 */
+		CacheInvalidateRelcache(partRel);
+		if (partRel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			List	   *children;
+			ListCell   *cell;
+
+			children = find_all_inheritors(RelationGetRelid(partRel),
+										   ShareUpdateExclusiveLock, NULL);
+			foreach(cell, children)
+			{
+				if (lfirst_oid(cell) != RelationGetRelid(partRel))
+					CacheInvalidateRelcacheByRelid(lfirst_oid(cell));
+			}
+		}
+
 		table_close(partRel, NoLock);
 		table_close(rel, NoLock);
 		tab->rel = NULL;
